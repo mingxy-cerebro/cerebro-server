@@ -21,7 +21,7 @@ use crate::domain::relation::MemoryRelation;
 use crate::domain::space::Provenance;
 use crate::domain::types::{MemoryState, MemoryType, Tier};
 
-const VECTOR_DIM: i32 = 1024;
+pub const VECTOR_DIM: i32 = 1024;
 const TABLE_NAME: &str = "memories";
 
 pub struct ListFilter {
@@ -68,6 +68,12 @@ pub struct LanceStore {
     table_name: String,
     session_recalls_table_name: String,
     fts_indexed: AtomicBool,
+}
+
+impl LanceStore {
+    pub fn db(&self) -> &Connection {
+        &self.db
+    }
 }
 
 impl LanceStore {
@@ -220,6 +226,8 @@ impl LanceStore {
             Field::new("version", DataType::UInt64, true),
             Field::new("provenance_source_id", DataType::Utf8, true),
             Field::new("tier_history", DataType::Utf8, true),
+            Field::new("cluster_id", DataType::Utf8, true),
+            Field::new("is_cluster_anchor", DataType::Boolean, false),
         ]))
     }
 
@@ -459,6 +467,8 @@ impl LanceStore {
                 Arc::new(UInt64Array::from(vec![memory.version])),
                 Arc::new(StringArray::from(vec![provenance_source_id])),
                 Arc::new(StringArray::from(vec![option_str(&memory.tier_history)])),
+                Arc::new(StringArray::from(vec![option_str(&memory.cluster_id)])),
+                Arc::new(arrow_array::BooleanArray::from(vec![memory.is_cluster_anchor])),
             ],
         )
         .map_err(|e| OmemError::Storage(format!("failed to build RecordBatch: {e}")))
@@ -538,6 +548,23 @@ impl LanceStore {
             Ok(arr.value(row))
         };
 
+        let get_bool_or = |name: &str, default: bool| -> bool {
+            batch
+                .column_by_name(name)
+                .and_then(|col| {
+                    col.as_any()
+                        .downcast_ref::<arrow_array::BooleanArray>()
+                        .map(|a| {
+                            if a.is_null(row) {
+                                default
+                            } else {
+                                a.value(row)
+                            }
+                        })
+                })
+                .unwrap_or(default)
+        };
+
         let tags_json = get_str("tags")?;
         let tags: Vec<String> = serde_json::from_str(&tags_json)
             .map_err(|e| OmemError::Storage(format!("failed to parse tags: {e}")))?;
@@ -608,6 +635,8 @@ impl LanceStore {
             provenance,
             version,
             tier_history: get_opt_str("tier_history")?,
+            cluster_id: get_opt_str("cluster_id")?,
+            is_cluster_anchor: get_bool_or("is_cluster_anchor", false),
         })
     }
 
@@ -738,6 +767,24 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("re-insert for update failed: {e}")))?;
         Ok(())
+    }
+
+    pub async fn update_memory_cluster_id(
+        &self,
+        memory_id: &str,
+        cluster_id: Option<&str>,
+        is_anchor: bool,
+    ) -> Result<(), OmemError> {
+        let memory = self
+            .get_by_id(memory_id)
+            .await?
+            .ok_or_else(|| OmemError::NotFound(format!("memory {memory_id}")))?;
+
+        let mut updated = memory;
+        updated.cluster_id = cluster_id.map(|s| s.to_string());
+        updated.is_cluster_anchor = is_anchor;
+        updated.updated_at = chrono::Utc::now().to_rfc3339();
+        self.update(&updated, None).await
     }
 
     pub async fn soft_delete(&self, id: &str) -> Result<(), OmemError> {

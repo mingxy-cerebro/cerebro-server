@@ -5,6 +5,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use omem_server::api::{build_router, AppState};
 use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
+use omem_server::cluster::cluster_store::ClusterStore;
+use omem_server::cluster::scheduler::ClusteringScheduler;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
 use omem_server::llm::{create_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
@@ -78,6 +80,13 @@ async fn main() {
             .expect("failed to create recall LLM service"),
     );
 
+    let cluster_store = Arc::new(
+        ClusterStore::new(&lancedb::connect(&base_uri).execute().await.expect("db connect")
+        )
+        .await
+        .expect("failed to create cluster store")
+    );
+
     let state = Arc::new(AppState {
         store_manager,
         tenant_store,
@@ -85,6 +94,7 @@ async fn main() {
         embed,
         llm,
         recall_llm,
+        cluster_store,
         config: config.clone(),
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -94,16 +104,34 @@ async fn main() {
 
     {
         let scheduler_interval = std::time::Duration::from_secs(config.scheduler_interval_secs);
-        let scheduler = Arc::new(LifecycleScheduler::new(
+        
+        let lifecycle_scheduler = Arc::new(LifecycleScheduler::new(
             state.store_manager.clone(),
             scheduler_interval,
             config.scheduler_run_on_start,
         ));
-        tokio::spawn(async move { scheduler.run().await });
+        tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(
             interval_secs = config.scheduler_interval_secs,
             run_on_start = config.scheduler_run_on_start,
             "lifecycle_scheduler_started"
+        );
+
+        let clustering_scheduler = Arc::new(
+            ClusteringScheduler::new(
+                state.store_manager.clone(),
+                state.cluster_store.clone(),
+                state.embed.clone(),
+                scheduler_interval,
+                config.scheduler_run_on_start,
+            )
+            .with_llm(state.llm.clone())
+        );
+        tokio::spawn(async move { clustering_scheduler.run().await });
+        tracing::info!(
+            interval_secs = config.scheduler_interval_secs,
+            run_on_start = config.scheduler_run_on_start,
+            "clustering_scheduler_started"
         );
     }
 

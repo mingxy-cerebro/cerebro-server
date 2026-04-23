@@ -198,7 +198,7 @@ pub async fn create_memory(
         session_store.init_table().await?;
 
         let ingest_pipeline =
-            IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone());
+            IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone()).await?;
 
         let response = ingest_pipeline.ingest(request).await?;
         return Ok((StatusCode::ACCEPTED, Json(serde_json::json!(response))).into_response());

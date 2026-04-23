@@ -38,6 +38,20 @@ export interface ListResponse {
   offset: number;
 }
 
+export interface ClusterSummary {
+  cluster_id: string;
+  title: string;
+  summary: string;
+  member_count: number;
+  relevance_score: number;
+  key_memories: MemoryDto[];
+}
+
+export interface ClusteredRecallResult {
+  cluster_summaries: ClusterSummary[];
+  standalone_memories: MemoryDto[];
+}
+
 export interface ShouldRecallResponse {
   should_recall: boolean;
   query?: string;
@@ -45,6 +59,7 @@ export interface ShouldRecallResponse {
   similarity_score?: number;
   confidence?: number;
   memories?: SearchResult[];
+  clustered?: ClusteredRecallResult;
 }
 
 export interface SessionRecallRecord {

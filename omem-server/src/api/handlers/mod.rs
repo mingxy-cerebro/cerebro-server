@@ -1,3 +1,4 @@
+pub mod clusters;
 pub mod files;
 pub mod github;
 pub mod imports;
@@ -40,4 +41,7 @@ pub use stats::{
 pub use tenant::{create_tenant, get_tenant};
 pub use vault::{
     delete_vault_password, get_vault_status, set_vault_password, verify_vault_password,
+};
+pub use clusters::{
+    get_clustering_job, get_clustering_stats, list_clustering_jobs, trigger_clustering,
 };

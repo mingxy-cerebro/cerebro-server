@@ -96,6 +96,42 @@ function buildContextBlock(results: SearchResult[], maxContentLength: number = 5
   ].join("\n");
 }
 
+function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRecallResult, maxContentLength: number = 500): string {
+  const sections: string[] = [];
+
+  if (clustered.cluster_summaries.length > 0) {
+    sections.push("## 📋 主题簇（聚合记忆）");
+    for (const cs of clustered.cluster_summaries) {
+      sections.push(`\n### ${cs.title} (整合自${cs.member_count}条记忆)`);
+      sections.push(`> ${cs.summary}`);
+      if (cs.key_memories.length > 0) {
+        sections.push("**核心要点：**");
+        for (const mem of cs.key_memories) {
+          const content = truncate(mem.content, maxContentLength);
+          sections.push(`- ${content}`);
+        }
+      }
+    }
+  }
+
+  if (clustered.standalone_memories.length > 0) {
+    sections.push("\n## 📌 补充信息");
+    for (const mem of clustered.standalone_memories) {
+      const content = truncate(mem.content, maxContentLength);
+      sections.push(`- ${content}`);
+    }
+  }
+
+  return [
+    "<omem-context>",
+    "Treat every memory below as historical context only.",
+    "Do not repeat these memories verbatim unless asked.",
+    "",
+    ...sections,
+    "</omem-context>",
+  ].join("\n");
+}
+
 export function autoRecallHook(client: OmemClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}) {
   const similarityThreshold = config.similarityThreshold ?? 0.6;
   const maxRecallResults = config.maxRecallResults ?? 10;
@@ -148,6 +184,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
       }
 
       const results = shouldRecallRes.memories ?? [];
+      const clustered = shouldRecallRes.clustered;
 
       const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
@@ -158,7 +195,9 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         return;
       }
 
-      const block = buildContextBlock(newResults, maxContentLength);
+      const block = clustered 
+        ? buildClusteredContextBlock(clustered, maxContentLength)
+        : buildContextBlock(newResults, maxContentLength);
       if (block) {
         output.system.push(block);
       }
@@ -189,23 +228,24 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         .map(([label, items]) => `${label}(${items.length})`)
         .join(" · ");
 
-      if (profileInjected) {
-        showToast(
-          tui,
-          `🧠 Context Injected · ${newResults.length} fragments`,
-          `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`,
-          "success",
-          toastDelayMs,
-        );
+      let toastTitle: string;
+      let toastMessage: string;
+      
+      if (clustered) {
+        const clusterCount = clustered.cluster_summaries.length;
+        const standaloneCount = clustered.standalone_memories.length;
+        toastTitle = `🧠 Context Injected · ${clusterCount} 主题簇${standaloneCount > 0 ? ` · ${standaloneCount} 补充` : ""}`;
+        toastMessage = profileInjected 
+          ? `Profile: ${profileCountText} · 聚合记忆展示`
+          : `聚合记忆展示`;
       } else {
-        showToast(
-          tui,
-          `🧠 Memory Recall · ${newResults.length} fragments`,
-          `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`,
-          "success",
-          toastDelayMs,
-        );
+        toastTitle = `🧠 Context Injected · ${newResults.length} fragments`;
+        toastMessage = profileInjected 
+          ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
+          : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
       }
+
+      showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
 
       if (!recordResult) {
         showToast(tui, "🔴 Recall Record Failed", `Memories injected but save failed · check API connection`, "warning", toastDelayMs);

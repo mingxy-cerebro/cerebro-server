@@ -77,6 +77,8 @@ axum-extra = { version = "0.10", features = ["multipart"] }
 # Temp files (used by multimodal processors at runtime)
 tempfile = "3"
 
+dashmap = "6"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

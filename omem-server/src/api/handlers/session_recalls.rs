@@ -52,6 +52,8 @@ pub struct ShouldRecallResponse {
     pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clustered: Option<crate::cluster::aggregator::ClusteredResult>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +121,7 @@ pub async fn should_recall(
                         memories: None,
                         confidence: None,
                         similarity_score: Some(sim),
+                        clustered: None,
                     }));
                 }
                 Some(sim)
@@ -138,7 +141,7 @@ pub async fn should_recall(
         body.query_text
     );
 
-    let (llm_yes, llm_reason) = match state.recall_llm.complete_text(system, &user).await {
+    let (llm_yes, _llm_reason) = match state.recall_llm.complete_text(system, &user).await {
         Ok(llm_response) => {
             let trimmed = llm_response.trim().to_lowercase();
             let yes = trimmed.starts_with("yes");
@@ -275,6 +278,39 @@ pub async fn should_recall(
 
     tracing::info!(query = %body.query_text, result_count = memories.len(), should_recall = !memories.is_empty(), "should_recall_result");
 
+    let clustered = if !memories.is_empty() {
+        let cluster_store: Option<std::sync::Arc<crate::cluster::cluster_store::ClusterStore>> = 
+            match crate::cluster::cluster_store::ClusterStore::new(store.db()).await {
+                Ok(cs) => Some(std::sync::Arc::new(cs)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "session_recall_cluster_store_init_failed");
+                    None
+                }
+            };
+        
+        if let Some(cs) = cluster_store {
+            let aggregator = crate::cluster::aggregator::ClusterAggregator::new(cs);
+            match aggregator.aggregate(memories.iter().map(|m| m.memory.clone()).collect()).await {
+                Ok(clustered) => {
+                    tracing::info!(
+                        cluster_count = clustered.cluster_summaries.len(),
+                        standalone_count = clustered.standalone_memories.len(),
+                        "session_recall_aggregated"
+                    );
+                    Some(clustered)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "session_recall_aggregation_failed");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if memories.is_empty() {
         return Ok(Json(ShouldRecallResponse {
             should_recall: false,
@@ -282,6 +318,7 @@ pub async fn should_recall(
             memories: None,
             confidence: None,
             similarity_score,
+            clustered: None,
         }));
     }
 
@@ -317,6 +354,7 @@ pub async fn should_recall(
         memories: Some(memories),
         confidence: Some(confidence),
         similarity_score,
+        clustered: clustered,
     }))
 }
 

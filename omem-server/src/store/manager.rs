@@ -42,6 +42,8 @@ impl StoreManager {
         }
     }
 
+
+
     #[cfg(test)]
     pub fn with_max_cached(base_uri: &str, max_cached: usize) -> Self {
         Self {

@@ -21,6 +21,28 @@ pub struct OmemConfig {
     pub recall_llm_base_url: String,
     pub scheduler_interval_secs: u64,
     pub scheduler_run_on_start: bool,
+    
+    // Clustering configuration
+    /// Minimum similarity score (0.0-1.0) for a memory to be considered for cluster assignment.
+    /// Memories with similarity below this threshold will create new clusters.
+    /// Default: 0.75
+    pub cluster_similarity_threshold: f32,
+    
+    /// Similarity score (0.0-1.0) above which memories are automatically assigned to existing clusters
+    /// without LLM judgment. Higher values = more conservative assignments.
+    /// Default: 0.90
+    pub cluster_auto_merge_threshold: f32,
+    
+    /// Number of candidate clusters to search for when assigning a memory.
+    /// Higher values = more thorough search but slower.
+    /// Default: 5
+    pub cluster_candidate_count: usize,
+    
+    /// Whether to use LLM for judging cluster assignments in the ambiguous range
+    /// (between similarity_threshold and auto_merge_threshold).
+    /// Set to "false" to disable LLM judgment and use similarity scores only.
+    /// Default: true
+    pub cluster_llm_judge_enabled: bool,
 }
 
 impl Default for OmemConfig {
@@ -45,6 +67,10 @@ impl Default for OmemConfig {
             recall_llm_base_url: String::new(),
             scheduler_interval_secs: 21600, // 6h
             scheduler_run_on_start: true,
+            cluster_similarity_threshold: 0.75,
+            cluster_auto_merge_threshold: 0.90,
+            cluster_candidate_count: 5,
+            cluster_llm_judge_enabled: true,
         }
     }
 }
@@ -83,6 +109,22 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.scheduler_run_on_start),
+            cluster_similarity_threshold: env::var("OMEM_CLUSTER_SIMILARITY_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.cluster_similarity_threshold),
+            cluster_auto_merge_threshold: env::var("OMEM_CLUSTER_AUTO_MERGE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.cluster_auto_merge_threshold),
+            cluster_candidate_count: env::var("OMEM_CLUSTER_CANDIDATE_COUNT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.cluster_candidate_count),
+            cluster_llm_judge_enabled: env::var("OMEM_CLUSTER_LLM_JUDGE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.cluster_llm_judge_enabled),
         }
     }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::domain::error::OmemError;
+use crate::domain::memory::Memory;
 use crate::domain::types::MemoryState;
 use crate::lifecycle::decay::parse_datetime;
 use crate::store::lancedb::LanceStore;
@@ -33,47 +34,50 @@ impl AutoForgetter {
         None
     }
 
-    pub async fn cleanup_expired(&self) -> Result<usize, OmemError> {
+    pub async fn cleanup_expired(&self) -> Result<Vec<Memory>, OmemError> {
         let memories = self.store.list(10000, 0).await?;
         let now = chrono::Utc::now();
-        let mut deleted_count = 0;
+        let mut deleted = Vec::new();
 
         for memory in memories {
             if let Some(ttl) = Self::detect_ttl(&memory.content) {
                 if let Some(created) = parse_datetime(&memory.created_at) {
                     if created + ttl < now {
                         self.store.soft_delete(&memory.id).await?;
-                        deleted_count += 1;
+                        deleted.push(memory);
                     }
                 }
             }
         }
 
-        Ok(deleted_count)
+        Ok(deleted)
     }
 
-    pub async fn archive_superseded(&self, max_age_days: u32) -> Result<usize, OmemError> {
+    pub async fn archive_superseded(
+        &self,
+        max_age_days: u32,
+    ) -> Result<Vec<Memory>, OmemError> {
         let memories = self.store.list(10000, 0).await?;
         let now = chrono::Utc::now();
         let max_age = chrono::TimeDelta::try_days(max_age_days as i64)
             .unwrap_or_else(chrono::TimeDelta::zero);
-        let mut archived_count = 0;
+        let mut archived = Vec::new();
 
         for memory in memories {
             if memory.superseded_by.is_some() {
                 if let Some(created) = parse_datetime(&memory.created_at) {
                     if now - created > max_age {
-                        let mut archived = memory;
-                        archived.state = MemoryState::Archived;
-                        archived.updated_at = now.to_rfc3339();
-                        self.store.update(&archived, None).await?;
-                        archived_count += 1;
+                        let mut m = memory.clone();
+                        m.state = MemoryState::Archived;
+                        m.updated_at = now.to_rfc3339();
+                        self.store.update(&m, None).await?;
+                        archived.push(m);
                     }
                 }
             }
         }
 
-        Ok(archived_count)
+        Ok(archived)
     }
 }
 

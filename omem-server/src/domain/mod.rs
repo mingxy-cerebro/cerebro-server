@@ -1,4 +1,5 @@
 pub mod category;
+pub mod cluster;
 pub mod error;
 pub mod memory;
 pub mod profile;

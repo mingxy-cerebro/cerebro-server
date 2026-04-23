@@ -106,6 +106,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/session-recalls/{id}",
             get(handlers::get_session_recall).delete(handlers::delete_session_recall),
         )
+        .route("/v1/clusters/trigger", post(handlers::trigger_clustering))
+        .route("/v1/clusters/jobs", get(handlers::list_clustering_jobs))
+        .route("/v1/clusters/jobs/{id}", get(handlers::get_clustering_job))
+        .route("/v1/clusters/stats", get(handlers::get_clustering_stats))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

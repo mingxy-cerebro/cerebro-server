@@ -41,6 +41,10 @@ pub struct Memory {
     pub version: Option<u64>,
     #[serde(default)]
     pub tier_history: Option<String>,
+    #[serde(default)]
+    pub cluster_id: Option<String>,
+    #[serde(default)]
+    pub is_cluster_anchor: bool,
 }
 
 impl Memory {
@@ -83,6 +87,8 @@ impl Memory {
             provenance: None,
             version: Some(1),
             tier_history: None,
+            cluster_id: None,
+            is_cluster_anchor: false,
         }
     }
 

@@ -5,7 +5,6 @@ use chrono::Utc;
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::domain::profile::UserProfile;
-use crate::domain::types::MemoryState;
 use crate::lifecycle::decay::parse_datetime;
 use crate::retrieve::SearchResult;
 use crate::store::lancedb::{LanceStore, ListFilter};
