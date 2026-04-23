@@ -198,7 +198,7 @@ pub async fn create_memory(
         session_store.init_table().await?;
 
         let ingest_pipeline =
-            IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone()).await?;
+            IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone(), state.cluster_store.clone()).await?;
 
         let response = ingest_pipeline.ingest(request).await?;
         return Ok((StatusCode::ACCEPTED, Json(serde_json::json!(response))).into_response());
@@ -1067,4 +1067,51 @@ pub async fn delete_tier_history_entry(
     store.update(&mem, vector.as_deref()).await?;
 
     Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+#[derive(Serialize)]
+pub struct ReEmbedResponseDto {
+    pub re_embedded: usize,
+    pub skipped_nonzero: usize,
+    pub errors: usize,
+}
+
+pub async fn reembed_memories(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<ReEmbedResponseDto>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    let memories = store.list_all_active().await?;
+    let mut re_embedded = 0usize;
+    let mut skipped_nonzero = 0usize;
+    let mut errors = 0usize;
+
+    for memory in &memories {
+        let existing = store.get_vector_by_id(&memory.id).await?;
+        let is_zero = existing.as_ref().map_or(true, |v| v.iter().all(|&x| x == 0.0));
+        if !is_zero {
+            skipped_nonzero += 1;
+            continue;
+        }
+
+        match state.embed.embed(&[memory.content.clone()]).await {
+            Ok(vectors) => {
+                if let Some(vec) = vectors.into_iter().next() {
+                    match store.update(memory, Some(&vec)).await {
+                        Ok(_) => re_embedded += 1,
+                        Err(_) => errors += 1,
+                    }
+                } else {
+                    errors += 1;
+                }
+            }
+            Err(_) => errors += 1,
+        }
+    }
+
+    Ok(Json(ReEmbedResponseDto { re_embedded, skipped_nonzero, errors }))
 }

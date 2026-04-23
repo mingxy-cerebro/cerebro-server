@@ -18,8 +18,8 @@ pub use imports::{
 };
 pub use memory::{
     batch_delete, batch_get_memories, create_memory, delete_all_memories, delete_memory,
-    delete_tier_history_entry, get_memory, get_tier_changes, list_memories, search_memories,
-    update_memory,
+    delete_tier_history_entry, get_memory, get_tier_changes, list_memories, reembed_memories,
+    search_memories, update_memory,
 };
 pub use profile::get_profile;
 pub use session_recalls::{
@@ -43,5 +43,6 @@ pub use vault::{
     delete_vault_password, get_vault_status, set_vault_password, verify_vault_password,
 };
 pub use clusters::{
-    get_clustering_job, get_clustering_stats, list_clustering_jobs, trigger_clustering,
+    get_clustering_job, get_clustering_stats, get_cluster, list_clustering_jobs, list_clusters,
+    trigger_clustering,
 };

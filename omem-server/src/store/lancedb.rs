@@ -227,7 +227,7 @@ impl LanceStore {
             Field::new("provenance_source_id", DataType::Utf8, true),
             Field::new("tier_history", DataType::Utf8, true),
             Field::new("cluster_id", DataType::Utf8, true),
-            Field::new("is_cluster_anchor", DataType::Boolean, false),
+            Field::new("is_cluster_anchor", DataType::Boolean, true),
         ]))
     }
 
@@ -753,13 +753,20 @@ impl LanceStore {
         mem.version = Some(mem.version.unwrap_or(0) + 1);
         mem.updated_at = chrono::Utc::now().to_rfc3339();
 
+        // Preserve existing vector when none is explicitly provided.
+        // Without this, update(&mem, None) would overwrite the stored vector with zeros.
+        let preserved: Option<Vec<f32>> = match vector {
+            Some(v) => Some(v.to_vec()),
+            None => self.get_vector_by_id(&mem.id).await?,
+        };
+
         let table = self.open_table().await?;
         table
             .delete(&format!("id = '{}'", escape_sql(&mem.id)))
             .await
             .map_err(|e| OmemError::Storage(format!("delete for update failed: {e}")))?;
 
-        let batch = Self::memory_to_batch(&mem, vector)?;
+        let batch = Self::memory_to_batch(&mem, preserved.as_deref())?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -814,6 +821,25 @@ impl LanceStore {
 
         let all = Self::batch_to_memories(&batches)?;
         Ok(all.into_iter().skip(offset).take(limit).collect())
+    }
+
+    pub async fn list_by_cluster_id(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Vec<Memory>, OmemError> {
+        let table = self.open_table().await?;
+        let safe_cid = cluster_id.replace("'", "''");
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(format!("cluster_id = '{}' AND state != 'deleted'", safe_cid))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("list_by_cluster_id query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        Self::batch_to_memories(&batches)
     }
 
     pub async fn vector_search(
@@ -927,8 +953,6 @@ impl LanceStore {
     }
 
     pub fn build_visibility_filter(&self, agent_id: &str, accessible_spaces: &[String]) -> String {
-        let mut conditions = vec!["state != 'deleted'".to_string()];
-
         let mut vis_conditions = vec!["visibility = 'global'".to_string()];
 
         if !agent_id.is_empty() {
@@ -945,8 +969,7 @@ impl LanceStore {
             ));
         }
 
-        conditions.push(format!("({})", vis_conditions.join(" OR ")));
-        conditions.join(" AND ")
+        vis_conditions.join(" OR ")
     }
 
     pub async fn create_vector_index(&self) -> Result<(), OmemError> {
@@ -967,15 +990,26 @@ impl LanceStore {
 
     pub async fn create_fts_index(&self) -> Result<(), OmemError> {
         let table = self.open_table().await?;
+
+        // Use ngram tokenizer for better CJK support.
+        // simple tokenizer splits on whitespace/punctuation only — useless for Chinese.
+        // ngram(2,4) generates all 2-4 char substrings, enabling substring matching for CJK.
+        let fts_params = FtsIndexBuilder::default()
+            .base_tokenizer("ngram".to_string())
+            .ngram_min_length(2)
+            .ngram_max_length(4)
+            .stem(false)
+            .remove_stop_words(false);
+
         table
-            .create_index(&["content"], Index::FTS(FtsIndexBuilder::default()))
+            .create_index(&["content"], Index::FTS(fts_params.clone()))
             .execute()
             .await
             .map_err(|e| {
                 OmemError::Storage(format!("failed to create FTS index on content: {e}"))
             })?;
         table
-            .create_index(&["l0_abstract"], Index::FTS(FtsIndexBuilder::default()))
+            .create_index(&["l0_abstract"], Index::FTS(fts_params))
             .execute()
             .await
             .map_err(|e| {

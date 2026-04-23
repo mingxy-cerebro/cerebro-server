@@ -188,10 +188,16 @@ impl RetrievalPipeline {
         let stage_start = Instant::now();
         let scope = request.scope_filter.as_deref();
 
+        let visibility_filter = request
+            .agent_id_filter
+            .as_deref()
+            .map(|agent_id| self.store.build_visibility_filter(agent_id, &[]));
+        let vis_ref = visibility_filter.as_deref();
+
         let vector_fut = async {
             if let Some(ref qv) = request.query_vector {
                 self.store
-                    .vector_search(qv, fetch_limit, 0.0, scope, None, None)
+                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None)
                     .await
             } else {
                 Ok(Vec::new())
@@ -200,7 +206,7 @@ impl RetrievalPipeline {
 
         let bm25_fut = async {
             self.store
-                .fts_search(&request.query, fetch_limit, scope, None, None)
+                .fts_search(&request.query, fetch_limit, scope, vis_ref, None)
                 .await
         };
 
@@ -303,9 +309,8 @@ impl RetrievalPipeline {
     /// Normalize RRF scores to [0, 1] range so downstream thresholds (min_score, hard_cutoff) work correctly.
     /// RRF raw scores are tiny (max ~0.033 for K=60 with 2 legs), but thresholds expect [0, 1].
     /// - Multiple results: min-max normalization (best=1.0, worst=0.0)
-    /// - Single result: scale by RRF_SCALE (40.0) and clamp to [0, 1]
     fn stage_rrf_normalize(mut entries: Vec<FusionEntry>) -> (Vec<FusionEntry>, StageTrace) {
-        const RRF_SCALE: f32 = 40.0;
+        const RRF_SCALE: f32 = 120.0;
         let stage_start = Instant::now();
         let input_count = entries.len();
 
