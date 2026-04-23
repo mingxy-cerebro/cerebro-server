@@ -1,0 +1,30 @@
+{
+    "id": "ourmem",
+    "name": "ourmem Memory",
+    "description": "Shared persistent memory for AI agents — self-deployed Cerebro server. Hybrid search, Space sharing, Smart Ingest.",
+    "kind": "memory",
+    "configSchema": {
+        "type": "object",
+        "properties": {
+            "apiUrl": {
+                "type": "string",
+                "description": "Cerebro API server URL"
+            },
+            "apiKey": {
+                "type": "string",
+                "description": "Cerebro API key (secret — do not share)"
+            }
+        }
+    },
+    "uiHints": {
+        "apiUrl": {
+            "label": "Server URL",
+            "placeholder": "http://localhost:8080"
+        },
+        "apiKey": {
+            "label": "API Key",
+            "placeholder": "key...",
+            "sensitive": true
+        }
+    }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@ourmem/ourmem",
+  "version": "0.3.2",
+  "description": "ourmem persistent memory plugin for OpenClaw — Memory slot + ContextEngine with 7 lifecycle hooks",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "openclaw": {
+    "extensions": ["./src/index.ts"]
+  },
+  "keywords": ["openclaw", "memory", "ai-agent", "persistent-memory", "ourmem", "context-engine"],
+  "author": "ourmem",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mingxy-cerebro/cerebro-server.git",
+    "directory": "plugins/openclaw"
+  }
+}

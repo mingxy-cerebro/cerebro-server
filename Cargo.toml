@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["omem-server"]
+
+[workspace.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+[profile.release]
+strip = "debuginfo"
+
+[workspace.metadata.musl-note]
+# aws-lc-sys crashes on static musl due to dlopen(NULL) in __init_array.
+# We force ring via rustls feature flags. If aws-lc-sys still appears in
+# Cargo.lock, the binary will SEGV on musl. Verify with:
+#   cargo tree -i aws-lc-sys --target x86_64-unknown-linux-musl

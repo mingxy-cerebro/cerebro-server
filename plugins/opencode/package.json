@@ -1,0 +1,32 @@
+{
+  "name": "@mingxy/omem",
+  "version": "1.3.1",
+  "description": "ourmem persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools",
+  "type": "module",
+  "main": "src/index.ts",
+  "oc-plugin": [
+    "server"
+  ],
+  "keywords": [
+    "opencode",
+    "memory",
+    "ai-agent",
+    "persistent-memory",
+    "ourmem"
+  ],
+  "author": "ourmem",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mingxy-cerebro/cerebro-server.git",
+    "directory": "plugins/opencode"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.0.162"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.7.0"
+  }
+}

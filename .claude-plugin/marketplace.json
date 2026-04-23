@@ -1,0 +1,21 @@
+{
+  "name": "cerebro",
+  "owner": {
+    "name": "mingxy-cerebro",
+    "email": "hi@cerebro.dev"
+  },
+  "metadata": {
+    "description": "Persistent memory plugins for AI coding agents"
+  },
+  "plugins": [
+    {
+      "name": "cerebro",
+      "source": "./plugins/claude-code",
+      "description": "Persistent memory for Claude Code — memories survive across sessions, projects, and machines",
+      "version": "0.2.1",
+      "category": "memory",
+      "tags": ["memory", "persistent", "agent-memory"],
+      "homepage": "https://github.com/mingxy-cerebro/cerebro-server"
+    }
+  ]
+}

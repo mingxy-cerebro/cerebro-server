@@ -1,0 +1,102 @@
+name: Build omem-server
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'omem-server/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'omem-server/**'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-musl:
+    name: Build musl static binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('omem-server/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('omem-server/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: omem-server/target
+          key: ${{ runner.os }}-cargo-build-musl-${{ hashFiles('omem-server/Cargo.lock') }}
+
+      - name: Build musl binary
+        working-directory: omem-server
+        run: |
+          RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
+            cargo build --release --target x86_64-unknown-linux-musl \
+            -p omem-server --no-default-features
+
+      - name: Compress binary
+        run: |
+          gzip -c omem-server/target/x86_64-unknown-linux-musl/release/omem-server > omem-server-musl.gz
+          ls -lh omem-server-musl.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omem-server-musl
+          path: omem-server-musl.gz
+          retention-days: 30
+
+  build-glibc:
+    name: Build glibc binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            omem-server/target
+          key: ${{ runner.os }}-cargo-build-glibc-${{ hashFiles('omem-server/Cargo.lock') }}
+
+      - name: Build glibc binary
+        working-directory: omem-server
+        run: cargo build --release -p omem-server
+
+      - name: Compress binary
+        run: |
+          gzip -c omem-server/target/release/omem-server > omem-server-glibc.gz
+          ls -lh omem-server-glibc.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omem-server-glibc
+          path: omem-server-glibc.gz
+          retention-days: 30

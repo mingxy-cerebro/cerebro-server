@@ -1,0 +1,27 @@
+{
+  // omem server connection
+  "apiUrl": "https://www.mengxy.cc",
+  "apiKey": "your-tenant-id",
+
+  // request timeout in milliseconds
+  "requestTimeoutMs": 15000,
+
+  // content limits
+  "maxQueryLength": 200,
+  "maxContentChars": 30000,
+  "maxContentLength": 500,
+
+  // auto capture settings
+  "autoCaptureThreshold": 5,
+  "ingestMode": "smart",
+
+  // recall tuning
+  "similarityThreshold": 0.4,
+  "maxRecallResults": 10,
+
+  // UI settings
+  "toastDelayMs": 7000,
+
+  // container tag prefix (used for user/project scoping)
+  "containerTagPrefix": "omem"
+}
