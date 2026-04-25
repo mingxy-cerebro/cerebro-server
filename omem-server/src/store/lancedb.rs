@@ -669,7 +669,10 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        Self::batch_to_memories(&batches)
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(memories)
     }
 
     pub async fn create(&self, memory: &Memory, vector: Option<&[f32]>) -> Result<(), OmemError> {
@@ -708,7 +711,9 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let memories = Self::batch_to_memories(&batches)?;
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
         Ok(memories.into_iter().next())
     }
 
@@ -782,16 +787,34 @@ impl LanceStore {
         cluster_id: Option<&str>,
         is_anchor: bool,
     ) -> Result<(), OmemError> {
-        let memory = self
-            .get_by_id(memory_id)
-            .await?
-            .ok_or_else(|| OmemError::NotFound(format!("memory {memory_id}")))?;
+        let table = self.open_table().await?;
+        let safe_id = escape_sql(memory_id);
+        let cluster_value = match cluster_id {
+            Some(cid) => format!("'{}'", escape_sql(cid)),
+            None => "null".to_string(),
+        };
+        table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("cluster_id", cluster_value)
+            .column("is_cluster_anchor", if is_anchor { "true" } else { "false" })
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("update cluster_id failed: {e}")))?;
+        Ok(())
+    }
 
-        let mut updated = memory;
-        updated.cluster_id = cluster_id.map(|s| s.to_string());
-        updated.is_cluster_anchor = is_anchor;
-        updated.updated_at = chrono::Utc::now().to_rfc3339();
-        self.update(&updated, None).await
+    pub async fn clear_all_cluster_ids(&self) -> Result<u64, OmemError> {
+        let table = self.open_table().await?;
+        let result = table
+            .update()
+            .only_if("cluster_id IS NOT NULL")
+            .column("cluster_id", "null")
+            .column("is_cluster_anchor", "false")
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch clear cluster_id failed: {e}")))?;
+        Ok(result.rows_updated)
     }
 
     pub async fn soft_delete(&self, id: &str) -> Result<(), OmemError> {
@@ -819,7 +842,9 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let all = Self::batch_to_memories(&batches)?;
+        let all = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
         Ok(all.into_iter().skip(offset).take(limit).collect())
     }
 
@@ -839,7 +864,10 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        Self::batch_to_memories(&batches)
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(memories)
     }
 
     pub async fn vector_search(
@@ -868,7 +896,7 @@ impl LanceStore {
         }
         if let Some(tags) = tags_filter {
             for tag in tags {
-                filter.push_str(&format!(" AND tags LIKE '%{}%'", escape_sql(tag)));
+                filter.push_str(&format!(" AND tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
         }
         query = query.only_if(filter);
@@ -928,7 +956,7 @@ impl LanceStore {
         }
         if let Some(tags) = tags_filter {
             for tag in tags {
-                filter.push_str(&format!(" AND tags LIKE '%{}%'", escape_sql(tag)));
+                filter.push_str(&format!(" AND tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
         }
         q = q.postfilter().only_if(filter);
@@ -1037,7 +1065,9 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let mut memories = Self::batch_to_memories(&batches)?;
+        let mut memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
 
         // Sort in Rust (LanceDB query builder doesn't support ORDER BY)
         match filter.sort.as_str() {
@@ -1099,7 +1129,10 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        Self::batch_to_memories(&batches)
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(memories)
     }
 
     pub async fn batch_soft_delete(&self, filter: &str) -> Result<usize, OmemError> {
@@ -1115,7 +1148,9 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let memories = Self::batch_to_memories(&batches)?;
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
         let count = memories.len();
 
         for mem in memories {
@@ -1166,7 +1201,11 @@ impl LanceStore {
             .try_collect()
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
-        Self::batch_to_memories(&batches)
+
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(memories)
     }
 
     fn build_where_clause(filter: &ListFilter) -> String {

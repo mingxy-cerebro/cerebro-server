@@ -1,15 +1,19 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
 
 use axum::extract::{Extension, Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::api::server::{personal_space_id, AppState};
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
-use crate::lifecycle::tier::TierManager;
 use crate::store::lancedb::SessionRecall;
+
+static LAST_RECALL_TIME: LazyLock<Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"你是一个记忆召回助手。用户有一个个人知识库，保存了过往笔记、项目经验、技术方案、偏好设置、私密记录等记忆。你的任务是判断用户当前的问题是否需要从知识库中检索相关记忆来辅助回答。
 
@@ -102,6 +106,27 @@ pub async fn should_recall(
         return Err(OmemError::Validation(
             "query_text cannot be empty".to_string(),
         ));
+    }
+
+    // Per-tenant rate limiting
+    {
+        let mut last_times = LAST_RECALL_TIME.lock().await;
+        let key = auth.tenant_id.clone();
+        if let Some(last_time) = last_times.get(&key) {
+            let elapsed = chrono::Utc::now().signed_duration_since(*last_time);
+            let min_interval = state.config.should_recall_min_interval_secs as i64;
+            if elapsed.num_seconds() < min_interval {
+                return Ok(Json(ShouldRecallResponse {
+                    should_recall: false,
+                    reason: Some("rate_limited".to_string()),
+                    memories: None,
+                    confidence: None,
+                    similarity_score: None,
+                    clustered: None,
+                }));
+            }
+        }
+        last_times.insert(key, chrono::Utc::now());
     }
 
     let similarity_score = if let Some(ref last_query) = body.last_query_text {
@@ -235,15 +260,15 @@ pub async fn should_recall(
     let need_global = all_results.len() < max_results;
     if need_global {
         let remaining = max_results - all_results.len();
-        let global_results = if is_zero_vector {
+            let global_results = if is_zero_vector {
             store
-                .fts_search(&body.query_text, remaining + 5, Some("global"), vis_ref, None)
+                .fts_search(&body.query_text, remaining + 5, None, vis_ref, None)
                 .await
                 .unwrap_or_default()
         } else {
             let search_vec = query_vector.as_ref().unwrap();
             store
-                .vector_search(search_vec, remaining + 5, effective_min_score, Some("global"), vis_ref, None)
+                .vector_search(search_vec, remaining + 5, effective_min_score, None, vis_ref, None)
                 .await
                 .unwrap_or_default()
         };
@@ -327,28 +352,12 @@ pub async fn should_recall(
 
     let confidence = memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32;
 
-    // Fire-and-forget: increment access_count and evaluate tier for recalled memories
-    {
-        let update_store = store;
-        let memories_to_update: Vec<Memory> = memories.iter().map(|m| m.memory.clone()).collect();
-        tracing::debug!(count = memories_to_update.len(), query = %body.query_text, "recall_access_count_update_start");
-        tokio::spawn(async move {
-            for mut memory in memories_to_update {
-                let old_tier = memory.tier.clone();
-                let old_count = memory.access_count;
-                memory.access_count += 1;
-                memory.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
-                let new_tier = TierManager::with_defaults().evaluate_tier(&memory);
-                if new_tier != old_tier {
-                    tracing::info!(memory_id = %memory.id, old_tier = %old_tier, new_tier = %new_tier, access_count = old_count + 1, "tier_promoted_via_recall");
-                    memory.append_tier_change(&old_tier.to_string(), &new_tier.to_string(), "access_via_recall");
-                }
-                memory.tier = new_tier;
-                if let Err(e) = update_store.update(&memory, None).await {
-                    tracing::warn!(memory_id = %memory.id, error = %e, "failed_to_update_access_count_after_recall");
-                }
-            }
-        });
+    for recalled in &memories {
+        if let Ok(Some(mut mem)) = store.get_by_id(&recalled.memory.id).await {
+            mem.access_count += 1;
+            mem.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
+            let _ = store.update(&mem, None).await;
+        }
     }
 
     Ok(Json(ShouldRecallResponse {

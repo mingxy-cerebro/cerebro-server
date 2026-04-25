@@ -195,6 +195,35 @@ impl StoreManager {
         }
         results
     }
+
+    pub async fn optimize_all_on_disk(&self) -> usize {
+        let Ok(entries) = std::fs::read_dir(&self.base_uri) else {
+            tracing::warn!("cannot read store base dir for optimization");
+            return 0;
+        };
+
+        let mut optimized = 0usize;
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('_') || name.starts_with('.') {
+                continue;
+            }
+            match self.get_store(&name).await {
+                Ok(store) => match store.optimize().await {
+                    Ok(()) => {
+                        optimized += 1;
+                        tracing::info!(space_id = %name, "startup_optimize_ok");
+                    }
+                    Err(e) => tracing::warn!(space_id = %name, error = %e, "startup_optimize_failed"),
+                },
+                Err(e) => tracing::warn!(space_id = %name, error = %e, "startup_open_failed"),
+            }
+        }
+        optimized
+    }
 }
 
 #[cfg(test)]

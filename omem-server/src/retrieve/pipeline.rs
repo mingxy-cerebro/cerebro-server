@@ -67,7 +67,7 @@ impl RetrievalPipeline {
             rrf_k: 60.0,
             vector_weight: 0.7,
             bm25_weight: 0.3,
-            min_score: 0.3,
+            min_score: 0.15,
             hard_cutoff: 0.005,
             default_limit: 20,
         }
@@ -537,7 +537,13 @@ impl RetrievalPipeline {
         let input_count = entries.len();
 
         for entry in &mut entries {
-            let len_ratio = entry.memory.content.len() as f32 / 500.0;
+            // Use l0_abstract length for normalization (content is often raw conversation)
+            let text_for_len = if entry.memory.l0_abstract.is_empty() {
+                &entry.memory.content
+            } else {
+                &entry.memory.l0_abstract
+            };
+            let len_ratio = text_for_len.len() as f32 / 500.0;
             let log_val = if len_ratio > 0.0 {
                 len_ratio.log2()
             } else {
@@ -686,14 +692,38 @@ fn fusion_score_range(entries: &[FusionEntry]) -> Option<(f32, f32)> {
 }
 
 fn content_jaccard(a: &str, b: &str) -> f32 {
-    let a_words: HashSet<&str> = a.split_whitespace().collect();
-    let b_words: HashSet<&str> = b.split_whitespace().collect();
-    let union_count = a_words.union(&b_words).count();
+    let a_ngrams = text_ngrams(a);
+    let b_ngrams = text_ngrams(b);
+    let union_count = a_ngrams.union(&b_ngrams).count();
     if union_count == 0 {
         return 1.0;
     }
-    let inter_count = a_words.intersection(&b_words).count();
+    let inter_count = a_ngrams.intersection(&b_ngrams).count();
     inter_count as f32 / union_count as f32
+}
+
+/// Generate n-grams for text similarity comparison.
+/// Uses character bigrams for CJK text (no spaces), whitespace-split words otherwise.
+fn text_ngrams(text: &str) -> HashSet<String> {
+    let has_cjk = text.chars().any(|c| {
+        ('\u{4E00}'..='\u{9FFF}').contains(&c)  // CJK Unified Ideographs
+            || ('\u{3400}'..='\u{4DBF}').contains(&c)  // CJK Extension A
+            || ('\u{3040}'..='\u{30FF}').contains(&c)  // Hiragana + Katakana
+    });
+
+    if has_cjk {
+        // Character bigrams for CJK text
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() < 2 {
+            return HashSet::from([text.to_string()]);
+        }
+        (0..chars.len() - 1)
+            .map(|i| format!("{}{}", chars[i], chars[i + 1]))
+            .collect()
+    } else {
+        // Whitespace-split words for non-CJK text
+        text.split_whitespace().map(|s| s.to_lowercase()).collect()
+    }
 }
 
 #[cfg(test)]
