@@ -334,15 +334,16 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
 }
 
 const processedMessageIds = new Set<string>();
+const pluginStartTime = Date.now();
 
 export function sessionIdleHook(
   omemClient: OmemClient,
   _containerTags: string[],
   tui: any,
-  _sdkClient: any,
+  sdkClient: any,
   _ingestMode: "smart" | "raw" = "smart",
   threshold: number = 0,
-  _getMainSessionId?: () => string | undefined,
+  getMainSessionId?: () => string | undefined,
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
@@ -353,6 +354,11 @@ export function sessionIdleHook(
     const sessionID = input.event.properties?.sessionID;
     if (!sessionID) return;
 
+    if (getMainSessionId) {
+      const mainId = getMainSessionId();
+      if (mainId && sessionID !== mainId) return;
+    }
+
     if (idleTimeout) clearTimeout(idleTimeout);
 
     idleTimeout = setTimeout(async () => {
@@ -360,16 +366,49 @@ export function sessionIdleHook(
       isCapturing = true;
 
       try {
-        const collected = sessionMessages.get(sessionID);
-        if (!collected || collected.length === 0) return;
+        const response = await sdkClient.session.messages({ path: { id: sessionID } });
+        if (!response?.data) return;
 
-        if (threshold > 1 && collected.length < threshold) return;
+        const messages = response.data;
+        const conversationMessages: Array<{ role: string; content: string }> = [];
+        const newMessageIds: string[] = [];
+        let hasNewMessages = false;
 
-        const conversationMessages = [...collected];
+        for (const msg of messages) {
+          const msgId = msg.info?.id;
+          if (!msgId || processedMessageIds.has(msgId)) continue;
+
+          // Skip messages created before this plugin instance started
+          // (prevents replaying entire session history on restart)
+          const msgTime = msg.info?.createdAt ? new Date(msg.info.createdAt).getTime() : 0;
+          if (msgTime > 0 && msgTime < pluginStartTime) continue;
+
+          const role = msg.info?.role;
+          if (role !== "user" && role !== "assistant") continue;
+
+          const textParts = (msg.parts || [])
+            .filter((p: any) => p.type === "text" && p.text)
+            .map((p: any) => p.text);
+          const text = textParts.join("\n").trim();
+          if (!text) continue;
+
+          hasNewMessages = true;
+          newMessageIds.push(msgId);
+          conversationMessages.push({ role, content: text });
+        }
+
+        if (!hasNewMessages || conversationMessages.length === 0) return;
+
+        if (threshold > 1 && conversationMessages.length < threshold) {
+          // Log that we're waiting for more messages
+          return;
+        }
 
         try {
           await omemClient.sessionIngest(conversationMessages, sessionID);
-          sessionMessages.delete(sessionID);
+          for (const id of newMessageIds) {
+            processedMessageIds.add(id);
+          }
           showToast(tui, "🧠 Memory Sealed", `${conversationMessages.length} dialogues captured · entrusted to the heavens for refinement`, "success");
         } catch (err) {
           showToast(tui, "🔴 Session Capture Failed", String(err).substring(0, 100), "error");

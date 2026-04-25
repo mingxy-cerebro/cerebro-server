@@ -1,6 +1,6 @@
 {
   "name": "@mingxy/cerebro",
-  "version": "1.6.0",
+  "version": "1.5.9",
   "description": "Cerebro persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools with clustering",
   "type": "module",
   "main": "src/index.ts",

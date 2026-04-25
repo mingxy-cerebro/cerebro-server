@@ -96,7 +96,7 @@ const OmemPlugin: Plugin = async (input) => {
     "chat.message": keywordDetectionHook(omemClient, containerTags, config.autoCaptureThreshold, tui, config.ingestMode),
     "experimental.session.compacting": compactingHook(omemClient, containerTags, tui, config.ingestMode),
     tool: buildTools(omemClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
-    event: sessionIdleHook(omemClient, containerTags, tui, config.ingestMode, config.autoCaptureThreshold),
+    event: sessionIdleHook(omemClient, containerTags, tui, client, config.ingestMode, config.autoCaptureThreshold, () => currentSessionId),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;
