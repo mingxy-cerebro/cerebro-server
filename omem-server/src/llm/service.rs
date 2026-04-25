@@ -52,6 +52,7 @@ fn strip_thinking_tags(s: &str) -> String {
 }
 
 /// Complete a prompt and parse the response as typed JSON.
+/// Applies JSON repair (trailing commas, unescaped chars) before parsing.
 /// Retries once with an error hint on parse failure.
 pub async fn complete_json<T: serde::de::DeserializeOwned>(
     llm: &dyn LlmService,
@@ -62,17 +63,98 @@ pub async fn complete_json<T: serde::de::DeserializeOwned>(
     let cleaned = strip_markdown_fences(&text);
 
     match serde_json::from_str(&cleaned) {
-        Ok(v) => Ok(v),
-        Err(_first_err) => {
-            let retry_user = format!(
-                "{user}\n\nYour previous response was not valid JSON. Return ONLY valid JSON."
-            );
-            let text = llm.complete_text(system, &retry_user).await?;
-            let cleaned = strip_markdown_fences(&text);
-            serde_json::from_str(&cleaned)
-                .map_err(|e| OmemError::Llm(format!("JSON parse failed after retry: {e}")))
+        Ok(v) => return Ok(v),
+        Err(first_err) => {
+            tracing::debug!(error = %first_err, len = cleaned.len(), "JSON parse failed, trying repair");
         }
     }
+
+    let repaired = try_repair_json(&cleaned);
+    if let Ok(v) = serde_json::from_str(&repaired) {
+        tracing::info!("JSON repaired successfully after fixing common issues");
+        return Ok(v);
+    }
+
+    let retry_user = format!(
+        "{user}\n\nYour previous response was not valid JSON. \
+         Ensure ALL double quotes inside string values are escaped (\\\"). \
+         Ensure ALL newlines inside strings are escaped (\\n). \
+         Return ONLY valid JSON."
+    );
+    let text = llm.complete_text(system, &retry_user).await?;
+    let cleaned = strip_markdown_fences(&text);
+
+    match serde_json::from_str(&cleaned) {
+        Ok(v) => return Ok(v),
+        Err(retry_err) => {
+            tracing::debug!(error = %retry_err, "retry JSON parse failed, trying repair");
+        }
+    }
+
+    let repaired = try_repair_json(&cleaned);
+    serde_json::from_str(&repaired)
+        .map_err(|e| OmemError::Llm(format!("JSON parse failed after retry: {e}")))
+}
+
+fn try_repair_json(s: &str) -> String {
+    let s = fix_trailing_commas(s);
+    fix_unescaped_chars_in_strings(&s)
+}
+
+fn fix_trailing_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(s.len());
+
+    for i in 0..len {
+        if chars[i] == ',' {
+            let mut j = i + 1;
+            while j < len && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < len && (chars[j] == ']' || chars[j] == '}') {
+                continue;
+            }
+        }
+        result.push(chars[i]);
+    }
+
+    result
+}
+
+fn fix_unescaped_chars_in_strings(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 2);
+    let mut in_string = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if !in_string {
+            result.push(ch);
+            if ch == '"' {
+                in_string = true;
+            }
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                result.push(ch);
+                if let Some(next) = chars.next() {
+                    result.push(next);
+                }
+            }
+            '"' => {
+                result.push(ch);
+                in_string = false;
+            }
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            _ => result.push(ch),
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

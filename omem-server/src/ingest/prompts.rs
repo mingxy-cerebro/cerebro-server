@@ -514,6 +514,82 @@ pub fn build_merge_prompt(memories: &[Memory]) -> (String, String) {
     (system, user)
 }
 
+// ── Session Ingest Prompt (增量交并差引擎) ────────────
+
+const SESSION_COMPRESS_SYSTEM_PROMPT: &str = r##"You are an incremental memory update engine. You receive OLD memories and NEW conversation, then produce UPDATED memories via set operations (intersection ∪ union − difference).
+
+## SET OPERATIONS (CORE)
+When "Previously Stored Summaries" exist, apply these operations:
+- ∩ INTERSECTION: Old info confirmed by new conversation → PRESERVE and ENRICH with new details
+- ∪ UNION: New info not in old summaries → APPEND to the relevant summary
+- − DIFFERENCE: New conversation EXPLICITLY corrects/contradicts old info → REMOVE outdated, add corrected
+- ⊃ KEEP: Old info NOT mentioned in new conversation → KEEP UNCHANGED (silence ≠ resolved)
+- ✓ COMPLETE: User explicitly expressed satisfaction ("完美","搞定","没问题了") → mark task as completed
+
+CRITICAL: Your output must be a SUPERSET of the old summaries. The updated summary MUST be at least as long as the old one. If you output something shorter, you are LOSING information.
+
+## SMART CLASSIFICATION (max 3 entries)
+1. **MAIN** (always, 1): Incremental update of the primary session memory. Use ## sections for subtopics.
+2. **PRIVATE** (optional, 1): Intimate/emotional content → scope "private". This is NOT discarded — it's extracted separately.
+3. **NEW TOPIC** (optional, 1): Completely unrelated new domain → separate entry.
+
+Default: 1 entry. NEVER fragment into 5+ pieces.
+
+## VALUE FILTER
+SKIP: casual small talk, debugging status checks, tool/engine internal outputs, meta-discussion.
+KEEP: technical decisions, user preferences, code changes, file paths, architecture, user anger/criticism.
+ANGER RULE: User frustration MUST be preserved as tagged rules (e.g., "铁律", "lessons_learned").
+If ZERO factual content → return [].
+
+## LANGUAGE: Output in the SAME language as input. Never translate.
+## PRIVACY (CRITICAL — violations are SEVERE):
+When ANY of the following appears in the conversation, the entry MUST have scope "private":
+- Pet names, endearments, flirtation (老公/老婆/宝贝/亲爱的/亲亲/么么)
+- Sexual/vulgar slang or explicit content (操/逼/色/精/穴/肉便器/调教)
+- Romantic or intimate emotional exchanges
+- Personal secrets, credentials, private life details
+- Role-play or fantasy scenarios with intimate undertones
+When in doubt → scope "private". ONLY use scope "public" for purely technical/academic content.
+## MARKDOWN FORMAT (MANDATORY): The summary field MUST use Markdown formatting:
+- Use ## headers to organize sections
+- Use - bullet lists for enumerations
+- Use **bold** for key terms, file paths, function names
+- Use `backticks` for code references
+- Use > blockquotes for important decisions or user requirements
+- If previous summary uses Markdown, the updated version MUST use the same Markdown format. NEVER downgrade to plain text.
+
+## OUTPUT
+Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private" }
+Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
+"##;
+
+/// Build the session compress prompt.
+/// `conversation` is the formatted conversation text.
+/// `existing_summaries` are previously stored summaries for this session (for incremental update).
+pub fn build_session_compress_prompt(
+    conversation: &str,
+    existing_summaries: &[String],
+) -> (String, String) {
+    let system = SESSION_COMPRESS_SYSTEM_PROMPT.to_string();
+
+    let mut user = String::with_capacity(4096);
+
+    if !existing_summaries.is_empty() {
+        user.push_str("## Previously Stored Summaries for This Session\n");
+        user.push_str("Apply set operations (intersection, union, difference) to produce UPDATED summaries.\n\n");
+        for (i, s) in existing_summaries.iter().enumerate() {
+            // DO NOT truncate — incremental update requires seeing the FULL previous summary
+            user.push_str(&format!("### Previous Summary {}\n{}\n\n", i + 1, s));
+        }
+    }
+
+    user.push_str("## Current Conversation\n\n");
+    user.push_str(conversation);
+    user.push_str("\n\nReturn ONLY valid JSON array. Use Markdown in summary fields.");
+
+    (system, user)
+}
+
 const MERGE_SYSTEM_PROMPT: &str = r#"You are a memory merge engine. Your task is to combine multiple related memories into a single, comprehensive memory that preserves ALL important information from each source.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)

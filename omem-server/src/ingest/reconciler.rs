@@ -367,8 +367,7 @@ impl Reconciler {
             context_label: context_label.clone(),
         });
 
-        let ctx_source = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
-        let embeddings = self.embed.embed(&[ctx_source.to_string()]).await?;
+        let embeddings = self.embed.embed(std::slice::from_ref(&fact.l0_abstract)).await?;
         let vector = embeddings.first().map(|v| v.as_slice());
         self.store.update(&new_mem, vector).await?;
 
@@ -412,8 +411,7 @@ impl Reconciler {
             context_label: None,
         });
 
-        let contra_source = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
-        let embeddings = self.embed.embed(&[contra_source.to_string()]).await?;
+        let embeddings = self.embed.embed(std::slice::from_ref(&fact.l0_abstract)).await?;
         let vector = embeddings.first().map(|v| v.as_slice());
         self.store.update(&new_mem, vector).await?;
 
@@ -582,9 +580,11 @@ impl Reconciler {
         mem.visibility = fact.visibility.clone();
         mem.owner_agent_id = fact.owner_agent_id.clone();
 
+        // Use l0_abstract for embedding (semantic summary matches short queries better than raw conversation)
+        let embed_source = &fact.l0_abstract;
         let embeddings = self
             .embed
-            .embed(std::slice::from_ref(&source.to_string()))
+            .embed(std::slice::from_ref(embed_source))
             .await?;
         let vector = embeddings.first().map(|v| v.as_slice());
 

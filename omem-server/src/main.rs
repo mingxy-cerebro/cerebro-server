@@ -105,7 +105,16 @@ async fn main() {
     let app = build_router(state.clone());
 
     {
+        let sm = state.store_manager.clone();
+        tokio::spawn(async move {
+            let count = sm.optimize_all_on_disk().await;
+            tracing::info!(spaces_optimized = count, "startup_lancedb_cleanup_done");
+        });
+    }
+
+    {
         let scheduler_interval = std::time::Duration::from_secs(config.scheduler_interval_secs);
+        let ctrl = state.scheduler_control.clone();
         
         let lifecycle_scheduler = Arc::new(
             LifecycleScheduler::new(
@@ -115,6 +124,7 @@ async fn main() {
                 config.scheduler_run_on_start,
             )
             .with_event_bus(state.event_bus.clone())
+            .with_scheduler_control(ctrl.clone())
         );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(
@@ -133,6 +143,7 @@ async fn main() {
             )
             .with_llm(state.llm.clone())
             .with_event_bus(state.event_bus.clone())
+            .with_scheduler_control(ctrl)
         );
         tokio::spawn(async move { clustering_scheduler.run().await });
         tracing::info!(

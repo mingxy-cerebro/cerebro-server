@@ -12,7 +12,7 @@ use crate::domain::error::OmemError;
 use crate::domain::relation::{MemoryRelation, RelationType};
 use crate::domain::tenant::AuthInfo;
 use crate::ingest::intelligence::IntelligenceTask;
-use crate::ingest::session::{SessionMessage, SessionStore};
+use crate::ingest::session::SessionMessage;
 use crate::store::spaces::ImportTaskRecord;
 
 #[derive(Deserialize)]

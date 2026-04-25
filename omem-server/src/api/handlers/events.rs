@@ -16,12 +16,15 @@ pub async fn sse_events(
     let stream = tokio_stream::wrappers::BroadcastStream::new(receiver).filter_map(move |result| {
         match result {
             Ok(event) => {
-                if !tenant_id.is_empty() && event.tenant_id != tenant_id {
-                    None
-                } else {
+                let matches = tenant_id.is_empty()
+                    || event.tenant_id.is_empty()
+                    || event.tenant_id == tenant_id;
+                if matches {
                     serde_json::to_string(&event)
                         .ok()
                         .map(|json| Ok(Event::default().data(json)))
+                } else {
+                    None
                 }
             }
             Err(_) => None,

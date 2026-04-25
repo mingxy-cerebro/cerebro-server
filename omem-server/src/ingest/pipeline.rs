@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::embed::EmbedService;
-use crate::ingest::admission::{AdmissionControl, AdmissionPreset};
+use crate::ingest::admission::AdmissionControl;
 use crate::ingest::extractor::FactExtractor;
 use crate::ingest::noise::NoiseFilter;
 use crate::ingest::privacy::{is_fully_private, strip_private_content};
@@ -43,17 +43,19 @@ impl IngestPipeline {
         embed: Arc<dyn EmbedService>,
         llm: Arc<dyn LlmService>,
         cluster_store: Arc<ClusterStore>,
+        admission_preset: &str,
+        admission_reject_threshold: Option<f32>,
+        admission_admit_threshold: Option<f32>,
     ) -> Result<Self, OmemError> {
         let extractor = Arc::new(FactExtractor::new(llm.clone()));
         let reconciler = Arc::new(Reconciler::new(llm.clone(), store.clone(), embed.clone()));
         let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), Some(llm.clone())));
         let cluster_assigner = Arc::new(ClusterAssigner::new(cluster_store, embed.clone()).with_llm(llm.clone()));
         let noise_filter = Arc::new(tokio::sync::Mutex::new(NoiseFilter::new(Vec::new())));
-        let admission = Arc::new(AdmissionControl::new(
-            AdmissionPreset::Balanced,
-            embed.clone(),
-            store.clone(),
-        ));
+        let admission = Arc::new(
+            AdmissionControl::from_preset_str(admission_preset, embed.clone(), store.clone())
+                .with_custom_thresholds(admission_reject_threshold, admission_admit_threshold)
+        );
         Ok(Self {
             extractor,
             reconciler,
@@ -495,7 +497,16 @@ mod tests {
         let cluster_store = Arc::new(
             ClusterStore::new(store.db()).await.expect("cluster store")
         );
-        let pipeline = IngestPipeline::new(store, session_store.clone(), embed, llm, cluster_store).await.expect("pipeline");
+        let pipeline = IngestPipeline::new(
+            store,
+            session_store.clone(),
+            embed,
+            llm,
+            cluster_store,
+            "balanced",
+            None,
+            None,
+        ).await.expect("pipeline");
 
         (pipeline, session_store, dir)
     }

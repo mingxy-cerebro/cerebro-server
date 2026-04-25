@@ -21,7 +21,19 @@ pub struct OmemConfig {
     pub recall_llm_base_url: String,
     pub scheduler_interval_secs: u64,
     pub scheduler_run_on_start: bool,
-    
+
+    // Rate limiting
+    /// Minimum seconds between should-recall calls per tenant. Default: 30
+    pub should_recall_min_interval_secs: u64,
+
+    // Admission control
+    /// Admission preset: balanced, conservative, high_recall. Default: high_recall
+    pub admission_preset: String,
+    /// Custom admission reject threshold (overrides preset). Default: None
+    pub admission_reject_threshold: Option<f32>,
+    /// Custom admission admit threshold (overrides preset). Default: None
+    pub admission_admit_threshold: Option<f32>,
+
     // Clustering configuration
     /// Minimum similarity score (0.0-1.0) for a memory to be considered for cluster assignment.
     /// Memories with similarity below this threshold will create new clusters.
@@ -65,8 +77,12 @@ impl Default for OmemConfig {
             recall_llm_api_key: String::new(),
             recall_llm_model: String::new(),
             recall_llm_base_url: String::new(),
-            scheduler_interval_secs: 21600, // 6h
+            scheduler_interval_secs: 21600,
             scheduler_run_on_start: true,
+            should_recall_min_interval_secs: 30,
+            admission_preset: "high_recall".to_string(),
+            admission_reject_threshold: None,
+            admission_admit_threshold: None,
             cluster_similarity_threshold: 0.75,
             cluster_auto_merge_threshold: 0.90,
             cluster_candidate_count: 5,
@@ -109,6 +125,18 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.scheduler_run_on_start),
+            should_recall_min_interval_secs: env::var("OMEM_SHOULD_RECALL_MIN_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.should_recall_min_interval_secs),
+            admission_preset: env::var("OMEM_ADMISSION_PRESET")
+                .unwrap_or(defaults.admission_preset),
+            admission_reject_threshold: env::var("OMEM_ADMISSION_REJECT_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            admission_admit_threshold: env::var("OMEM_ADMISSION_ADMIT_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok()),
             cluster_similarity_threshold: env::var("OMEM_CLUSTER_SIMILARITY_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -7,7 +7,8 @@ use crate::domain::error::OmemError;
 use crate::llm::service::LlmService;
 
 const MAX_RETRIES: u32 = 3;
-const TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -76,7 +77,8 @@ impl OpenAICompatLlm {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(READ_TIMEOUT)
             .default_headers(headers)
             .build()
             .map_err(|e| OmemError::Llm(format!("failed to build http client: {e}")))?;
@@ -113,7 +115,8 @@ impl OpenAICompatLlm {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(READ_TIMEOUT)
             .default_headers(headers)
             .build()
             .map_err(|e| OmemError::Llm(format!("failed to build http client: {e}")))?;
@@ -156,20 +159,42 @@ impl LlmService for OpenAICompatLlm {
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
                 let backoff = Duration::from_millis(500 * 2_u64.pow(attempt));
+                tracing::info!(attempt, backoff_ms = backoff.as_millis() as u64, "LLM request retry");
                 tokio::time::sleep(backoff).await;
             }
 
-            let resp = self
+            let resp = match self
                 .client
                 .post(&self.url)
                 .json(&request)
                 .send()
                 .await
-                .map_err(|e| OmemError::Llm(format!("request failed: {e}")))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // Connection/timeout errors are retryable
+                    let is_retryable = e.is_timeout() || e.is_connect() || e.is_request();
+                    let err_msg = format!("request failed: {e}");
+                    if is_retryable && attempt + 1 < MAX_RETRIES {
+                        tracing::warn!(error = %err_msg, attempt, "LLM request failed, will retry");
+                        last_err = Some(err_msg);
+                        continue;
+                    }
+                    return Err(OmemError::Llm(err_msg));
+                }
+            };
 
             let status = resp.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt + 1 < MAX_RETRIES {
                 last_err = Some("rate limited (429)".to_string());
+                continue;
+            }
+
+            // Retry on 5xx server errors
+            if status.is_server_error() && attempt + 1 < MAX_RETRIES {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(status = %status, attempt, body = %body, "LLM server error, will retry");
+                last_err = Some(format!("server error {status}"));
                 continue;
             }
 

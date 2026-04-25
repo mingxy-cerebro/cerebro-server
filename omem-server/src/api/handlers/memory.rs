@@ -14,7 +14,7 @@ use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
 use crate::ingest::IngestPipeline;
-use crate::ingest::SessionStore;
+
 use crate::lifecycle::tier::TierManager;
 use crate::retrieve::pipeline::SearchRequest;
 use crate::retrieve::RetrievalPipeline;
@@ -192,7 +192,16 @@ pub async fn create_memory(
             .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
 
         let ingest_pipeline =
-            IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone(), state.cluster_store.clone()).await?;
+            IngestPipeline::new(
+                store,
+                session_store,
+                state.embed.clone(),
+                state.llm.clone(),
+                state.cluster_store.clone(),
+                &state.config.admission_preset,
+                state.config.admission_reject_threshold,
+                state.config.admission_admit_threshold,
+            ).await?;
 
         let response = ingest_pipeline.ingest(request).await?;
         return Ok((StatusCode::ACCEPTED, Json(serde_json::json!(response))).into_response());
@@ -708,9 +717,10 @@ pub async fn list_memories(
     Extension(auth): Extension<AuthInfo>,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<ListResponseDto>, OmemError> {
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state
         .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
+        .get_store(&space_id)
         .await?;
 
     let filter = ListFilter {
@@ -727,9 +737,27 @@ pub async fn list_memories(
     };
 
     let total_count = store.count_filtered(&filter).await?;
-    let memories = store
+    let mut memories = store
         .list_filtered(&filter, params.limit, params.offset)
         .await?;
+
+    let has_vault = state
+        .space_store
+        .get_vault_password(&space_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+    if has_vault {
+        for m in &mut memories {
+            if m.scope == "private" {
+                m.content = "🔒 [Vault Locked]".to_string();
+                m.l1_overview = "🔒 [Vault Locked]".to_string();
+                m.l2_content = "🔒 [Vault Locked]".to_string();
+            }
+        }
+    }
 
     Ok(Json(ListResponseDto {
         memories,
@@ -1151,14 +1179,13 @@ pub async fn reembed_memories(
     let mut errors = 0usize;
 
     for memory in &memories {
-        let existing = store.get_vector_by_id(&memory.id).await?;
-        let is_zero = existing.as_ref().map_or(true, |v| v.iter().all(|&x| x == 0.0));
-        if !is_zero {
-            skipped_nonzero += 1;
-            continue;
-        }
+        let embed_text = if !memory.l0_abstract.is_empty() {
+            memory.l0_abstract.clone()
+        } else {
+            memory.content.clone()
+        };
 
-        match state.embed.embed(&[memory.content.clone()]).await {
+        match state.embed.embed(&[embed_text]).await {
             Ok(vectors) => {
                 if let Some(vec) = vectors.into_iter().next() {
                     match store.update(memory, Some(&vec)).await {
@@ -1174,6 +1201,300 @@ pub async fn reembed_memories(
     }
 
     Ok(Json(ReEmbedResponseDto { re_embedded, skipped_nonzero, errors }))
+}
+
+// ── Session Ingest ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SessionIngestBody {
+    pub messages: Vec<MessageDto>,
+    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionTopicSummary {
+    topic: String,
+    summary: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default = "default_scope")]
+    scope: String,
+}
+
+fn default_scope() -> String {
+    "public".to_string()
+}
+
+pub async fn session_ingest(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<SessionIngestBody>,
+) -> Result<impl IntoResponse, OmemError> {
+    if body.messages.is_empty() {
+        return Err(OmemError::Validation(
+            "messages array is empty".to_string(),
+        ));
+    }
+
+    const MAX_MESSAGES: usize = 40;
+    let messages: &[MessageDto] = if body.messages.len() > MAX_MESSAGES {
+        &body.messages[body.messages.len() - MAX_MESSAGES..]
+    } else {
+        &body.messages
+    };
+
+    const MAX_CONVERSATION_CHARS: usize = 30_000;
+    let conversation = format_conversation_truncated(messages, MAX_CONVERSATION_CHARS);
+    if conversation.is_empty() {
+        return Err(OmemError::Validation(
+            "no valid conversation content after cleaning".to_string(),
+        ));
+    }
+
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    let existing_summaries = fetch_existing_session_summaries(
+        &store,
+        body.session_id.as_deref(),
+    ).await;
+
+    let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_compress_prompt(
+        &conversation,
+        &existing_summaries.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
+    );
+
+    let topics: Vec<SessionTopicSummary> = crate::llm::complete_json(
+        state.llm.as_ref(),
+        &system_prompt,
+        &user_prompt,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "session_ingest: LLM compress failed");
+        OmemError::Llm(format!("session compress failed: {e}"))
+    })?;
+
+    if topics.is_empty() {
+        tracing::info!(
+            tenant = %auth.tenant_id,
+            "session_ingest: LLM returned no topics"
+        );
+        return Ok((StatusCode::OK, Json(serde_json::json!({
+            "stored": 0,
+            "reason": "no topics extracted"
+        })))
+        .into_response());
+    }
+
+    let topic_texts: Vec<String> = topics.iter().map(|t| t.topic.clone()).collect();
+    let vectors = state
+        .embed
+        .embed(&topic_texts)
+        .await
+        .map_err(|e| OmemError::Embedding(format!("failed to embed topics: {e}")))?;
+
+    for old_mem in &existing_summaries {
+        store.soft_delete(&old_mem.id).await.ok();
+    }
+
+    let mut stored = 0usize;
+    let agent_id = body.agent_id.or(auth.agent_id);
+
+    for (i, topic) in topics.iter().enumerate() {
+        let category = if topic.scope == "private" {
+            Category::Profile
+        } else {
+            Category::Events
+        };
+
+        let mut memory = Memory::new(
+            &topic.summary,
+            category,
+            MemoryType::Pinned,
+            &auth.tenant_id,
+        );
+        memory.l0_abstract = topic.topic.clone();
+        memory.l1_overview = {
+            let s = &topic.summary;
+            if s.chars().count() <= 150 {
+                s.clone()
+            } else {
+                let truncated: String = s.chars().take(147).collect();
+                format!("{}...", truncated)
+            }
+        };
+        memory.l2_content = {
+            let s = &topic.summary;
+            if s.chars().count() <= 500 {
+                s.clone()
+            } else {
+                let truncated: String = s.chars().take(497).collect();
+                format!("{}...", truncated)
+            }
+        };
+        memory.source = Some("session_compress".to_string());
+        memory.session_id = body.session_id.clone();
+        memory.agent_id = agent_id.clone();
+        memory.tags = if topic.tags.is_empty() {
+            vec!["session_compress".to_string()]
+        } else {
+            let mut tags = topic.tags.clone();
+            tags.push("session_compress".to_string());
+            tags
+        };
+        if topic.scope == "private" {
+            memory.scope = "private".to_string();
+            memory.visibility = "private".to_string();
+        }
+
+        let vector = vectors.get(i).cloned();
+        store.create(&memory, vector.as_deref()).await?;
+        stored += 1;
+    }
+
+    tracing::info!(
+        stored = stored,
+        replaced = existing_summaries.len(),
+        tenant = %auth.tenant_id,
+        "session_ingest: compressed and stored session summaries"
+    );
+
+    Ok((StatusCode::OK, Json(serde_json::json!({
+        "stored": stored,
+        "replaced": existing_summaries.len(),
+    })))
+    .into_response())
+}
+
+fn format_conversation(messages: &[MessageDto]) -> String {
+    let mut formatted = String::with_capacity(4096);
+
+    for msg in messages {
+        let role = match msg.role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => continue,
+        };
+
+        let content = clean_message_content(&msg.content);
+        if content.is_empty() {
+            continue;
+        }
+
+        formatted.push_str(&format!("[{}]: {}\n\n", role, content));
+    }
+
+    formatted
+}
+
+/// Format conversation with a total character budget.
+/// If total exceeds `max_chars`, truncate each message proportionally from the front
+/// (keeping the most recent messages intact, truncating older ones).
+fn format_conversation_truncated(messages: &[MessageDto], max_chars: usize) -> String {
+    let formatted = format_conversation(messages);
+    if formatted.len() <= max_chars {
+        return formatted;
+    }
+
+    // Keep only the tail that fits within budget
+    let truncated: String = formatted
+        .chars()
+        .skip(formatted.chars().count().saturating_sub(max_chars))
+        .collect();
+
+    // Drop partial first line (incomplete message)
+    if let Some(pos) = truncated.find("\n[") {
+        truncated[pos + 1..].to_string()
+    } else {
+        truncated
+    }
+}
+
+fn clean_message_content(content: &str) -> String {
+    let mut cleaned = content.to_string();
+
+    let xml_patterns = [
+        "<system-reminder>",
+        "<dcp-",
+        "<dcf-",
+        "<tool_call-",
+        "<dcp_message-",
+    ];
+    for pattern in xml_patterns {
+        while let Some(start) = cleaned.find(pattern) {
+            let tag_name_end = cleaned[start..]
+                .find(|c: char| c == '>' || c == ' ')
+                .map(|i| start + i)
+                .unwrap_or(cleaned.len());
+            let tag_name = &cleaned[start..tag_name_end];
+            let close_tag = format!("</{}>", &tag_name[1..]);
+
+            if let Some(end) = cleaned.find(&close_tag) {
+                cleaned = format!(
+                    "{}{}",
+                    &cleaned[..start],
+                    &cleaned[end + close_tag.len()..]
+                );
+            } else {
+                let end = cleaned[start..]
+                    .find('\n')
+                    .map(|i| start + i)
+                    .unwrap_or(cleaned.len());
+                cleaned = format!("{}{}", &cleaned[..start], &cleaned[end..]);
+            }
+        }
+    }
+
+    let noise_patterns = [
+        "[Compressed conversation section]",
+        "[search-mode]",
+        "[analyze-mode]",
+        "MANDATORY delegate_task params",
+    ];
+    for pattern in noise_patterns {
+        cleaned = cleaned.replace(pattern, "");
+    }
+
+    let lines: Vec<&str> = cleaned.lines().filter(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { return false; }
+        if trimmed.starts_with("<dcp") { return false; }
+        if trimmed.starts_with("</dcp") { return false; }
+        if trimmed.starts_with("<dcf") { return false; }
+        if trimmed.starts_with("</dcf") { return false; }
+        if trimmed.starts_with("<dcp_message") { return false; }
+        if trimmed.starts_with("</dcp_message") { return false; }
+        true
+    }).collect();
+
+    cleaned = lines.join("\n");
+    cleaned.trim().to_string()
+}
+
+async fn fetch_existing_session_summaries(
+    store: &crate::store::lancedb::LanceStore,
+    session_id: Option<&str>,
+) -> Vec<Memory> {
+    let Some(sid) = session_id else {
+        return Vec::new();
+    };
+
+    let filter = ListFilter {
+        tags: Some(vec!["session_compress".to_string()]),
+        ..Default::default()
+    };
+
+    match store.list_filtered(&filter, 50, 0).await {
+        Ok(memories) => memories
+            .into_iter()
+            .filter(|m| m.session_id.as_deref() == Some(sid))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub async fn optimize_memories(

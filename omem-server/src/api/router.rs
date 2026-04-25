@@ -26,6 +26,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/memories",
             get(handlers::list_memories).post(handlers::create_memory),
         )
+        .route(
+            "/v1/memories/session-ingest",
+            post(handlers::session_ingest),
+        )
         .route("/v1/profile", get(handlers::get_profile))
         .route("/v1/stats", get(handlers::get_stats))
         .route("/v1/stats/config", get(handlers::get_config))

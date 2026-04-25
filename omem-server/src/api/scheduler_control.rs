@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 #[derive(Debug)]
 pub struct SchedulerControl {
@@ -7,6 +8,7 @@ pub struct SchedulerControl {
     pub clustering_paused: AtomicBool,
     pub lifecycle_running: AtomicBool,
     pub clustering_running: AtomicBool,
+    pub clustering_notify: Notify,
 }
 
 impl SchedulerControl {
@@ -16,6 +18,7 @@ impl SchedulerControl {
             clustering_paused: AtomicBool::new(false),
             lifecycle_running: AtomicBool::new(false),
             clustering_running: AtomicBool::new(false),
+            clustering_notify: Notify::new(),
         }
     }
 
@@ -41,6 +44,7 @@ impl SchedulerControl {
 
     pub fn resume_clustering(&self) {
         self.clustering_paused.store(false, Ordering::Relaxed);
+        self.clustering_notify.notify_waiters();
     }
 
     pub fn set_lifecycle_running(&self, running: bool) {

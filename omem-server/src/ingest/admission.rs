@@ -61,6 +61,8 @@ pub struct AdmissionAudit {
 
 pub struct AdmissionControl {
     preset: AdmissionPreset,
+    custom_reject_threshold: Option<f32>,
+    custom_admit_threshold: Option<f32>,
     embed: Arc<dyn EmbedService>,
     store: Arc<LanceStore>,
 }
@@ -73,9 +75,46 @@ impl AdmissionControl {
     ) -> Self {
         Self {
             preset,
+            custom_reject_threshold: None,
+            custom_admit_threshold: None,
             embed,
             store,
         }
+    }
+
+    /// Create AdmissionControl from a preset string (e.g. "high_recall", "balanced", "conservative").
+    /// Falls back to HighRecall if the string is unrecognized.
+    pub fn from_preset_str(
+        preset: &str,
+        embed: Arc<dyn EmbedService>,
+        store: Arc<LanceStore>,
+    ) -> Self {
+        let parsed = match preset.to_lowercase().as_str() {
+            "balanced" => AdmissionPreset::Balanced,
+            "conservative" => AdmissionPreset::Conservative,
+            "high_recall" => AdmissionPreset::HighRecall,
+            _ => {
+                tracing::warn!(%preset, "unknown admission preset, falling back to HighRecall");
+                AdmissionPreset::HighRecall
+            }
+        };
+        Self::new(parsed, embed, store)
+    }
+
+    pub fn with_custom_thresholds(mut self, reject: Option<f32>, admit: Option<f32>) -> Self {
+        self.custom_reject_threshold = reject;
+        self.custom_admit_threshold = admit;
+        self
+    }
+
+    fn reject_threshold(&self) -> f32 {
+        self.custom_reject_threshold
+            .unwrap_or_else(|| self.preset.reject_threshold())
+    }
+
+    fn admit_threshold(&self) -> f32 {
+        self.custom_admit_threshold
+            .unwrap_or_else(|| self.preset.admit_threshold())
     }
 
     pub async fn evaluate(
@@ -122,8 +161,8 @@ impl AdmissionControl {
             + W_TYPE_PRIOR * type_prior
             + W_SEMANTIC_QUALITY * semantic_quality;
 
-        let reject_th = self.preset.reject_threshold();
-        let admit_th = self.preset.admit_threshold();
+        let reject_th = self.reject_threshold();
+        let admit_th = self.admit_threshold();
 
         let (admitted, hint) = if composite < reject_th {
             (false, "reject".to_string())
