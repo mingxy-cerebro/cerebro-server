@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OmemClient } from "./client.js";
-import { autoRecallHook, compactingHook, keywordDetectionHook } from "./hooks.js";
+import { autoRecallHook, compactingHook, keywordDetectionHook, sessionIdleHook } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logError } from "./logger.js";
@@ -96,6 +96,7 @@ const OmemPlugin: Plugin = async (input) => {
     "chat.message": keywordDetectionHook(omemClient, containerTags, config.autoCaptureThreshold, tui, config.ingestMode),
     "experimental.session.compacting": compactingHook(omemClient, containerTags, tui, config.ingestMode),
     tool: buildTools(omemClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
+    event: sessionIdleHook(omemClient, containerTags, tui, config.ingestMode, config.autoCaptureThreshold),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;

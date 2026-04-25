@@ -18,25 +18,6 @@ const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
 const profileInjectedSessions = new Set<string>();
 
-function extractMemoryIds(result: unknown): string[] {
-  if (!result) return [];
-  if (Array.isArray(result)) {
-    return (result as Array<{ id?: string }>).map((m) => m.id).filter(Boolean) as string[];
-  }
-  if (typeof result === "object" && result !== null) {
-    const r = result as Record<string, unknown>;
-    if (Array.isArray(r.memories)) {
-      return (r.memories as Array<{ id?: string }>).map((m) => m.id).filter(Boolean) as string[];
-    }
-    if (Array.isArray(r.results)) {
-      return (r.results as Array<{ id?: string; memory?: { id?: string } }>)
-        .map((m) => m.id ?? m.memory?.id)
-        .filter(Boolean) as string[];
-    }
-  }
-  return [];
-}
-
 function formatRelativeAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
   const minutes = Math.floor(diffMs / 60_000);
@@ -278,7 +259,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
   };
 }
 
-export function keywordDetectionHook(client: OmemClient, containerTags: string[], threshold: number, tui: any, ingestMode: "smart" | "raw" = "smart") {
+export function keywordDetectionHook(_client: OmemClient, _containerTags: string[], threshold: number, _tui: any, _ingestMode: "smart" | "raw" = "smart") {
   return async (
     input: { sessionID: string; messageID?: string },
     output: { message: UserMessage; parts: Part[] },
@@ -307,38 +288,10 @@ export function keywordDetectionHook(client: OmemClient, containerTags: string[]
     });
 
     const messages = sessionMessages.get(input.sessionID)!;
+    // Ingest is now handled by sessionIdleHook (session.idle → sessionIngest API).
+    // This hook only collects messages and detects keywords for recall.
     if (messages.length >= threshold) {
-      try {
-        const result = await client.ingestMessages(messages, {
-          mode: ingestMode,
-          tags: [...containerTags, "auto-capture"],
-          sessionId: input.sessionID,
-        });
-        if (result === null) {
-          showToast(tui, "🔴 Capture Failed", `Memory capture blocked · check API Key and spiritual connection`, "error");
-        } else {
-          showToast(tui, "🧠 Memory Sealed", `${messages.length} dialogues captured · entrusted to the heavens for refinement`, "success");
-          const memoryIds = extractMemoryIds(result);
-          if (memoryIds.length > 0) {
-            const recordResult = await client.recordSessionRecall(
-              input.sessionID,
-              memoryIds,
-              "auto",
-              firstMessages.get(input.sessionID) || "",
-              0,
-              0,
-            );
-            if (recordResult) {
-              showToast(tui, "📦 Capture Recorded", `${memoryIds.length} memory(s) saved to session history`, "success");
-            } else {
-              showToast(tui, "🔴 Capture Record Failed", `Failed to save capture record · check API connection`, "error");
-            }
-          }
-          sessionMessages.delete(input.sessionID);
-        }
-      } catch {
-        showToast(tui, "🔴 Capture Failed", "Memory capture blocked · spiritual pulse anomaly", "error");
-      }
+      // Threshold reached — messages will be processed on next session.idle
     }
   };
 }
@@ -377,5 +330,57 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
       }
     } catch {
     }
+  };
+}
+
+const processedMessageIds = new Set<string>();
+
+export function sessionIdleHook(
+  omemClient: OmemClient,
+  _containerTags: string[],
+  tui: any,
+  _sdkClient: any,
+  _ingestMode: "smart" | "raw" = "smart",
+  threshold: number = 0,
+  _getMainSessionId?: () => string | undefined,
+) {
+  let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+  let isCapturing = false;
+
+  return async (input: { event: { type: string; properties?: any } }) => {
+    if (input.event.type !== "session.idle") return;
+
+    const sessionID = input.event.properties?.sessionID;
+    if (!sessionID) return;
+
+    if (idleTimeout) clearTimeout(idleTimeout);
+
+    idleTimeout = setTimeout(async () => {
+      if (isCapturing) return;
+      isCapturing = true;
+
+      try {
+        const collected = sessionMessages.get(sessionID);
+        if (!collected || collected.length === 0) return;
+
+        if (threshold > 1 && collected.length < threshold) return;
+
+        const conversationMessages = [...collected];
+
+        try {
+          await omemClient.sessionIngest(conversationMessages, sessionID);
+          sessionMessages.delete(sessionID);
+          showToast(tui, "🧠 Memory Sealed", `${conversationMessages.length} dialogues captured · entrusted to the heavens for refinement`, "success");
+        } catch (err) {
+          showToast(tui, "🔴 Session Capture Failed", String(err).substring(0, 100), "error");
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        showToast(tui, "🔴 Idle Capture Error", errMsg.substring(0, 100), "error");
+      } finally {
+        isCapturing = false;
+        idleTimeout = null;
+      }
+    }, 10000);
   };
 }

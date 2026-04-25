@@ -359,4 +359,16 @@ export class OmemClient {
     );
     return res?.recalls ?? [];
   }
+
+  async sessionIngest(
+    messages: Array<{ role: string; content: string }>,
+    sessionId?: string,
+    agentId?: string,
+  ): Promise<unknown> {
+    return this.post("/v1/memories/session-ingest", {
+      messages,
+      session_id: sessionId,
+      agent_id: agentId,
+    }, 60000);
+  }
 }
