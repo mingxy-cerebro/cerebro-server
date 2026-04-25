@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 
+use regex::RegexSet;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -11,6 +13,7 @@ use crate::ingest::extractor::FactExtractor;
 use crate::ingest::noise::NoiseFilter;
 use crate::ingest::privacy::{is_fully_private, strip_private_content};
 use crate::cluster::assigner::ClusterAssigner;
+use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::manager::ClusterManager;
 use crate::ingest::reconciler::Reconciler;
 use crate::ingest::session::{SessionMessage, SessionStore};
@@ -39,14 +42,11 @@ impl IngestPipeline {
         session_store: Arc<SessionStore>,
         embed: Arc<dyn EmbedService>,
         llm: Arc<dyn LlmService>,
+        cluster_store: Arc<ClusterStore>,
     ) -> Result<Self, OmemError> {
         let extractor = Arc::new(FactExtractor::new(llm.clone()));
         let reconciler = Arc::new(Reconciler::new(llm.clone(), store.clone(), embed.clone()));
-        let cluster_store = Arc::new(
-            crate::cluster::cluster_store::ClusterStore::new(store.db()).await
-                .map_err(|e| OmemError::Storage(format!("Failed to initialize cluster store: {e}")))?
-        );
-        let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone()));
+        let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), Some(llm.clone())));
         let cluster_assigner = Arc::new(ClusterAssigner::new(cluster_store, embed.clone()).with_llm(llm.clone()));
         let noise_filter = Arc::new(tokio::sync::Mutex::new(NoiseFilter::new(Vec::new())));
         let admission = Arc::new(AdmissionControl::new(
@@ -96,6 +96,26 @@ impl IngestPipeline {
         }
 
         let selected = select_messages(&request.messages);
+
+        // Layer 1: Pre-filter meta-operation messages before LLM extraction.
+        // Private content (marked with <private>) is preserved for quality evaluation.
+        let selected: Vec<IngestMessage> = selected
+            .into_iter()
+            .filter(|m| {
+                if m.content.contains("<private>") {
+                    true
+                } else if should_skip_content(&m.content) {
+                    debug!("skipping meta operation message (3+ patterns matched): {} chars", m.content.len());
+                    false
+                } else if is_meta_operation(&m.content) {
+                    debug!("skipping meta operation message: {} chars", m.content.len());
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         let extractor = self.extractor.clone();
         let reconciler = self.reconciler.clone();
         let cluster_assigner = self.cluster_assigner.clone();
@@ -178,7 +198,7 @@ impl IngestPipeline {
                     .unwrap_or(Category::Events);
 
                 let result = admission
-                    .evaluate(&fact.l0_abstract, &category, Some(&conversation_text))
+                    .evaluate(fact, &category, Some(&conversation_text))
                     .await;
 
                 match result {
@@ -195,12 +215,16 @@ impl IngestPipeline {
                         debug!(
                             fact = %fact.l0_abstract,
                             score = ar.score,
+                            hint = %ar.hint,
                             "rejected by admission"
                         );
                     }
                     Err(e) => {
-                        warn!(error = %e, "admission error, admitting by default");
-                        admitted_facts.push(fact.clone());
+                        warn!(
+                            error = %e,
+                            fact = %fact.l0_abstract,
+                            "admission error, rejecting by default"
+                        );
                     }
                 }
             }
@@ -209,7 +233,25 @@ impl IngestPipeline {
                 info!(task_id = %bg_task_id, "all facts rejected by admission control");
                 return;
             }
-            
+
+            for fact in &mut admitted_facts {
+                if fact.source_text.is_none() {
+                    fact.source_text = Some(conversation_text.clone());
+                }
+            }
+
+            for fact in &mut admitted_facts {
+                let llm_tagged = fact.tags.contains(&"私密".to_string());
+                let content_detected = detect_private_content(&fact.l2_content);
+                if llm_tagged || content_detected {
+                    fact.visibility = "private".to_string();
+                    fact.owner_agent_id = agent_id.clone().unwrap_or_default();
+                    if !llm_tagged && content_detected {
+                        fact.tags.push("私密".to_string());
+                    }
+                }
+            }
+
             match reconciler.reconcile(&admitted_facts, &tenant_id, agent_id.clone(), Some(session_id.clone())).await {
                 Ok(memories) => {
                     info!(
@@ -225,7 +267,7 @@ impl IngestPipeline {
                                 match result.action {
                                     crate::cluster::assigner::AssignAction::AutoAssign => {
                                         if let Some(cid) = result.cluster_id {
-                                            match cluster_manager.assign_to_cluster(&mem.id, &cid, &store
+                                            match cluster_manager.assign_to_cluster(&mem.id, &cid, store.clone()
                                             ).await {
                                                 Ok(_) => info!(memory_id = %mem.id, cluster_id = %cid, "assigned to existing cluster"),
                                                 Err(e) => warn!(error = %e, memory_id = %mem.id, "failed to assign memory to cluster"),
@@ -237,7 +279,14 @@ impl IngestPipeline {
                                             Ok(vectors) => {
                                                 if let Some(vector) = vectors.first() {
                                                     match cluster_manager.create_cluster(mem, vector).await {
-                                                        Ok(cluster) => info!(memory_id = %mem.id, cluster_id = %cluster.id, "created new cluster"),
+                                                        Ok(cluster) => {
+                                                            // 回写 memory.cluster_id，否则召回时聚合器找不到簇关系
+                                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
+                                                                warn!(error = %e, memory_id = %mem.id, "failed to link memory to new cluster");
+                                                            } else {
+                                                                info!(memory_id = %mem.id, cluster_id = %cluster.id, "created new cluster and linked memory");
+                                                            }
+                                                        }
                                                         Err(e) => warn!(error = %e, memory_id = %mem.id, "failed to create cluster"),
                                                     }
                                                 }
@@ -267,6 +316,67 @@ impl IngestPipeline {
     }
 }
 
+fn get_meta_regex_set() -> &'static RegexSet {
+    static META_RE: OnceLock<RegexSet> = OnceLock::new();
+    META_RE.get_or_init(|| {
+        RegexSet::new([
+            r"(?i)search returned",
+            r"(?i)found \d+ matching",
+            r"(?i)query\s*->\s*none",
+            r"(?i)extracted \d+ facts",
+            r"(?i)reconciliation complete",
+            r"(?i)compression #\d+",
+            r"(?i)dcp-message-id",
+            r"(?i)<system-reminder>",
+            r"(?i)background task",
+            r"(?i)task_id.*bg_",
+            r"(?i)session_id:\s*ses_",
+            r"(?i)cargo (build|test|check|run)",
+            r"(?i)npm (run|install|test)",
+            r"(?i)HTTP \d{3}",
+            r"(?i)status code \d+",
+            r"(?i)docker (ps|run|exec|logs)",
+            r"(?i)grep.*pattern",
+            r"(?i)ast_grep",
+            r"(?i)lsp_diagnostics",
+            r"(?i)git (status|log|diff|add|commit|push|pull)",
+        ])
+        .expect("meta operation regex compilation failed")
+    })
+}
+
+fn is_meta_operation(content: &str) -> bool {
+    get_meta_regex_set().is_match(content)
+}
+
+fn should_skip_content(content: &str) -> bool {
+    let content_lower = content.to_lowercase();
+
+    let system_patterns = [
+        "compression #",
+        "compressed conversation section",
+        "[system-reminder]",
+        "[dcp-message-id]",
+        "background task",
+        "tool call message",
+        "cargo check",
+        "cargo build",
+        "npm run build",
+        "git commit",
+        "git push",
+        "task_id",
+        "session_id",
+        "background_output",
+    ];
+
+    let match_count = system_patterns
+        .iter()
+        .filter(|p| content_lower.contains(*p))
+        .count();
+
+    match_count >= 3
+}
+
 fn select_messages(messages: &[IngestMessage]) -> Vec<IngestMessage> {
     let mut selected = Vec::new();
     let mut total_bytes = 0;
@@ -285,6 +395,33 @@ fn select_messages(messages: &[IngestMessage]) -> Vec<IngestMessage> {
 
     selected.reverse();
     selected
+}
+
+fn get_private_regex_set() -> &'static RegexSet {
+    static PRIVATE_RE: OnceLock<RegexSet> = OnceLock::new();
+    PRIVATE_RE.get_or_init(|| {
+        RegexSet::new([
+            r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+            r"密码[是为：:]\s*\S+",
+            r"password\s*[=:]\s*\S+",
+            r"sk-[a-zA-Z0-9]{20,}",
+            r"api[_-]?key\s*[=:]\s*\S+",
+            r"token\s*[=:]\s*\S+",
+            r"ssh-[a-z]{3,}\s+\S+",
+            r"mysql://",
+            r"postgres://",
+            r"mongodb://",
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+            r"1[3-9]\d{9}",
+            r"\b\d{16,19}\b",
+            r"\b\d{17}[\dXx]\b",
+        ])
+        .expect("private content regex compilation failed")
+    })
+}
+
+fn detect_private_content(text: &str) -> bool {
+    get_private_regex_set().is_match(text)
 }
 
 #[cfg(test)]
@@ -355,7 +492,10 @@ mod tests {
         session_store.init_table().await.expect("init sessions");
 
         let embed: Arc<dyn EmbedService> = Arc::new(MockEmbed);
-        let pipeline = IngestPipeline::new(store, session_store.clone(), embed, llm).await.expect("pipeline");
+        let cluster_store = Arc::new(
+            ClusterStore::new(store.db()).await.expect("cluster store")
+        );
+        let pipeline = IngestPipeline::new(store, session_store.clone(), embed, llm, cluster_store).await.expect("pipeline");
 
         (pipeline, session_store, dir)
     }
@@ -581,5 +721,45 @@ mod tests {
 
         let response = pipeline.ingest(request).await.expect("ingest");
         assert_eq!(response.stored_count, 1);
+    }
+
+    #[test]
+    fn test_detect_private_content_ip() {
+        assert!(detect_private_content("Server IP is 192.168.1.1"));
+        assert!(detect_private_content("Connect to 47.93.199.242"));
+        assert!(!detect_private_content("The year is 2024"));
+    }
+
+    #[test]
+    fn test_detect_private_content_password() {
+        assert!(detect_private_content("密码是 abc123"));
+        assert!(detect_private_content("password=secret123"));
+        assert!(detect_private_content("password: mypass"));
+        assert!(!detect_private_content("talking about passwords in general"));
+    }
+
+    #[test]
+    fn test_detect_private_content_api_key() {
+        assert!(detect_private_content("API key: sk-abcdefghijklmnopqrstuvwxyz"));
+        assert!(detect_private_content("api_key=xyz123"));
+        assert!(detect_private_content("token: bearer_abc123"));
+        assert!(detect_private_content("sk-live-51HxZ9l2eZvKYlo2C0XJqWn3"));
+    }
+
+    #[test]
+    fn test_detect_private_content_ssh_and_db() {
+        assert!(detect_private_content("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC..."));
+        assert!(detect_private_content("mysql://user:pass@localhost/db"));
+        assert!(detect_private_content("postgres://user:pass@host/db"));
+        assert!(detect_private_content("mongodb://user:pass@host/db"));
+    }
+
+    #[test]
+    fn test_detect_private_content_personal() {
+        assert!(detect_private_content("Contact me at user@example.com"));
+        assert!(detect_private_content("Phone: 13800138000"));
+        assert!(detect_private_content("Card: 6222021234567890123"));
+        assert!(detect_private_content("ID: 110101199001011234"));
+        assert!(!detect_private_content("The number 12345"));
     }
 }

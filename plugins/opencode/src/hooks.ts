@@ -102,13 +102,15 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
   if (clustered.cluster_summaries.length > 0) {
     sections.push("## 📋 主题簇（聚合记忆）");
     for (const cs of clustered.cluster_summaries) {
-      sections.push(`\n### ${cs.title} (整合自${cs.member_count}条记忆)`);
+      const scoreIndicator = cs.relevance_score >= 0.8 ? "★★★" : cs.relevance_score >= 0.6 ? "★★" : "★";
+      sections.push(`\n### ${cs.title} (整合自${cs.member_count}条记忆) ${scoreIndicator}`);
       sections.push(`> ${cs.summary}`);
       if (cs.key_memories.length > 0) {
         sections.push("**核心要点：**");
         for (const mem of cs.key_memories) {
           const content = truncate(mem.content, maxContentLength);
-          sections.push(`- ${content}`);
+          const importanceBar = mem.importance >= 0.7 ? "●" : mem.importance >= 0.4 ? "◐" : "○";
+          sections.push(`- ${importanceBar} ${content}`);
         }
       }
     }

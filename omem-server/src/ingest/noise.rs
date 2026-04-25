@@ -1,4 +1,5 @@
 use regex::Regex;
+use tracing::debug;
 
 const DEFAULT_NOISE_THRESHOLD: f32 = 0.82;
 const DEFAULT_MAX_LEARNED: usize = 200;
@@ -43,6 +44,7 @@ impl NoiseFilter {
 
         for pat in &self.regex_patterns {
             if pat.is_match(trimmed) {
+                debug!("noise regex matched: pattern={}", pat.as_str());
                 return true;
             }
         }
@@ -90,6 +92,41 @@ fn build_regex_patterns() -> Vec<Regex> {
         r"(?i)(query\s*->\s*none|no\s+explicit\s+solution|search\s+returned\s+0\s+results)",
         r"(?i)^(thanks|thank\s+you|ok|okay|sure|got\s+it|understood)[\s!.,?]*$",
         r"(?i)^(谢谢|好的|明白了|收到|了解)[\s!.,?！。？]*$",
+        // Layer 5: Extended system operation log patterns
+        r"(?i)extracted \d+ facts",
+        r"(?i)reconciliation complete",
+        r"(?i)found \d+ matching",
+        r"(?i)compression #\d+",
+        r"(?i)dcp-message-id",
+        r"(?i)system-reminder",
+        r"(?i)background task",
+        r"(?i)task_id.*bg_",
+        r"(?i)session_id:\s*ses_",
+        r"(?i)cargo (build|test|check)",
+        r"(?i)npm (run|install|test)",
+        r"(?i)HTTP \d{3}",
+        r"(?i)status code \d+",
+        r"(?i)docker (ps|run|exec|logs)",
+        r"(?i)git (status|log|diff|add|commit|push)",
+        r"(?i)lsp_diagnostics",
+        r"(?i)ast_grep",
+        r"(?i)semantic search",
+        r"(?i)\d+ files? (changed|modified|created)",
+        r"(?i)build (succeeded|failed)",
+        r"(?i)test result: (ok|failed)",
+        r"(?i)\d+ passed.*\d+ failed",
+        // Layer 5: Extended system operation log patterns
+        r"(?i)compressed (conversation|block)",
+        r"(?i)\[system-reminder\]",
+        r"(?i)\[dcp-message-id\]",
+        r"(?i)background task (launched|completed|error)",
+        r"(?i)task_id.*session_id",
+        r"(?i)cargo (check|build|test|run)",
+        r"(?i)npm run (build|test|start)",
+        r"(?i)git (commit|push|pull|add)",
+        r"(?i)background_output",
+        r"(?i)playwright_browser",
+        r"(?i)Thinking自检",
     ];
 
     patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
@@ -122,6 +159,27 @@ pub const NOISE_PROTOTYPE_TEXTS: &[&str] = &[
     "query -> none, no results",
     "I don't have specific details about that topic",
     "没有找到相关的信息",
+    // Layer 5: System log prototypes
+    "search returned 0 results for query",
+    "extracted 5 facts from conversation",
+    "reconciliation complete: 3 merged, 2 skipped",
+    "background task bg_abc123 completed",
+    "cargo build --release finished in 45s",
+    "HTTP 200 OK response received from API",
+    "docker ps shows 3 running containers",
+    "git status shows 2 modified files",
+    "compression #18: compressed 130 messages",
+    "lsp_diagnostics returned 0 errors",
+    // Layer 5: Extended system log prototypes
+    "compressed conversation section",
+    "[system-reminder] background task launched",
+    "[dcp-message-id] task_id=abc session_id=def",
+    "cargo check --all-targets finished",
+    "npm run build completed with warnings",
+    "git pull origin main merged 3 commits",
+    "background_output received for task",
+    "playwright_browser_click element clicked",
+    "Thinking自检 completed",
 ];
 
 #[cfg(test)]

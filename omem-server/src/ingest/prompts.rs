@@ -28,6 +28,7 @@ pub fn build_reconcile_prompt(
     facts: &[ExtractedFact],
     existing: &[Memory],
     id_map: &[(usize, &str)], // (int_id -> real uuid)
+    fuzzy_pairs: &[(usize, usize)],
 ) -> (String, String) {
     let system = RECONCILE_SYSTEM_PROMPT.to_string();
 
@@ -39,6 +40,15 @@ pub fn build_reconcile_prompt(
             "[{}] (category: {}) {}\n",
             i, fact.category, fact.l0_abstract
         ));
+    }
+
+    if !fuzzy_pairs.is_empty() {
+        user.push_str("\n## Potential Duplicates\n");
+        user.push_str("The following new fact pairs have very high textual similarity (>85%). ");
+        user.push_str("Carefully review whether they are true duplicates (one should be SKIPPED) or represent genuinely different information:\n");
+        for (i, j) in fuzzy_pairs {
+            user.push_str(&format!("- [{}] and [{}]\n", i, j));
+        }
     }
 
     if existing.is_empty() {
@@ -142,6 +152,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 9. Same meaning, different wording → SKIP (not MERGE).
 10. Age is a tiebreaker: when a new fact conflicts with an old memory on the same topic, the older memory is more likely outdated → prefer SUPERSEDE.
 11. When in doubt, prefer CREATE over SKIP (avoid losing information).
+12. When two new facts are marked as 'Potential Duplicates', evaluate whether they convey the same core information. If yes, one should SKIP. If they capture different aspects or nuances, both may CREATE.
 
 ## Output Format
 Return ONLY valid JSON:
@@ -315,11 +326,12 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are an information extraction engine. Yo
   - "Server IP: 192.168.1.1, root password: xxx" → tags MUST include "私密"
   - "API key: sk-xxxxxxxx" → tags MUST include "私密"
   - "I had a fight with my wife" → tags MUST include "私密"
+- **CRITICAL**: When in doubt about privacy, ALWAYS add "私密" tag. It is better to over-tag than to miss sensitive content. If the user mentions any server configuration, credential, or personal detail that they wouldn't want publicly visible, it MUST have "私密" tag.
 
 ## General Rules
 - Extract facts ONLY from USER messages. Assistant messages provide context only.
 - Each fact must be atomic — one piece of information per fact.
-- Maximum 50 facts per extraction.
+- Maximum 15 facts per extraction.
 
 ## Categories
 Classify each fact into exactly one category:
@@ -345,28 +357,187 @@ Do NOT extract:
 - Temporary or ephemeral information (weather, current time)
 - Tool/function output or raw data dumps
 - Greetings, pleasantries, or filler
+- AI assistant's internal operation logs (search results, tool outputs, compression logs)
+- Meta-information about the conversation (message counts, session IDs, system reminders)
+- Development/build/test output (cargo build, npm test, git operations)
+
+## Quality Gate (CRITICAL)
+Before extracting each fact, evaluate:
+1. FUTURE UTILITY: Would this be useful in a FUTURE conversation?
+2. SOURCE CHECK: Is this the USER's genuine info, not an AI's internal operation?
+3. SPECIFICITY: Is this SPECIFIC and ACTIONABLE, not vague/generic?
+If ANY answer is NO, SKIP this fact.
+
+Examples to SKIP: "User asked about X", "System searched 5 records", "Compression #18 completed"
+Examples to EXTRACT: "User prefers dark mode", "Project uses Rust+React", "User dislikes verbose responses"
 
 ## Output Format
 Return ONLY valid JSON:
-{"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}]}
+{"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."],"confidence":N}]}
+
+- `confidence` is REQUIRED for each fact. Rate 1-5:
+  - 5 = Very high value — specific, durable, actionable user info
+  - 4 = High value — clear user preference or important fact
+  - 3 = Moderate value — somewhat useful but not critical
+  - 2 = Low value — generic, vague, or likely ephemeral
+  - 1 = Trivial — greetings, meta-info, system logs, etc.
+- Facts with confidence < 3 will be discarded. Do not output them.
 
 ## Examples
 
 ### Example 1 — Profile (Chinese Input → Chinese Output)
 User says: "我是Stripe的后端工程师，在支付团队工作。"
 ```json
-{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["职业", "stripe"]}]}
+{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["职业", "stripe"], "confidence": 4}]}
 ```
 
 ### Example 2 — Preference (Chinese Input → Chinese Output)
 User says: "我习惯用Rust做系统编程，比C++安全多了。"
 ```json
-{"memories": [{"l0_abstract": "用户偏好使用Rust进行系统编程", "l1_overview": "**语言**: Rust（系统编程首选）\n**原因**: 比C++更安全", "l2_content": "用户表达了对Rust的偏好，在进行系统编程时选择Rust而非C++，主要原因是Rust的安全性优势。", "category": "preferences", "tags": ["rust", "编程语言"]}]}
+{"memories": [{"l0_abstract": "用户偏好使用Rust进行系统编程", "l1_overview": "**语言**: Rust（系统编程首选）\n**原因**: 比C++更安全", "l2_content": "用户表达了对Rust的偏好，在进行系统编程时选择Rust而非C++，主要原因是Rust的安全性优势。", "category": "preferences", "tags": ["rust", "编程语言"], "confidence": 4}]}
 ```
 
 ### Example 3 — Case with Private Content (Chinese Input → Chinese Output + 私密标签)
 User says: "我的服务器IP是47.93.199.242，root密码是Mengfanbo@0714，部署了omem服务。"
 ```json
-{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["服务器", "omem", "私密"]}]}
+{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["服务器", "omem", "私密"], "confidence": 3}]}
 ```
+"#;
+
+const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a concise title and summary for a cluster of related memories.
+
+## ABSOLUTE RULES (Violating any of these is a FAILURE)
+
+### Rule 1: Language Preservation (MANDATORY)
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORIES.**
+- If the input memories are in Chinese, EVERY SINGLE FIELD must be in Chinese: title, summary, EVERYTHING.
+- If the input memories are in English, EVERY SINGLE FIELD must be in English.
+- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
+- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
+
+## Task
+Given a set of related memory entries, produce:
+1. A **title**: at most 5 words, highly condensed, capturing the core theme.
+2. A **summary**: 1-2 sentences that概括 (summarize) the shared topic across all members.
+
+## Output Format
+Return ONLY valid JSON:
+{"title": "...", "summary": "..."}
+"#;
+
+const CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to generate a concise title and summary for a new memory cluster based on its anchor memory.
+
+## ABSOLUTE RULES (Violating any of these is a FAILURE)
+
+### Rule 1: Language Preservation (MANDATORY)
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORY.**
+- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese: title, summary, EVERYTHING.
+- If the input is in English, EVERY SINGLE FIELD must be in English.
+- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
+- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
+
+## Task
+Given the content and abstract of a single anchor memory, produce:
+1. A **title**: at most 5 words, highly condensed, capturing the core theme.
+2. A **summary**: 1-2 sentences that概括 (summarize) the main topic of this memory.
+
+## Output Format
+Return ONLY valid JSON:
+{"title": "...", "summary": "..."}
+"#;
+
+/// Returns (system_prompt, user_prompt) for regenerating a cluster title and summary
+/// when the cluster gains new members.
+pub fn build_cluster_summary_prompt(
+    title: &str,
+    existing_summary: &str,
+    member_contents: &[String],
+) -> (String, String) {
+    let mut user = String::with_capacity(2048);
+    user.push_str("## Current Cluster Info\n");
+    user.push_str(&format!("Title: {}\n", title));
+    if !existing_summary.is_empty() {
+        user.push_str(&format!("Existing Summary: {}\n", existing_summary));
+    }
+    user.push_str("\n## Member Memories\n");
+    for (i, content) in member_contents.iter().enumerate() {
+        let truncated: String = content.chars().take(200).collect();
+        let display = if content.chars().count() > 200 {
+            format!("{}...", truncated)
+        } else {
+            truncated
+        };
+        user.push_str(&format!("[{}] {}\n", i + 1, display));
+    }
+    user.push_str("\nReturn ONLY valid JSON with title and summary.");
+    (CLUSTER_SUMMARY_SYSTEM_PROMPT.to_string(), user)
+}
+
+/// Returns (system_prompt, user_prompt) for initial cluster title and summary generation
+/// when a cluster is first created from a single anchor memory.
+pub fn build_cluster_initial_summary_prompt(
+    memory_content: &str,
+    memory_abstract: &str,
+) -> (String, String) {
+    let mut user = String::with_capacity(1024);
+    user.push_str("## Anchor Memory\n");
+    user.push_str(&format!("Abstract: {}\n", memory_abstract));
+    let truncated: String = memory_content.chars().take(300).collect();
+    let display = if memory_content.chars().count() > 300 {
+        format!("{}...", truncated)
+    } else {
+        truncated
+    };
+    user.push_str(&format!("Content: {}\n", display));
+    user.push_str("\nReturn ONLY valid JSON with title and summary.");
+    (CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT.to_string(), user)
+}
+
+/// Returns (system_prompt, user_prompt) for merging multiple memories into one.
+pub fn build_merge_prompt(memories: &[Memory]) -> (String, String) {
+    let system = MERGE_SYSTEM_PROMPT.to_string();
+
+    let mut user = String::with_capacity(2048);
+    user.push_str("## Memories to Merge\n\n");
+    for (i, mem) in memories.iter().enumerate() {
+        user.push_str(&format!("[{}] (category: {})\n", i, mem.category));
+        user.push_str(&format!("Abstract: {}\n", mem.l0_abstract));
+        let truncated: String = mem.content.chars().take(300).collect();
+        let display = if mem.content.chars().count() > 300 {
+            format!("{}...", truncated)
+        } else {
+            truncated
+        };
+        user.push_str(&format!("Content: {}\n\n", display));
+    }
+    user.push_str("Return ONLY valid JSON with the merged result.");
+    (system, user)
+}
+
+const MERGE_SYSTEM_PROMPT: &str = r#"You are a memory merge engine. Your task is to combine multiple related memories into a single, comprehensive memory that preserves ALL important information from each source.
+
+## ABSOLUTE RULES (Violating any of these is a FAILURE)
+
+### Rule 1: Language Preservation (MANDATORY)
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORIES.**
+- If the input memories are Chinese, EVERY SINGLE FIELD must be in Chinese.
+- If the input memories are English, EVERY SINGLE FIELD must be in English.
+
+## Task
+Given multiple memories covering related topics, produce:
+1. **l0_abstract**: A single sentence index entry capturing the merged topic.
+2. **l1_overview**: A structured markdown summary (2-4 lines) covering all key points.
+3. **l2_content**: A comprehensive narrative preserving ALL relevant details, context, and nuance from all source memories.
+4. **category**: The most appropriate category for the merged memory.
+5. **tags**: Union of all source tags, plus any new tags that better describe the merged content.
+
+## Merge Rules
+1. Preserve ALL unique information — no data loss.
+2. Resolve contradictions by keeping the more recent or more detailed version.
+3. Remove redundancy while preserving nuance.
+4. Keep the category that best fits the dominant topic.
+
+## Output Format
+Return ONLY valid JSON:
+{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}
 "#;

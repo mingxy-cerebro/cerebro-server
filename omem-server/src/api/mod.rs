@@ -1,7 +1,9 @@
 pub mod error;
+pub mod event_bus;
 pub mod handlers;
 pub mod middleware;
 pub mod router;
+pub mod scheduler_control;
 pub mod server;
 
 pub use router::build_router;
@@ -67,6 +69,13 @@ mod tests {
         let embed: Arc<dyn EmbedService> = Arc::new(TestEmbedder);
         let llm: Arc<dyn LlmService> = Arc::new(TestLlm);
 
+        let cluster_store = Arc::new(
+            crate::cluster::cluster_store::ClusterStore::new(
+                &lancedb::connect(&uri).execute().await.expect("db connect"),
+            )
+            .await
+            .expect("cluster store"),
+        );
         let state = Arc::new(AppState {
             store_manager,
             tenant_store,
@@ -74,9 +83,12 @@ mod tests {
             embed,
             llm: llm.clone(),
             recall_llm: llm,
+            cluster_store,
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            event_bus: Arc::new(crate::api::event_bus::EventBus::new()),
+            scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
         });
 
         (build_router(state), dir)

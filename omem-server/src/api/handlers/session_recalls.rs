@@ -33,6 +33,7 @@ pub struct ShouldRecallRequest {
     pub similarity_threshold: Option<f32>,
     pub max_results: Option<usize>,
     pub project_tags: Option<Vec<String>>,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -135,10 +136,12 @@ pub async fn should_recall(
         None
     };
 
+    let denoised_query = denoise_for_recall(&body.query_text);
+
     let system = SHOULD_RECALL_SYSTEM_PROMPT;
     let user = format!(
         "用户问题：{}\n\n这个问题是否需要从用户个人知识库中检索相关记忆来回答？回答 yes 或 no。",
-        body.query_text
+        denoised_query
     );
 
     let (llm_yes, _llm_reason) = match state.recall_llm.complete_text(system, &user).await {
@@ -156,7 +159,7 @@ pub async fn should_recall(
 
     let vectors = state
         .embed
-        .embed(std::slice::from_ref(&body.query_text))
+        .embed(std::slice::from_ref(&denoised_query))
         .await
         .map_err(|e| OmemError::Embedding(format!("failed to embed query: {e}")))?;
     let query_vector = vectors.into_iter().next();
@@ -180,6 +183,19 @@ pub async fn should_recall(
 
     let effective_min_score = if llm_yes { min_score } else { min_score * 0.5 };
 
+    let spaces = state
+        .space_store
+        .list_spaces_for_user(&auth.tenant_id)
+        .await?;
+    let accessible_space_ids: Vec<String> = spaces.iter().map(|s| s.id.clone()).collect();
+
+    let visibility_filter = body
+        .agent_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|agent_id| store.build_visibility_filter(agent_id, &accessible_space_ids));
+    let vis_ref = visibility_filter.as_deref();
+
     // Two-phase search: project-first, then global fallback
     let project_tags_slice = body.project_tags.as_deref();
     let mut all_results: Vec<(Memory, f32)> = Vec::new();
@@ -190,13 +206,13 @@ pub async fn should_recall(
         if !tags.is_empty() {
             let project_results = if is_zero_vector {
                 store
-                    .fts_search(&body.query_text, max_results, None, None, Some(tags))
+                    .fts_search(&body.query_text, max_results, None, vis_ref, Some(tags))
                     .await
                     .unwrap_or_default()
             } else {
                 let search_vec = query_vector.as_ref().unwrap();
                 store
-                    .vector_search(search_vec, max_results, effective_min_score, None, None, Some(tags))
+                    .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, Some(tags))
                     .await
                     .unwrap_or_default()
             };
@@ -221,13 +237,13 @@ pub async fn should_recall(
         let remaining = max_results - all_results.len();
         let global_results = if is_zero_vector {
             store
-                .fts_search(&body.query_text, remaining + 5, Some("global"), None, None)
+                .fts_search(&body.query_text, remaining + 5, Some("global"), vis_ref, None)
                 .await
                 .unwrap_or_default()
         } else {
             let search_vec = query_vector.as_ref().unwrap();
             store
-                .vector_search(search_vec, remaining + 5, effective_min_score, Some("global"), None, None)
+                .vector_search(search_vec, remaining + 5, effective_min_score, Some("global"), vis_ref, None)
                 .await
                 .unwrap_or_default()
         };
@@ -256,13 +272,13 @@ pub async fn should_recall(
     if project_tags_slice.is_none() || project_tags_slice.map_or(true, |t| t.is_empty()) {
         all_results = if is_zero_vector {
             store
-                .fts_search(&body.query_text, max_results, None, None, None)
+                .fts_search(&body.query_text, max_results, None, vis_ref, None)
                 .await
                 .unwrap_or_default()
         } else {
             let search_vec = query_vector.as_ref().unwrap();
             store
-                .vector_search(search_vec, max_results, effective_min_score, None, None, None)
+                .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, None)
                 .await
                 .unwrap_or_default()
         };
@@ -279,33 +295,20 @@ pub async fn should_recall(
     tracing::info!(query = %body.query_text, result_count = memories.len(), should_recall = !memories.is_empty(), "should_recall_result");
 
     let clustered = if !memories.is_empty() {
-        let cluster_store: Option<std::sync::Arc<crate::cluster::cluster_store::ClusterStore>> = 
-            match crate::cluster::cluster_store::ClusterStore::new(store.db()).await {
-                Ok(cs) => Some(std::sync::Arc::new(cs)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "session_recall_cluster_store_init_failed");
-                    None
-                }
-            };
-        
-        if let Some(cs) = cluster_store {
-            let aggregator = crate::cluster::aggregator::ClusterAggregator::new(cs);
-            match aggregator.aggregate(memories.iter().map(|m| m.memory.clone()).collect()).await {
-                Ok(clustered) => {
-                    tracing::info!(
-                        cluster_count = clustered.cluster_summaries.len(),
-                        standalone_count = clustered.standalone_memories.len(),
-                        "session_recall_aggregated"
-                    );
-                    Some(clustered)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "session_recall_aggregation_failed");
-                    None
-                }
+        let aggregator = crate::cluster::aggregator::ClusterAggregator::new(state.cluster_store.clone());
+        match aggregator.aggregate(memories.iter().map(|m| m.memory.clone()).collect()).await {
+            Ok(clustered) => {
+                tracing::info!(
+                    cluster_count = clustered.cluster_summaries.len(),
+                    standalone_count = clustered.standalone_memories.len(),
+                    "session_recall_aggregated"
+                );
+                Some(clustered)
             }
-        } else {
-            None
+            Err(e) => {
+                tracing::warn!(error = %e, "session_recall_aggregation_failed");
+                None
+            }
         }
     } else {
         None
@@ -494,4 +497,25 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+fn denoise_for_recall(text: &str) -> String {
+    let max_chars = 200;
+    let mut cleaned = text.to_string();
+
+    let re_tags = regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new("").unwrap());
+    cleaned = re_tags.replace_all(&cleaned, "").to_string();
+
+    let re_code = regex::Regex::new(r"```[\s\S]*?```").unwrap_or_else(|_| regex::Regex::new("").unwrap());
+    cleaned = re_code.replace_all(&cleaned, "").to_string();
+
+    let re_ws = regex::Regex::new(r"\s+").unwrap_or_else(|_| regex::Regex::new("").unwrap());
+    cleaned = re_ws.replace_all(&cleaned.trim(), " ").to_string();
+
+    if cleaned.chars().count() > max_chars {
+        let truncated: String = cleaned.chars().take(max_chars).collect();
+        format!("{}...(truncated)", truncated)
+    } else {
+        cleaned
+    }
 }

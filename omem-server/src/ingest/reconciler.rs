@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
@@ -15,8 +16,8 @@ use crate::ingest::types::{BatchDedupResult, ExtractedFact, ReconcileResult};
 use crate::llm::{complete_json, LlmService};
 use crate::store::LanceStore;
 
-const DEFAULT_MAX_EXISTING: usize = 60;
-const DEFAULT_MAX_PER_FACT: usize = 5;
+const DEFAULT_MAX_EXISTING: usize = 150;
+const DEFAULT_MAX_PER_FACT: usize = 20;
 const DEFAULT_MIN_SIMILARITY: f32 = 0.3;
 
 pub struct Reconciler {
@@ -64,15 +65,38 @@ impl Reconciler {
             ));
         }
 
-        if existing.is_empty() {
-            if facts.len() > 1 {
-                let deduped = self.batch_self_dedup(facts).await?;
-                return self.create_all_facts(&deduped, tenant_id, agent_id.clone(), session_id.clone()).await;
-            }
-            return self.create_all_facts(facts, tenant_id, agent_id.clone(), session_id.clone()).await;
-        }
+        // 2c: batch self-dedup always runs (regardless of whether existing is empty)
+        let facts: Vec<ExtractedFact> = if facts.len() > 1 {
+            self.batch_self_dedup(facts).await?
+        } else {
+            facts.to_vec()
+        };
 
         let mut created_memories = Vec::new();
+
+        // 2a: exact match dedup (hard hash + substring) against existing memories
+        let (exact_skipped, exact_upgraded, facts) = self.exact_match_dedup(&facts, &existing).await?;
+        if exact_skipped > 0 {
+            info!(
+                count = exact_skipped,
+                "facts skipped by exact match dedup (existing has higher or equal importance)"
+            );
+        }
+        if !exact_upgraded.is_empty() {
+            info!(
+                count = exact_upgraded.len(),
+                "existing memories upgraded by exact match dedup (incoming has higher importance)"
+            );
+            created_memories.extend(exact_upgraded);
+        }
+
+        if facts.is_empty() {
+            return Ok(created_memories);
+        }
+
+        if existing.is_empty() {
+            return self.create_all_facts(&facts, tenant_id, agent_id.clone(), session_id.clone()).await;
+        }
         let mut remaining_facts: Vec<(usize, &ExtractedFact)> = Vec::new();
 
         for (idx, fact) in facts.iter().enumerate() {
@@ -91,10 +115,13 @@ impl Reconciler {
         let remaining_extracted: Vec<ExtractedFact> =
             remaining_facts.iter().map(|(_, f)| (*f).clone()).collect();
 
+        // 2d: fuzzy dedup pairs among remaining facts
+        let fuzzy_pairs = compute_fuzzy_pairs(&remaining_extracted);
+
         let (id_map, int_to_uuid) = build_id_maps(&existing);
 
         let (system, user) =
-            prompts::build_reconcile_prompt(&remaining_extracted, &existing, &id_map);
+            prompts::build_reconcile_prompt(&remaining_extracted, &existing, &id_map, &fuzzy_pairs);
         let result: ReconcileResult = complete_json(self.llm.as_ref(), &system, &user).await?;
 
         for decision in &result.decisions {
@@ -135,7 +162,7 @@ impl Reconciler {
                     let merged_content = decision
                         .merged_content
                         .as_deref()
-                        .unwrap_or(&fact.l0_abstract);
+                        .unwrap_or(&fact.l2_content);
 
                     let mut updated = target;
                     updated.content = merged_content.to_string();
@@ -552,6 +579,8 @@ impl Reconciler {
         mem.agent_id = agent_id;
         mem.session_id = session_id;
         mem.source = Some("ingest".to_string());
+        mem.visibility = fact.visibility.clone();
+        mem.owner_agent_id = fact.owner_agent_id.clone();
 
         let embeddings = self
             .embed
@@ -562,6 +591,238 @@ impl Reconciler {
         self.store.create(&mem, vector).await?;
         Ok(mem)
     }
+
+    async fn exact_match_dedup(
+        &self,
+        facts: &[ExtractedFact],
+        existing: &[Memory],
+    ) -> Result<(usize, Vec<Memory>, Vec<ExtractedFact>), OmemError> {
+        if existing.is_empty() || facts.is_empty() {
+            return Ok((0, Vec::new(), facts.to_vec()));
+        }
+
+        let mut existing_by_hash: HashMap<String, &Memory> = HashMap::new();
+        for mem in existing {
+            let normalized = normalize_for_dedup(&mem.content);
+            let hash = content_hash(&normalized);
+            existing_by_hash.insert(hash, mem);
+        }
+
+        let mut skipped = 0;
+        let mut upgraded = Vec::new();
+        let mut remaining = Vec::with_capacity(facts.len());
+
+        for fact in facts {
+            let fact_content = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
+            let normalized_fact = normalize_for_dedup(fact_content);
+            let fact_hash = content_hash(&normalized_fact);
+
+            let mut is_duplicate = false;
+            let category: Category = fact.category.parse().unwrap_or(Category::Profile);
+            let fact_importance = category_importance(&category, fact.quality_score);
+
+            // Hard hash check
+            if let Some(existing_mem) = existing_by_hash.get(&fact_hash) {
+                if existing_mem.importance >= fact_importance {
+                    debug!(
+                        fact_hash = %fact_hash,
+                        existing_id = %existing_mem.id,
+                        existing_importance = existing_mem.importance,
+                        fact_importance = fact_importance,
+                        "hard hash match: existing has higher or equal importance, skipping"
+                    );
+                    skipped += 1;
+                } else {
+                    debug!(
+                        fact_hash = %fact_hash,
+                        existing_id = %existing_mem.id,
+                        existing_importance = existing_mem.importance,
+                        fact_importance = fact_importance,
+                        "hard hash match: fact has higher importance, upgrading existing"
+                    );
+                    let mut updated = (*existing_mem).clone();
+                    updated.content = fact_content.to_string();
+                    updated.l0_abstract = fact.l0_abstract.clone();
+                    updated.l1_overview = fact.l1_overview.clone();
+                    updated.l2_content = fact.l2_content.clone();
+                    updated.tags = fact.tags.clone();
+                    updated.confidence = fact.quality_score.clamp(0.1, 1.0);
+                    updated.importance = fact_importance;
+                    updated.updated_at = chrono::Utc::now().to_rfc3339();
+
+                    let embeddings = self.embed.embed(&[fact_content.to_string()]).await?;
+                    let vector = embeddings.first().map(|v| v.as_slice());
+                    self.store.update(&updated, vector).await?;
+                    upgraded.push(updated);
+                }
+                continue;
+            }
+
+            // Substring check on l0_abstract
+            if !is_duplicate {
+                let fact_l0_lower = fact.l0_abstract.to_lowercase();
+                for existing_mem in existing {
+                    let existing_l0_lower = existing_mem.l0_abstract.to_lowercase();
+                    if fact_l0_lower.contains(&existing_l0_lower) || existing_l0_lower.contains(&fact_l0_lower) {
+                        is_duplicate = true;
+                        if existing_mem.importance >= fact_importance {
+                            debug!(
+                                fact_l0 = %fact.l0_abstract,
+                                existing_id = %existing_mem.id,
+                                existing_importance = existing_mem.importance,
+                                fact_importance = fact_importance,
+                                "substring match: existing has higher or equal importance, skipping"
+                            );
+                            skipped += 1;
+                        } else {
+                            debug!(
+                                fact_l0 = %fact.l0_abstract,
+                                existing_id = %existing_mem.id,
+                                existing_importance = existing_mem.importance,
+                                fact_importance = fact_importance,
+                                "substring match: fact has higher importance, upgrading existing"
+                            );
+                            let mut updated = (*existing_mem).clone();
+                            updated.content = fact_content.to_string();
+                            updated.l0_abstract = fact.l0_abstract.clone();
+                            updated.l1_overview = fact.l1_overview.clone();
+                            updated.l2_content = fact.l2_content.clone();
+                            updated.tags = fact.tags.clone();
+                            updated.confidence = fact.quality_score.clamp(0.1, 1.0);
+                            updated.importance = fact_importance;
+                            updated.updated_at = chrono::Utc::now().to_rfc3339();
+
+                            let embeddings = self.embed.embed(&[fact_content.to_string()]).await?;
+                            let vector = embeddings.first().map(|v| v.as_slice());
+                            self.store.update(&updated, vector).await?;
+                            upgraded.push(updated);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Jaccard similarity check (catches semantic near-duplicates like "ocosay重构完成" vs "ocosay重构九项任务完成")
+            if !is_duplicate {
+                let mut best_match: Option<(f32, &Memory)> = None;
+                for existing_mem in existing {
+                    let sim = jaccard_similarity(&fact.l0_abstract, &existing_mem.l0_abstract);
+                    if sim > 0.6 {
+                        match best_match {
+                            None => best_match = Some((sim, existing_mem)),
+                            Some((best_sim, _)) if sim > best_sim => best_match = Some((sim, existing_mem)),
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some((sim, existing_mem)) = best_match {
+                    is_duplicate = true;
+                    if existing_mem.importance >= fact_importance {
+                        debug!(
+                            fact_l0 = %fact.l0_abstract,
+                            existing_id = %existing_mem.id,
+                            jaccard = sim,
+                            "jaccard match: existing has higher or equal importance, skipping"
+                        );
+                        skipped += 1;
+                    } else {
+                        debug!(
+                            fact_l0 = %fact.l0_abstract,
+                            existing_id = %existing_mem.id,
+                            jaccard = sim,
+                            "jaccard match: fact has higher importance, upgrading existing"
+                        );
+                        let mut updated = (*existing_mem).clone();
+                        updated.content = fact_content.to_string();
+                        updated.l0_abstract = fact.l0_abstract.clone();
+                        updated.l1_overview = fact.l1_overview.clone();
+                        updated.l2_content = fact.l2_content.clone();
+                        updated.tags = fact.tags.clone();
+                        updated.confidence = fact.quality_score.clamp(0.1, 1.0);
+                        updated.importance = fact_importance;
+                        updated.updated_at = chrono::Utc::now().to_rfc3339();
+
+                        let embeddings = self.embed.embed(&[fact_content.to_string()]).await?;
+                        let vector = embeddings.first().map(|v| v.as_slice());
+                        self.store.update(&updated, vector).await?;
+                        upgraded.push(updated);
+                    }
+                }
+            }
+
+            if !is_duplicate {
+                remaining.push(fact.clone());
+            }
+        }
+
+        Ok((skipped, upgraded, remaining))
+    }
+}
+
+fn normalize_for_dedup(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut prev_was_space = true;
+
+    for ch in content.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                result.push(lower);
+            }
+            prev_was_space = false;
+        } else if !prev_was_space {
+            result.push(' ');
+            prev_was_space = true;
+        }
+    }
+
+    if result.ends_with(' ') {
+        result.pop();
+    }
+
+    result
+}
+
+fn content_hash(content: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    content.trim().to_lowercase().hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+fn jaccard_similarity(a: &str, b: &str) -> f32 {
+    let norm_a = normalize_for_dedup(a);
+    let norm_b = normalize_for_dedup(b);
+
+    let chars_a: Vec<char> = norm_a.chars().collect();
+    let chars_b: Vec<char> = norm_b.chars().collect();
+
+    let grams_a: HashSet<String> = chars_a.windows(3).map(|w| w.iter().collect()).collect();
+    let grams_b: HashSet<String> = chars_b.windows(3).map(|w| w.iter().collect()).collect();
+
+    if grams_a.is_empty() && grams_b.is_empty() {
+        return 1.0;
+    }
+    if grams_a.is_empty() || grams_b.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = grams_a.intersection(&grams_b).count();
+    let union = grams_a.union(&grams_b).count();
+
+    intersection as f32 / union as f32
+}
+
+fn compute_fuzzy_pairs(facts: &[ExtractedFact]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for i in 0..facts.len() {
+        for j in (i + 1)..facts.len() {
+            let sim = jaccard_similarity(&facts[i].l0_abstract, &facts[j].l0_abstract);
+            if sim > 0.85 {
+                pairs.push((i, j));
+            }
+        }
+    }
+    pairs
 }
 
 fn category_importance(category: &Category, quality_score: f32) -> f32 {
@@ -673,6 +934,10 @@ mod tests {
             category: category.to_string(),
             tags: vec![],
             source_text: None,
+            quality_score: 0.0,
+            visibility: "global".to_string(),
+            owner_agent_id: String::new(),
+            llm_confidence: 0,
         }
     }
 
@@ -861,8 +1126,8 @@ mod tests {
     async fn test_uuid_to_int_mapping() {
         let (store, _dir) = setup().await;
 
-        let mut m1 = Memory::new("Fact A", Category::Profile, MemoryType::Insight, "t-001");
-        m1.l0_abstract = "Fact A".to_string();
+        let mut m1 = Memory::new("Fact A original", Category::Profile, MemoryType::Insight, "t-001");
+        m1.l0_abstract = "Fact A original".to_string();
         let mut m2 = Memory::new(
             "Fact B",
             Category::Preferences,

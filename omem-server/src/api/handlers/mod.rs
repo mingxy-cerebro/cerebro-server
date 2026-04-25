@@ -1,9 +1,13 @@
 pub mod clusters;
+pub mod events;
 pub mod files;
 pub mod github;
 pub mod imports;
+pub mod lifecycle;
 pub mod memory;
+pub mod merge;
 pub mod profile;
+pub mod scheduler;
 pub mod session_recalls;
 pub mod sharing;
 pub mod spaces;
@@ -16,11 +20,13 @@ pub use github::{github_connect, github_webhook};
 pub use imports::{
     create_import, cross_reconcile, get_import, list_imports, rollback_import, trigger_intelligence,
 };
+pub use lifecycle::trigger_lifecycle;
 pub use memory::{
-    batch_delete, batch_get_memories, create_memory, delete_all_memories, delete_memory,
-    delete_tier_history_entry, get_memory, get_tier_changes, list_memories, reembed_memories,
-    search_memories, update_memory,
+    batch_delete, batch_get_memories, batch_update_visibility, create_memory, delete_all_memories,
+    delete_memory, delete_tier_history_entry, get_memory, get_tier_changes, list_memories,
+    optimize_memories, reembed_memories, search_memories, update_memory,
 };
+pub use merge::merge_memories;
 pub use profile::get_profile;
 pub use session_recalls::{
     create_session_recall, delete_session_recall, get_session_recall, list_session_recalls, should_recall,
@@ -43,6 +49,11 @@ pub use vault::{
     delete_vault_password, get_vault_status, set_vault_password, verify_vault_password,
 };
 pub use clusters::{
+    batch_delete_clusters, delete_all_clusters, delete_cluster, delete_clustering_job,
     get_clustering_job, get_clustering_stats, get_cluster, list_clustering_jobs, list_clusters,
     trigger_clustering,
+};
+pub use events::sse_events;
+pub use scheduler::{
+    get_scheduler_status, pause_clustering, pause_lifecycle, resume_clustering, resume_lifecycle,
 };

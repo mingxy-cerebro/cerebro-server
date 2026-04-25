@@ -53,13 +53,15 @@ impl ClusterAggregator {
                 let avg_importance = if members.is_empty() { 0.0 } else { total_importance / members.len() as f32 };
                 let max_importance = members.iter().map(|m| m.importance).fold(0.0, f32::max);
                 let weighted_score = avg_importance * 0.6 + max_importance * 0.4;
+                let mut sorted_members = members;
+                sorted_members.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
                 cluster_summaries.push(ClusterSummary {
                     cluster_id: cid,
                     title: cluster.title,
                     summary: cluster.summary,
                     member_count: cluster.member_count,
                     relevance_score: weighted_score,
-                    key_memories: members.into_iter().take(3).collect(),
+                    key_memories: sorted_members.into_iter().take(3).collect(),
                 });
             }
         }

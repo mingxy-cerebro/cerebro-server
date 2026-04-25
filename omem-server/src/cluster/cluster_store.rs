@@ -6,10 +6,11 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use dashmap::DashMap;
 use futures::TryStreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::table::OptimizeAction;
 use lancedb::Table;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::domain::cluster::MemoryCluster;
 use crate::domain::error::OmemError;
@@ -17,16 +18,19 @@ use crate::domain::error::OmemError;
 use crate::store::lancedb::VECTOR_DIM;
 
 const CLUSTER_TABLE_NAME: &str = "clusters";
+const JOB_TABLE_NAME: &str = "clustering_jobs";
 
 pub struct ClusterStore {
     table: Table,
+    job_table: Table,
     locks: DashMap<String, Mutex<()>>,
 }
 
 impl ClusterStore {
     pub async fn new(db: &lancedb::Connection) -> Result<Self, OmemError> {
         let table = Self::init_table(db).await?;
-        Ok(Self { table, locks: DashMap::new() })
+        let job_table = Self::init_job_table(db).await?;
+        Ok(Self { table, job_table, locks: DashMap::new() })
     }
 
     fn schema() -> Schema {
@@ -53,6 +57,37 @@ impl ClusterStore {
             Field::new("updated_at", DataType::Utf8, false),
             Field::new("last_accessed_at", DataType::Utf8, true),
         ])
+    }
+
+    fn job_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("tenant_id", DataType::Utf8, false),
+            Field::new("space_id", DataType::Utf8, false),
+            Field::new("status", DataType::Utf8, false),
+            Field::new("total_memories", DataType::UInt64, false),
+            Field::new("processed_memories", DataType::UInt64, false),
+            Field::new("assigned_to_existing", DataType::UInt64, false),
+            Field::new("created_new_clusters", DataType::UInt64, false),
+            Field::new("errors", DataType::UInt64, false),
+            Field::new("started_at", DataType::Utf8, true),
+            Field::new("completed_at", DataType::Utf8, true),
+            Field::new("error_message", DataType::Utf8, true),
+            Field::new("created_at", DataType::Utf8, false),
+        ])
+    }
+
+    async fn init_job_table(db: &lancedb::Connection) -> Result<Table, OmemError> {
+        let schema = Arc::new(Self::job_schema());
+        match db.open_table(JOB_TABLE_NAME).execute().await {
+            Ok(table) => Ok(table),
+            Err(_) => {
+                db.create_empty_table(JOB_TABLE_NAME, schema)
+                    .execute()
+                    .await
+                    .map_err(|e| OmemError::Storage(format!("failed to create job table: {e}")))
+            }
+        }
     }
 
     async fn init_table(db: &lancedb::Connection) -> Result<Table, OmemError> {
@@ -279,8 +314,7 @@ impl ClusterStore {
 
     fn extract_anchor_vector(batch: &RecordBatch, row: usize) -> Result<Vec<f32>, OmemError> {
         use arrow::array::FixedSizeListArray;
-        use arrow::datatypes::Float32Type;
-        
+
         let col = batch
             .column_by_name("anchor_vector")
             .ok_or_else(|| OmemError::Storage("missing column: anchor_vector".to_string()))?;
@@ -358,14 +392,28 @@ impl ClusterStore {
         }).await
     }
 
+    pub async fn update_title(
+        &self,
+        cluster_id: &str,
+        title: &str,
+    ) -> Result<(), OmemError> {
+        let title = title.to_string();
+        self.with_cluster_lock(cluster_id, |mut cluster| async move {
+            cluster.title = title;
+            cluster.updated_at = chrono::Utc::now().to_rfc3339();
+            Ok(((), cluster))
+        }).await
+    }
+
     pub async fn increment_member_count(
         &self,
         cluster_id: &str,
-    ) -> Result<(), OmemError> {
+    ) -> Result<u32, OmemError> {
         self.with_cluster_lock(cluster_id, |mut cluster| async move {
             cluster.member_count += 1;
             cluster.updated_at = chrono::Utc::now().to_rfc3339();
-            Ok(((), cluster))
+            let new_count = cluster.member_count;
+            Ok((new_count, cluster))
         }).await
     }
 
@@ -393,6 +441,51 @@ impl ClusterStore {
         Ok(())
     }
 
+    pub async fn batch_delete_clusters(
+        &self,
+        cluster_ids: &[String],
+    ) -> Result<usize, OmemError> {
+        let mut deleted = 0usize;
+        for id in cluster_ids {
+            if let Ok(()) = self.delete_cluster(id).await {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
+    pub async fn delete_all_clusters_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<usize, OmemError> {
+        let safe_tid = Self::escape_sql(tenant_id);
+        let batches: Vec<RecordBatch> = self.table
+            .query()
+            .only_if(format!("tenant_id = '{}'", safe_tid))
+            .select(Select::columns(&["id"]))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query clusters for delete: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect: {e}")))?;
+
+        let mut ids = Vec::new();
+        for batch in &batches {
+            if let Some(arr) = batch.column_by_name("id") {
+                if let Some(str_arr) = arr.as_any().downcast_ref::<StringArray>() {
+                    for i in 0..str_arr.len() {
+                        ids.push(str_arr.value(i).to_string());
+                    }
+                }
+            }
+        }
+
+        let count = ids.len();
+        self.batch_delete_clusters(&ids).await?;
+        Ok(count)
+    }
+
     pub async fn list_empty_clusters(
         &self,
     ) -> Result<Vec<MemoryCluster>, OmemError> {
@@ -415,28 +508,90 @@ impl ClusterStore {
         Ok(results)
     }
 
-    pub async fn create_job(
+    pub async fn list_clusters(
         &self,
+        space_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryCluster>, OmemError> {
+        let mut query = self.table.query();
+
+        if let Some(sid) = space_id {
+            let safe_sid = Self::escape_sql(sid);
+            query = query.only_if(format!("space_id = '{}'", safe_sid));
+        }
+
+        let batches: Vec<RecordBatch> = query
+            .limit(limit + offset)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut results = Vec::new();
+        for batch in &batches {
+            for row in offset..batch.num_rows() {
+                results.push(Self::row_to_cluster(batch, row)?);
+            }
+        }
+        Ok(results)
+    }
+
+    pub async fn list_clusters_by_tenant(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryCluster>, OmemError> {
+        let safe_tid = Self::escape_sql(tenant_id);
+        let query = self.table.query()
+            .only_if(format!("tenant_id = '{}'", safe_tid));
+
+        let batches: Vec<RecordBatch> = query
+            .limit(limit + offset)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut results = Vec::new();
+        for batch in &batches {
+            for row in offset..batch.num_rows() {
+                results.push(Self::row_to_cluster(batch, row)?);
+            }
+        }
+        Ok(results)
+    }
+
+    pub async fn count_clusters_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<usize, OmemError> {
+        let safe_tid = Self::escape_sql(tenant_id);
+        let batches: Vec<RecordBatch> = self.table.query()
+            .only_if(format!("tenant_id = '{}'", safe_tid))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("count query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("count collect failed: {e}")))?;
+
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        Ok(total)
+    }
+
+    fn job_to_batch(
         job: &crate::domain::cluster::ClusteringJob,
-    ) -> Result<(), OmemError> {
+    ) -> Result<RecordBatch, OmemError> {
         use arrow::array::UInt64Array;
-        
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("tenant_id", DataType::Utf8, false),
-                Field::new("space_id", DataType::Utf8, false),
-                Field::new("status", DataType::Utf8, false),
-                Field::new("total_memories", DataType::UInt64, false),
-                Field::new("processed_memories", DataType::UInt64, false),
-                Field::new("assigned_to_existing", DataType::UInt64, false),
-                Field::new("created_new_clusters", DataType::UInt64, false),
-                Field::new("errors", DataType::UInt64, false),
-                Field::new("started_at", DataType::Utf8, true),
-                Field::new("completed_at", DataType::Utf8, true),
-                Field::new("error_message", DataType::Utf8, true),
-                Field::new("created_at", DataType::Utf8, false),
-            ])),
+
+        RecordBatch::try_new(
+            Arc::new(Self::job_schema()),
             vec![
                 Arc::new(StringArray::from(vec![job.id.as_str()])),
                 Arc::new(StringArray::from(vec![job.tenant_id.as_str()])),
@@ -453,11 +608,17 @@ impl ClusterStore {
                 Arc::new(StringArray::from(vec![job.created_at.as_str()])),
             ],
         )
-        .map_err(|e| OmemError::Storage(format!("failed to build job batch: {e}")))?;
+        .map_err(|e| OmemError::Storage(format!("failed to build job batch: {e}")))
+    }
 
+    pub async fn create_job(
+        &self,
+        job: &crate::domain::cluster::ClusteringJob,
+    ) -> Result<(), OmemError> {
+        let batch = Self::job_to_batch(job)?;
         let schema = batch.schema();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        self.table
+        self.job_table
             .add(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
             .execute()
             .await
@@ -471,7 +632,7 @@ impl ClusterStore {
         job_id: &str,
     ) -> Result<Option<crate::domain::cluster::ClusteringJob>, OmemError> {
         let safe_id = Self::escape_sql(job_id);
-        let batches: Vec<RecordBatch> = self.table
+        let batches: Vec<RecordBatch> = self.job_table
             .query()
             .only_if(format!("id = '{}'", safe_id))
             .limit(1)
@@ -495,7 +656,7 @@ impl ClusterStore {
         limit: usize,
     ) -> Result<Vec<crate::domain::cluster::ClusteringJob>, OmemError> {
         let safe_tenant = Self::escape_sql(tenant_id);
-        let batches: Vec<RecordBatch> = self.table
+        let batches: Vec<RecordBatch> = self.job_table
             .query()
             .only_if(format!("tenant_id = '{}'", safe_tenant))
             .limit(limit)
@@ -513,6 +674,104 @@ impl ClusterStore {
             }
         }
         Ok(results)
+    }
+
+    pub async fn list_running_jobs(
+        &self,
+    ) -> Result<Vec<crate::domain::cluster::ClusteringJob>, OmemError> {
+        let batches: Vec<RecordBatch> = self.job_table
+            .query()
+            .only_if("status = 'Running'")
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+        
+        let mut results = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                results.push(Self::row_to_job(batch, row)?);
+            }
+        }
+        Ok(results)
+    }
+
+    pub async fn update_job_status(
+        &self,
+        job_id: &str,
+        status: &str,
+        processed_memories: Option<u64>,
+        assigned_to_existing: Option<u64>,
+        created_new_clusters: Option<u64>,
+        error_message: Option<&str>,
+    ) -> Result<(), OmemError> {
+        let job = self.get_job(job_id).await?;
+        let mut job = match job {
+            Some(j) => j,
+            None => return Err(OmemError::NotFound(format!("Job {} not found", job_id))),
+        };
+
+        job.status = match status {
+            "completed" => crate::domain::cluster::ClusteringJobStatus::Completed,
+            "failed" => crate::domain::cluster::ClusteringJobStatus::Failed,
+            "running" => crate::domain::cluster::ClusteringJobStatus::Running,
+            _ => crate::domain::cluster::ClusteringJobStatus::Pending,
+        };
+
+        if let Some(processed) = processed_memories {
+            job.processed_memories = processed;
+        }
+        if let Some(assigned) = assigned_to_existing {
+            job.assigned_to_existing = assigned;
+        }
+        if let Some(created) = created_new_clusters {
+            job.created_new_clusters = created;
+        }
+        if let Some(err) = error_message {
+            job.error_message = Some(err.to_string());
+        }
+
+        if status == "completed" || status == "failed" {
+            job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+
+        self.save_job(&job).await
+    }
+
+    pub async fn save_job(
+        &self,
+        job: &crate::domain::cluster::ClusteringJob,
+    ) -> Result<(), OmemError> {
+        let safe_id = Self::escape_sql(&job.id);
+        self.job_table
+            .delete(&format!("id = '{}'", safe_id))
+            .await
+            .map_err(|e| OmemError::Storage(format!("delete job for update failed: {e}")))?;
+
+        let batch = Self::job_to_batch(job)?;
+        let schema = batch.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        self.job_table
+            .add(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("re-insert job failed: {e}")))?;
+
+        Ok(())
+    }
+
+    pub async fn delete_job(
+        &self,
+        job_id: &str,
+    ) -> Result<(), OmemError> {
+        let safe_id = Self::escape_sql(job_id);
+        self.job_table
+            .delete(&format!("id = '{}'", safe_id))
+            .await
+            .map_err(|e| OmemError::Storage(format!("delete job failed: {e}")))?;
+        Ok(())
     }
 
     fn row_to_job(batch: &RecordBatch, row: usize) -> Result<crate::domain::cluster::ClusteringJob, OmemError> {
@@ -572,5 +831,26 @@ impl ClusterStore {
             error_message: get_opt_str("error_message")?,
             created_at: get_str("created_at")?,
         })
+    }
+
+    pub async fn optimize(&self) -> Result<(), OmemError> {
+        self.table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("optimize clusters prune failed: {e}")))?;
+
+        let _ = self.job_table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await;
+
+        Ok(())
     }
 }

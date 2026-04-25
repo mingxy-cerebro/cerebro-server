@@ -13,6 +13,18 @@ pub struct ExtractedFact {
     /// Used to set initial memory confidence on creation.
     #[serde(default)]
     pub quality_score: f32,
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+    #[serde(default)]
+    pub owner_agent_id: String,
+    /// LLM-reported confidence that this fact is worth remembering (1-5, where 5 = very high value).
+    /// 0 means the field was not provided by the LLM.
+    #[serde(default)]
+    pub llm_confidence: u8,
+}
+
+fn default_visibility() -> String {
+    "global".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug)]

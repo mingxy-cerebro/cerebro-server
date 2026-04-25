@@ -23,6 +23,7 @@ pub struct SearchRequest {
     pub tags_filter: Option<Vec<String>>,
     pub source_filter: Option<String>,
     pub agent_id_filter: Option<String>,
+    pub accessible_spaces: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,7 +192,7 @@ impl RetrievalPipeline {
         let visibility_filter = request
             .agent_id_filter
             .as_deref()
-            .map(|agent_id| self.store.build_visibility_filter(agent_id, &[]));
+            .map(|agent_id| self.store.build_visibility_filter(agent_id, &request.accessible_spaces));
         let vis_ref = visibility_filter.as_deref();
 
         let vector_fut = async {
@@ -769,6 +770,7 @@ mod tests {
             tags_filter: None,
             source_filter: None,
             agent_id_filter: None,
+            accessible_spaces: Vec::new(),
         };
 
         let results = pipeline.search(&request).await.expect("search");
@@ -832,6 +834,7 @@ mod tests {
             tags_filter: None,
             source_filter: None,
             agent_id_filter: None,
+            accessible_spaces: Vec::new(),
         };
 
         let results = pipeline.search(&request).await.expect("search");
@@ -909,6 +912,7 @@ mod tests {
             tags_filter: None,
             source_filter: None,
             agent_id_filter: None,
+            accessible_spaces: Vec::new(),
         };
 
         let results = pipeline
@@ -943,6 +947,7 @@ mod tests {
             tags_filter: None,
             source_filter: None,
             agent_id_filter: None,
+            accessible_spaces: Vec::new(),
         };
 
         let results = pipeline.search(&request).await.expect("search");
@@ -985,6 +990,7 @@ mod tests {
             tags_filter: None,
             source_filter: None,
             agent_id_filter: None,
+            accessible_spaces: Vec::new(),
         };
 
         let results = pipeline

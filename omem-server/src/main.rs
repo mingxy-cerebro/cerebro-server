@@ -98,6 +98,8 @@ async fn main() {
         config: config.clone(),
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        event_bus: Arc::new(omem_server::api::event_bus::EventBus::new()),
+        scheduler_control: Arc::new(omem_server::api::scheduler_control::SchedulerControl::new()),
     });
 
     let app = build_router(state.clone());
@@ -105,11 +107,15 @@ async fn main() {
     {
         let scheduler_interval = std::time::Duration::from_secs(config.scheduler_interval_secs);
         
-        let lifecycle_scheduler = Arc::new(LifecycleScheduler::new(
-            state.store_manager.clone(),
-            scheduler_interval,
-            config.scheduler_run_on_start,
-        ));
+        let lifecycle_scheduler = Arc::new(
+            LifecycleScheduler::new(
+                state.store_manager.clone(),
+                state.cluster_store.clone(),
+                scheduler_interval,
+                config.scheduler_run_on_start,
+            )
+            .with_event_bus(state.event_bus.clone())
+        );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(
             interval_secs = config.scheduler_interval_secs,
@@ -126,6 +132,7 @@ async fn main() {
                 config.scheduler_run_on_start,
             )
             .with_llm(state.llm.clone())
+            .with_event_bus(state.event_bus.clone())
         );
         tokio::spawn(async move { clustering_scheduler.run().await });
         tracing::info!(

@@ -13,6 +13,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/memories/search", get(handlers::search_memories))
         .route("/v1/memories/batch-delete", post(handlers::batch_delete))
         .route("/v1/memories/batch-get", post(handlers::batch_get_memories))
+        .route("/v1/memories/merge", post(handlers::merge_memories))
+        .route("/v1/memories/batch-visibility", post(handlers::batch_update_visibility))
         .route("/v1/memories/all", delete(handlers::delete_all_memories))
         .route(
             "/v1/memories/{id}",
@@ -107,12 +109,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::get_session_recall).delete(handlers::delete_session_recall),
         )
         .route("/v1/clusters", get(handlers::list_clusters))
+        .route("/v1/clusters/batch-delete", post(handlers::batch_delete_clusters))
+        .route("/v1/clusters/all", delete(handlers::delete_all_clusters))
         .route("/v1/clusters/trigger", post(handlers::trigger_clustering))
         .route("/v1/clusters/jobs", get(handlers::list_clustering_jobs))
-        .route("/v1/clusters/jobs/{id}", get(handlers::get_clustering_job))
+        .route("/v1/clusters/jobs/{id}", get(handlers::get_clustering_job).delete(handlers::delete_clustering_job))
         .route("/v1/clusters/stats", get(handlers::get_clustering_stats))
         .route("/v1/memories/re-embed", post(handlers::reembed_memories))
-        .route("/v1/clusters/{id}", get(handlers::get_cluster))
+        .route("/v1/memories/optimize", post(handlers::optimize_memories))
+        .route("/v1/clusters/{id}", get(handlers::get_cluster).delete(handlers::delete_cluster))
+        .route("/v1/lifecycle/trigger", post(handlers::trigger_lifecycle))
+        .route("/v1/scheduler/status", get(handlers::get_scheduler_status))
+        .route("/v1/scheduler/lifecycle/pause", post(handlers::pause_lifecycle))
+        .route("/v1/scheduler/lifecycle/resume", post(handlers::resume_lifecycle))
+        .route("/v1/scheduler/clustering/pause", post(handlers::pause_clustering))
+        .route("/v1/scheduler/clustering/resume", post(handlers::resume_clustering))
+        .route("/v1/events", get(handlers::sse_events))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

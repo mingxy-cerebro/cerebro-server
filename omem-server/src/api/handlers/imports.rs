@@ -136,13 +136,11 @@ pub async fn create_import(
 
     let content_hash = sha256_hex(&content);
 
-    let session_uri = format!("{}/{}", state.config.store_uri(), target_space);
-    let session_store = Arc::new(
-        SessionStore::new(&session_uri)
-            .await
-            .map_err(|e| OmemError::Storage(format!("session store: {e}")))?,
-    );
-    session_store.init_table().await?;
+    let session_store = state
+        .store_manager
+        .get_session_store(&auth.tenant_id)
+        .await
+        .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
 
     if !force && session_store.exists_by_hash(&content_hash).await? {
         return Err(OmemError::Validation(
@@ -300,13 +298,11 @@ pub async fn trigger_intelligence(
 
     let store = state.store_manager.get_store(&task.space_id).await?;
 
-    let session_uri = format!("{}/{}", state.config.store_uri(), task.space_id);
-    let session_store = Arc::new(
-        SessionStore::new(&session_uri)
-            .await
-            .map_err(|e| OmemError::Storage(format!("session store: {e}")))?,
-    );
-    session_store.init_table().await?;
+    let session_store = state
+        .store_manager
+        .get_session_store(&auth.tenant_id)
+        .await
+        .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
 
     let bg_embed = state.embed.clone();
     let bg_llm = state.llm.clone();
@@ -421,11 +417,11 @@ pub async fn rollback_import(
         .await?
         .ok_or_else(|| OmemError::NotFound(format!("import task {id}")))?;
 
-    let session_uri = format!("{}/{}", state.config.store_uri(), task.space_id);
-    let session_store = SessionStore::new(&session_uri)
+    let session_store = state
+        .store_manager
+        .get_session_store(&auth.tenant_id)
         .await
         .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
-    session_store.init_table().await?;
     let sessions_deleted = session_store
         .delete_by_session_id(&format!("import-{id}"))
         .await?;

@@ -11,7 +11,7 @@ use futures::TryStreamExt;
 use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::{NewColumnTransform, Table};
+use lancedb::table::{NewColumnTransform, OptimizeAction, Table};
 use lancedb::Connection;
 
 use crate::domain::category::Category;
@@ -1201,6 +1201,31 @@ impl LanceStore {
         } else {
             conditions.join(" AND ")
         }
+    }
+
+    /// Optimize LanceDB tables: prune old versions to reclaim disk space from version bloat.
+    pub async fn optimize(&self) -> Result<(), OmemError> {
+        let table = self.open_table().await?;
+        table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("optimize memories prune failed: {e}")))?;
+
+        if let Ok(sr_table) = self.open_session_recalls_table().await {
+            let _ = sr_table
+                .optimize(OptimizeAction::Prune {
+                    older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                    delete_unverified: Some(true),
+                    error_if_tagged_old_versions: None,
+                })
+                .await;
+        }
+
+        Ok(())
     }
 }
 

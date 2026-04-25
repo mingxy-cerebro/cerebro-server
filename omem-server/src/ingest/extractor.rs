@@ -7,7 +7,7 @@ use crate::ingest::prompts;
 use crate::ingest::types::{ExtractedFact, ExtractionResult, IngestMessage};
 use crate::llm::{complete_json, LlmService};
 
-const DEFAULT_MAX_FACTS: usize = 50;
+const DEFAULT_MAX_FACTS: usize = 15;
 const DEFAULT_MAX_INPUT_CHARS: usize = 8000;
 const VALID_CATEGORIES: &[&str] = &[
     "profile",
@@ -57,7 +57,15 @@ impl FactExtractor {
         let facts = result
             .memories
             .into_iter()
-            .filter(|f| !f.l0_abstract.trim().is_empty())
+            .map(|mut f| {
+                if f.llm_confidence == 0 {
+                    f.llm_confidence = 3;
+                }
+                f
+            })
+            .filter(|f| {
+                !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
+            })
             .map(|mut f| {
                 f.category = normalize_category(&f.category);
                 f.quality_score = calculate_quality_score(&f.l0_abstract);
@@ -79,7 +87,15 @@ impl FactExtractor {
         let facts = result
             .memories
             .into_iter()
-            .filter(|f| !f.l0_abstract.trim().is_empty())
+            .map(|mut f| {
+                if f.llm_confidence == 0 {
+                    f.llm_confidence = 3;
+                }
+                f
+            })
+            .filter(|f| {
+                !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
+            })
             .map(|mut f| {
                 f.category = normalize_category(&f.category);
                 f.quality_score = calculate_quality_score(&f.l0_abstract);

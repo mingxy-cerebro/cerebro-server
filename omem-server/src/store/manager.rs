@@ -5,11 +5,17 @@ use tokio::sync::Mutex;
 use super::lancedb::LanceStore;
 use crate::domain::error::OmemError;
 use crate::domain::space::{MemberRole, Space, SpaceType};
+use crate::ingest::session::SessionStore;
 
-const DEFAULT_MAX_CACHED: usize = 1000;
+const DEFAULT_MAX_CACHED: usize = 20;
 
 struct CacheEntry {
     store: Arc<LanceStore>,
+    last_accessed: std::time::Instant,
+}
+
+struct SessionCacheEntry {
+    store: Arc<SessionStore>,
     last_accessed: std::time::Instant,
 }
 
@@ -30,6 +36,7 @@ pub struct AccessibleStore {
 pub struct StoreManager {
     base_uri: String,
     cache: Mutex<HashMap<String, CacheEntry>>,
+    session_cache: Mutex<HashMap<String, SessionCacheEntry>>,
     max_cached: usize,
 }
 
@@ -38,6 +45,7 @@ impl StoreManager {
         Self {
             base_uri: base_uri.trim_end_matches('/').to_string(),
             cache: Mutex::new(HashMap::new()),
+            session_cache: Mutex::new(HashMap::new()),
             max_cached: DEFAULT_MAX_CACHED,
         }
     }
@@ -49,6 +57,7 @@ impl StoreManager {
         Self {
             base_uri: base_uri.trim_end_matches('/').to_string(),
             cache: Mutex::new(HashMap::new()),
+            session_cache: Mutex::new(HashMap::new()),
             max_cached,
         }
     }
@@ -136,6 +145,55 @@ impl StoreManager {
 
     pub async fn cache_size(&self) -> usize {
         self.cache.lock().await.len()
+    }
+
+    pub async fn get_session_store(&self, tenant_id: &str) -> Result<Arc<SessionStore>, OmemError> {
+        let mut cache = self.session_cache.lock().await;
+
+        if let Some(entry) = cache.get_mut(tenant_id) {
+            entry.last_accessed = std::time::Instant::now();
+            return Ok(entry.store.clone());
+        }
+
+        if cache.len() >= self.max_cached {
+            let oldest_key = cache
+                .iter()
+                .min_by_key(|(_, v)| v.last_accessed)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = oldest_key {
+                tracing::debug!(tenant_id = %key, "evicting LRU session store");
+                cache.remove(&key);
+            }
+        }
+
+        let uri = format!("{}/personal/{}", self.base_uri, tenant_id);
+        let store = Arc::new(SessionStore::new(&uri).await?);
+        store.init_table().await?;
+
+        cache.insert(
+            tenant_id.to_string(),
+            SessionCacheEntry {
+                store: store.clone(),
+                last_accessed: std::time::Instant::now(),
+            },
+        );
+
+        Ok(store)
+    }
+
+    pub async fn optimize_all(&self) -> Vec<String> {
+        let stores = self.cached_stores().await;
+        let mut results = Vec::new();
+        for store in &stores {
+            match store.optimize().await {
+                Ok(()) => results.push("ok".to_string()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "store_optimize_failed");
+                    results.push(format!("error: {e}"));
+                }
+            }
+        }
+        results
     }
 }
 

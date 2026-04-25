@@ -84,6 +84,7 @@ export interface MemoryDto {
   source?: string;
   tenant_id: string;
   agent_id?: string;
+  importance: number;
   created_at: string;
   updated_at: string;
 }
@@ -171,6 +172,7 @@ export class OmemClient {
     scope?: string,
     agentId?: string,
     sessionId?: string,
+    visibility?: string,
   ): Promise<MemoryDto | null> {
     const safeContent = sanitizeContent(content, this.getCfg("maxContentChars", 30000));
     return this.post<MemoryDto>("/v1/memories", {
@@ -180,6 +182,7 @@ export class OmemClient {
       scope,
       agent_id: agentId,
       session_id: sessionId,
+      visibility,
     });
   }
 

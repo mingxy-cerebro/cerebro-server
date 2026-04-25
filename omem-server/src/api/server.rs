@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
+use crate::api::event_bus::SharedEventBus;
+use crate::api::scheduler_control::SharedSchedulerControl;
 use crate::cluster::cluster_store::ClusterStore;
 use crate::config::OmemConfig;
 use crate::embed::EmbedService;
@@ -19,6 +21,8 @@ pub struct AppState {
     pub config: OmemConfig,
     pub import_semaphore: Arc<Semaphore>,
     pub reconcile_semaphore: Arc<Semaphore>,
+    pub event_bus: SharedEventBus,
+    pub scheduler_control: SharedSchedulerControl,
 }
 
 /// Map tenant_id to their personal Space ID.

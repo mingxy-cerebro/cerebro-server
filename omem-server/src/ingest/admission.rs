@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::embed::EmbedService;
+use crate::ingest::types::ExtractedFact;
 use crate::store::LanceStore;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,26 +16,27 @@ pub enum AdmissionPreset {
 impl AdmissionPreset {
     fn reject_threshold(self) -> f32 {
         match self {
-            Self::Balanced => 0.45,
-            Self::Conservative => 0.52,
+            Self::Balanced => 0.50,
+            Self::Conservative => 0.58,
             Self::HighRecall => 0.34,
         }
     }
 
     fn admit_threshold(self) -> f32 {
         match self {
-            Self::Balanced => 0.60,
-            Self::Conservative => 0.68,
+            Self::Balanced => 0.65,
+            Self::Conservative => 0.72,
             Self::HighRecall => 0.52,
         }
     }
 }
 
-const W_UTILITY: f32 = 0.1;
-const W_CONFIDENCE: f32 = 0.1;
-const W_NOVELTY: f32 = 0.1;
-const W_RECENCY: f32 = 0.1;
-const W_TYPE_PRIOR: f32 = 0.6;
+pub const W_UTILITY: f32 = 0.15;
+pub const W_CONFIDENCE: f32 = 0.15;
+pub const W_NOVELTY: f32 = 0.1;
+pub const W_RECENCY: f32 = 0.1;
+pub const W_TYPE_PRIOR: f32 = 0.3;
+pub const W_SEMANTIC_QUALITY: f32 = 0.2;
 
 #[derive(Debug, Clone)]
 pub struct AdmissionResult {
@@ -51,6 +53,7 @@ pub struct AdmissionAudit {
     pub novelty: f32,
     pub recency: f32,
     pub type_prior: f32,
+    pub semantic_quality: f32,
     pub composite: f32,
     pub max_similarity: f32,
     pub reason: String,
@@ -77,10 +80,12 @@ impl AdmissionControl {
 
     pub async fn evaluate(
         &self,
-        text: &str,
+        fact: &ExtractedFact,
         category: &Category,
         conversation: Option<&str>,
     ) -> Result<AdmissionResult, OmemError> {
+        let text = &fact.l0_abstract;
+        tracing::debug!(fact_preview = %text.chars().take(80).collect::<String>(), category = ?category, "admission: evaluating fact");
         let utility = score_utility(text);
 
         let confidence = match conversation {
@@ -108,12 +113,14 @@ impl AdmissionControl {
         let novelty = 1.0 - max_similarity;
         let recency = compute_recency(&search_results);
         let type_prior = category_prior(category);
+        let semantic_quality = self.score_semantic_quality(fact);
 
         let composite = W_UTILITY * utility
             + W_CONFIDENCE * confidence
             + W_NOVELTY * novelty
             + W_RECENCY * recency
-            + W_TYPE_PRIOR * type_prior;
+            + W_TYPE_PRIOR * type_prior
+            + W_SEMANTIC_QUALITY * semantic_quality;
 
         let reject_th = self.preset.reject_threshold();
         let admit_th = self.preset.admit_threshold();
@@ -122,12 +129,25 @@ impl AdmissionControl {
             (false, "reject".to_string())
         } else if composite >= admit_th && max_similarity < 0.55 {
             (true, "add".to_string())
-        } else {
+        } else if composite >= admit_th && max_similarity >= 0.55 {
             (true, "update_or_merge".to_string())
+        } else {
+            // reject_th <= composite < admit_th: strict rejection
+            (false, "reject_below_threshold".to_string())
         };
 
+        if !admitted {
+            tracing::debug!(
+                fact_preview = %text.chars().take(80).collect::<String>(),
+                score = composite,
+                threshold = admit_th,
+                reason = %hint,
+                "admission: fact rejected"
+            );
+        }
+
         let reason = format!(
-            "composite={composite:.3} (u={utility:.2} c={confidence:.2} n={novelty:.2} r={recency:.2} tp={type_prior:.2}) max_sim={max_similarity:.3} -> {hint}"
+            "composite={composite:.3} (u={utility:.2} c={confidence:.2} n={novelty:.2} r={recency:.2} tp={type_prior:.2} sq={semantic_quality:.2}) max_sim={max_similarity:.3} -> {hint}"
         );
 
         Ok(AdmissionResult {
@@ -140,11 +160,20 @@ impl AdmissionControl {
                 novelty,
                 recency,
                 type_prior,
+                semantic_quality,
                 composite,
                 max_similarity,
                 reason,
             },
         })
+    }
+
+    fn score_semantic_quality(&self, fact: &ExtractedFact) -> f32 {
+        if fact.llm_confidence == 0 {
+            0.5
+        } else {
+            (fact.llm_confidence as f32 / 5.0).min(1.0)
+        }
     }
 }
 
@@ -271,6 +300,21 @@ mod tests {
         }
     }
 
+    fn make_fact(text: &str, llm_confidence: u8) -> ExtractedFact {
+        ExtractedFact {
+            l0_abstract: text.to_string(),
+            l1_overview: text.to_string(),
+            l2_content: text.to_string(),
+            category: "profile".to_string(),
+            tags: Vec::new(),
+            source_text: None,
+            quality_score: 0.5,
+            visibility: "global".to_string(),
+            owner_agent_id: String::new(),
+            llm_confidence,
+        }
+    }
+
     async fn setup() -> (Arc<LanceStore>, TempDir) {
         let dir = TempDir::new().expect("temp dir");
         let store = LanceStore::new(dir.path().to_str().expect("path"))
@@ -297,13 +341,13 @@ mod tests {
         let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
 
         let result = ctrl
-            .evaluate("ok", &Category::Events, None)
+            .evaluate(&make_fact("ok", 0), &Category::Events, None)
             .await
             .expect("eval");
 
         assert!(!result.admitted);
         assert_eq!(result.hint, "reject");
-        assert!(result.score < 0.45);
+        assert!(result.score < 0.50);
     }
 
     #[tokio::test]
@@ -314,7 +358,10 @@ mod tests {
 
         let result = ctrl
             .evaluate(
-                "User is a senior backend engineer at Stripe working on payment infrastructure",
+                &make_fact(
+                    "User is a senior backend engineer at Stripe working on payment infrastructure",
+                    4,
+                ),
                 &Category::Profile,
                 Some("I work as a senior backend engineer at Stripe on payment infrastructure"),
             )
@@ -322,7 +369,7 @@ mod tests {
             .expect("eval");
 
         assert!(result.admitted);
-        assert!(result.score >= 0.60);
+        assert!(result.score >= 0.65);
     }
 
     #[tokio::test]
@@ -332,7 +379,7 @@ mod tests {
         let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
 
         let result = ctrl
-            .evaluate("User lives in San Francisco", &Category::Profile, None)
+            .evaluate(&make_fact("User lives in San Francisco", 4), &Category::Profile, None)
             .await
             .expect("eval");
 
@@ -347,7 +394,7 @@ mod tests {
         let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
 
         let result = ctrl
-            .evaluate("something happened", &Category::Events, None)
+            .evaluate(&make_fact("something happened", 0), &Category::Events, None)
             .await
             .expect("eval");
 
@@ -366,8 +413,8 @@ mod tests {
             AdmissionControl::new(AdmissionPreset::Balanced, embed.clone(), store.clone());
         let conservative = AdmissionControl::new(AdmissionPreset::Conservative, embed, store);
 
-        let r_balanced = balanced.evaluate(text, &cat, None).await.expect("eval");
-        let r_conservative = conservative.evaluate(text, &cat, None).await.expect("eval");
+        let r_balanced = balanced.evaluate(&make_fact(text, 0), &cat, None).await.expect("eval");
+        let r_conservative = conservative.evaluate(&make_fact(text, 0), &cat, None).await.expect("eval");
 
         assert!(
             AdmissionPreset::Conservative.reject_threshold()
@@ -388,7 +435,7 @@ mod tests {
 
         let result = ctrl
             .evaluate(
-                "User prefers dark mode in all IDEs",
+                &make_fact("User prefers dark mode in all IDEs", 4),
                 &Category::Preferences,
                 Some("I always use dark mode"),
             )

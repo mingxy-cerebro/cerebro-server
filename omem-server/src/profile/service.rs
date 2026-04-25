@@ -32,6 +32,12 @@ impl ProfileService {
         };
         let all_memories = self.store.list_filtered(&filter, 1000, 0).await?;
 
+        // Exclude private memories from profile generation
+        let all_memories: Vec<_> = all_memories
+            .into_iter()
+            .filter(|m| m.visibility != "private")
+            .collect();
+
         let mut static_memories: Vec<_> = all_memories
             .iter()
             .filter(|m| m.category == Category::Profile || m.category == Category::Preferences)

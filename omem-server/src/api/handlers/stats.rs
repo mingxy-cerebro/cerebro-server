@@ -827,9 +827,15 @@ mod tests {
             space_store,
             embed: Arc::new(NoopEmbedder::new(1024)),
             llm: Arc::new(NoopLlm),
+            recall_llm: Arc::new(NoopLlm),
+            cluster_store: Arc::new(crate::cluster::cluster_store::ClusterStore::new(
+                &store_manager.get_system_db().await.expect("system db"),
+            ).await.expect("cluster store")),
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            event_bus: Arc::new(crate::api::event_bus::EventBus::new()),
+            scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
         });
 
         (state, store_dir, space_dir, tenant_dir)

@@ -40,6 +40,7 @@ pub struct CreateMemoryBody {
     pub source: Option<String>,
     pub tier: Option<String>,
     pub scope: Option<String>,
+    pub visibility: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,12 +170,6 @@ pub async fn create_memory(
             _ => IngestMode::Smart,
         };
 
-        let session_uri = format!(
-            "{}/{}",
-            state.config.store_uri(),
-            personal_space_id(&auth.tenant_id)
-        );
-
         let request = IngestRequest {
             messages: messages
                 .into_iter()
@@ -183,19 +178,18 @@ pub async fn create_memory(
                     content: m.content,
                 })
                 .collect(),
-            tenant_id: auth.tenant_id,
+            tenant_id: auth.tenant_id.clone(),
             agent_id: body.agent_id.or(auth.agent_id),
             session_id: body.session_id,
             entity_context: body.entity_context,
             mode,
         };
 
-        let session_store = Arc::new(
-            SessionStore::new(&session_uri)
-                .await
-                .map_err(|e| OmemError::Storage(format!("session store: {e}")))?,
-        );
-        session_store.init_table().await?;
+        let session_store = state
+            .store_manager
+            .get_session_store(&auth.tenant_id)
+            .await
+            .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
 
         let ingest_pipeline =
             IngestPipeline::new(store, session_store, state.embed.clone(), state.llm.clone(), state.cluster_store.clone()).await?;
@@ -220,7 +214,7 @@ pub async fn create_memory(
     );
     memory.tags = body.tags.unwrap_or_default();
     memory.source = body.source;
-    memory.agent_id = auth.agent_id;
+    memory.agent_id = auth.agent_id.clone();
     if let Some(tier_str) = body.tier {
         memory.tier = tier_str
             .parse()
@@ -232,8 +226,18 @@ pub async fn create_memory(
     if let Some(session_id) = body.session_id {
         memory.session_id = Some(session_id);
     }
-    if let Some(agent_id) = body.agent_id {
-        memory.agent_id = Some(agent_id);
+    if let Some(ref agent_id) = body.agent_id {
+        memory.agent_id = Some(agent_id.clone());
+    }
+
+    let visibility = body.visibility.unwrap_or_else(|| "global".to_string());
+    memory.visibility = visibility.clone();
+    if visibility == "private" {
+        if let Some(ref agent_id) = body.agent_id {
+            memory.owner_agent_id = agent_id.clone();
+        } else if let Some(ref agent_id) = auth.agent_id {
+            memory.owner_agent_id = agent_id.clone();
+        }
     }
 
     let vectors = state
@@ -298,6 +302,8 @@ pub async fn search_memories(
         .list_spaces_for_user(&auth.tenant_id)
         .await?;
 
+    let accessible_space_ids: Vec<String> = spaces.iter().map(|s| s.id.clone()).collect();
+
     if spaces.is_empty() {
         let store = state
             .store_manager
@@ -318,6 +324,7 @@ pub async fn search_memories(
                 .map(|t| t.split(',').map(|s| s.trim().to_string()).collect()),
             source_filter: params.source.clone(),
             agent_id_filter: params.agent_id.clone(),
+            accessible_spaces: accessible_space_ids.clone(),
         };
 
         let retrieval_pipeline = RetrievalPipeline::new(store.clone());
@@ -408,6 +415,7 @@ pub async fn search_memories(
         let space_id = acc.space_id.clone();
         let weight = acc.weight;
 
+        let accessible_spaces_clone = accessible_space_ids.clone();
         join_set.spawn(async move {
             let request = SearchRequest {
                 query,
@@ -420,6 +428,7 @@ pub async fn search_memories(
                 tags_filter,
                 source_filter,
                 agent_id_filter,
+                accessible_spaces: accessible_spaces_clone,
             };
             let pipeline = RetrievalPipeline::new(store);
             let result = pipeline.search(&request).await;
@@ -753,6 +762,61 @@ pub async fn batch_get_memories(
     Ok(Json(memories))
 }
 
+// ── Batch Visibility ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct BatchVisibilityRequest {
+    pub memory_ids: Vec<String>,
+    pub visibility: String,
+    pub agent_id: Option<String>,
+}
+
+fn validate_visibility(visibility: &str) -> Result<(), OmemError> {
+    if visibility == "private" || visibility == "global" || visibility.starts_with("shared:") {
+        Ok(())
+    } else {
+        Err(OmemError::Validation(
+            "visibility must be 'private', 'global', or 'shared:*'".to_string(),
+        ))
+    }
+}
+
+pub async fn batch_update_visibility(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<BatchVisibilityRequest>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    if body.memory_ids.is_empty() {
+        return Ok(Json(serde_json::json!({ "updated": 0 })));
+    }
+
+    validate_visibility(&body.visibility)?;
+
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    let memories = store.get_memories_by_ids(&body.memory_ids).await?;
+    let mut updated = 0usize;
+
+    for mut memory in memories {
+        memory.visibility = body.visibility.clone();
+        if body.visibility == "private" {
+            if let Some(ref agent_id) = body.agent_id {
+                memory.owner_agent_id = agent_id.clone();
+            } else if let Some(ref agent_id) = auth.agent_id {
+                memory.owner_agent_id = agent_id.clone();
+            }
+        }
+        memory.updated_at = chrono::Utc::now().to_rfc3339();
+        store.update(&memory, None).await?;
+        updated += 1;
+    }
+
+    Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
 // ── Batch Delete ─────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -869,15 +933,11 @@ pub async fn delete_all_memories(
         .await?;
     let count = store.delete_all().await?;
 
-    let session_uri = format!(
-        "{}/{}",
-        state.config.store_uri(),
-        personal_space_id(&auth.tenant_id)
-    );
-    let session_store = SessionStore::new(&session_uri)
+    let session_store = state
+        .store_manager
+        .get_session_store(&auth.tenant_id)
         .await
         .map_err(|e| OmemError::Storage(format!("session store: {e}")))?;
-    session_store.init_table().await?;
     let sessions_cleared = session_store.delete_all().await?;
 
     Ok(Json(serde_json::json!({
@@ -1114,4 +1174,18 @@ pub async fn reembed_memories(
     }
 
     Ok(Json(ReEmbedResponseDto { re_embedded, skipped_nonzero, errors }))
+}
+
+pub async fn optimize_memories(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    store.optimize().await?;
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }

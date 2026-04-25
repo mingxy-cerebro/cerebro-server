@@ -10,6 +10,9 @@ use crate::domain::tenant::AuthInfo;
 
 /// Middleware that validates the X-API-Key header and resolves the tenant.
 ///
+/// Checks X-API-Key header first, then falls back to `api_key` query parameter
+/// (needed for EventSource which cannot set custom headers).
+///
 /// On success, injects `AuthInfo` into request extensions.
 /// On failure, returns 401 Unauthorized.
 pub async fn auth_middleware(
@@ -23,8 +26,20 @@ pub async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let api_key = match api_key {
+        Some(key) => Some(key),
+        None => request
+            .uri()
+            .query()
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("api_key="))
+                    .map(|p| p[8..].to_string())
+            }),
+    };
+
     let api_key =
-        api_key.ok_or_else(|| OmemError::Unauthorized("missing X-API-Key header".to_string()))?;
+        api_key.ok_or_else(|| OmemError::Unauthorized("missing X-API-Key header or api_key query parameter".to_string()))?;
 
     let tenant = state
         .tenant_store
