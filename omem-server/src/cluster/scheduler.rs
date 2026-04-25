@@ -93,7 +93,16 @@ impl ClusteringScheduler {
         }
         let mut interval = tokio::time::interval(self.interval);
         loop {
-            interval.tick().await;
+            if let Some(ctrl) = &self.scheduler_control {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = ctrl.clustering_notify.notified() => {
+                        interval.reset();
+                    }
+                }
+            } else {
+                interval.tick().await;
+            }
 
             if let Some(ctrl) = &self.scheduler_control {
                 if ctrl.is_clustering_paused() {
@@ -127,6 +136,12 @@ impl ClusteringScheduler {
         }
 
         for store in &stores {
+            if let Some(ctrl) = &self.scheduler_control {
+                if ctrl.is_clustering_paused() {
+                    info!("clustering_paused_between_tenants_stopping");
+                    break;
+                }
+            }
             self.run_clustering(store).await;
         }
 
@@ -150,8 +165,12 @@ impl ClusteringScheduler {
             }
         };
 
+        if let Some(ctrl) = &self.scheduler_control {
+            clusterer = clusterer.with_scheduler_control(ctrl.clone());
+        }
+
         if let Some(bus) = &self.event_bus {
-            clusterer.set_event_bus(bus.clone(), "system".to_string());
+            clusterer.set_event_bus(bus.clone(), String::new());
         }
 
         match clusterer.cluster_all_unassigned(self.batch_size).await {

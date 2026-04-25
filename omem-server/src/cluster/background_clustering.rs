@@ -3,6 +3,7 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 use crate::api::event_bus::{EventBus, ServerEvent};
+use crate::api::scheduler_control::SharedSchedulerControl;
 use crate::cluster::assigner::ClusterAssigner;
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::manager::ClusterManager;
@@ -17,6 +18,7 @@ pub struct BackgroundClusterer {
     cluster_assigner: Arc<ClusterAssigner>,
     cluster_manager: Arc<ClusterManager>,
     event_bus: Option<Arc<EventBus>>,
+    scheduler_control: Option<SharedSchedulerControl>,
     tenant_id: String,
 }
 
@@ -37,6 +39,7 @@ impl BackgroundClusterer {
             cluster_assigner: Arc::new(assigner),
             cluster_manager,
             event_bus: None,
+            scheduler_control: None,
             tenant_id: String::new(),
         })
     }
@@ -44,6 +47,11 @@ impl BackgroundClusterer {
     pub fn with_event_bus(mut self, bus: Arc<EventBus>, tenant_id: String) -> Self {
         self.event_bus = Some(bus);
         self.tenant_id = tenant_id;
+        self
+    }
+
+    pub fn with_scheduler_control(mut self, ctrl: SharedSchedulerControl) -> Self {
+        self.scheduler_control = Some(ctrl);
         self
     }
 
@@ -72,10 +80,12 @@ impl BackgroundClusterer {
         }));
 
         let memories = self.store.list_all_active().await?;
-        let unassigned: Vec<_> = memories
-            .into_iter()
-            .filter(|m| m.cluster_id.is_none() && m.state != crate::domain::types::MemoryState::Deleted)
-            .collect();
+        let unassigned: Vec<_> = tokio::task::spawn_blocking(move || {
+            memories
+                .into_iter()
+                .filter(|m| m.cluster_id.is_none() && m.state != crate::domain::types::MemoryState::Deleted)
+                .collect()
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking error: {e}")))?;
 
         let total = unassigned.len();
         info!(total, "Found unassigned memories to cluster");
@@ -114,7 +124,21 @@ impl BackgroundClusterer {
                 "total": total,
             }));
 
+            if let Some(ctrl) = &self.scheduler_control {
+                if ctrl.is_clustering_paused() {
+                    info!("clustering_paused_mid_batch_stopping");
+                    break;
+                }
+            }
+
             for memory in chunk {
+                if let Some(ctrl) = &self.scheduler_control {
+                    if ctrl.is_clustering_paused() {
+                        info!("clustering_paused_mid_memory_stopping");
+                        break;
+                    }
+                }
+
                 let content_preview: String = memory.content.chars().take(60).collect();
                 let stage = "assigning";
 
@@ -138,6 +162,9 @@ impl BackgroundClusterer {
                                         "stage": "linking",
                                         "action": "assign_existing",
                                         "cluster_id": cluster_id,
+                                        "processed": stats.processed,
+                                        "total": total,
+                                        "pct": if total > 0 { (stats.processed as f64 / total as f64 * 100.0).round() as u32 } else { 0 },
                                     }));
                                     if let Err(e) = self.cluster_manager.assign_to_cluster(
                                         &memory.id,
@@ -156,6 +183,9 @@ impl BackgroundClusterer {
                                     "memory_id": memory.id,
                                     "stage": "creating_cluster",
                                     "action": "create_new",
+                                    "processed": stats.processed,
+                                    "total": total,
+                                    "pct": if total > 0 { (stats.processed as f64 / total as f64 * 100.0).round() as u32 } else { 0 },
                                 }));
                                 match self.store.get_vector_by_id(&memory.id).await {
                                     Ok(Some(vector)) => {
@@ -199,6 +229,7 @@ impl BackgroundClusterer {
                         warn!(memory_id = %memory.id, error = %e, "Failed to assign memory to cluster");
                     }
                 }
+                tokio::task::yield_now().await;
                 sleep(MEMORY_THROTTLE).await;
             }
 

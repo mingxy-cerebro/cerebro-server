@@ -237,8 +237,11 @@ impl ClusterStore {
             .try_collect()
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
-        
-        Self::batch_to_clusters(&batches)
+
+        let clusters = tokio::task::spawn_blocking(move || {
+            Self::batch_to_clusters(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(clusters)
     }
 
     fn batch_to_clusters(batches: &[RecordBatch]) -> Result<Vec<(MemoryCluster, f32)>, OmemError> {
@@ -384,12 +387,18 @@ impl ClusterStore {
         cluster_id: &str,
         summary: &str,
     ) -> Result<(), OmemError> {
-        let summary = summary.to_string();
-        self.with_cluster_lock(cluster_id, |mut cluster| async move {
-            cluster.summary = summary;
-            cluster.updated_at = chrono::Utc::now().to_rfc3339();
-            Ok(((), cluster))
-        }).await
+        let safe_id = Self::escape_sql(cluster_id);
+        let safe_summary = Self::escape_sql(summary);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("summary", format!("'{safe_summary}'"))
+            .column("updated_at", format!("'{now}'"))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("update_summary failed: {e}")))?;
+        Ok(())
     }
 
     pub async fn update_title(
@@ -397,35 +406,81 @@ impl ClusterStore {
         cluster_id: &str,
         title: &str,
     ) -> Result<(), OmemError> {
-        let title = title.to_string();
-        self.with_cluster_lock(cluster_id, |mut cluster| async move {
-            cluster.title = title;
-            cluster.updated_at = chrono::Utc::now().to_rfc3339();
-            Ok(((), cluster))
-        }).await
+        let safe_id = Self::escape_sql(cluster_id);
+        let safe_title = Self::escape_sql(title);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("title", format!("'{safe_title}'"))
+            .column("updated_at", format!("'{now}'"))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("update_title failed: {e}")))?;
+        Ok(())
     }
 
     pub async fn increment_member_count(
         &self,
         cluster_id: &str,
     ) -> Result<u32, OmemError> {
-        self.with_cluster_lock(cluster_id, |mut cluster| async move {
-            cluster.member_count += 1;
-            cluster.updated_at = chrono::Utc::now().to_rfc3339();
-            let new_count = cluster.member_count;
-            Ok((new_count, cluster))
-        }).await
+        let safe_id = Self::escape_sql(cluster_id);
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = self.table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("member_count", "member_count + 1")
+            .column("updated_at", format!("'{now}'"))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("increment_member_count failed: {e}")))?;
+
+        if result.rows_updated == 0 {
+            return Err(OmemError::NotFound(format!("cluster {} not found", cluster_id)));
+        }
+
+        // Read back the new count
+        let batches: Vec<RecordBatch> = self.table
+            .query()
+            .only_if(format!("id = '{safe_id}'"))
+            .select(lancedb::query::Select::columns(&["member_count"]))
+            .limit(1)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query after increment failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect after increment failed: {e}")))?;
+
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Err(OmemError::NotFound(format!("cluster {} not found after update", cluster_id)));
+        }
+
+        let count_col = batches[0]
+            .column_by_name("member_count")
+            .ok_or_else(|| OmemError::Storage("missing member_count column".to_string()))?;
+        let arr = count_col
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .ok_or_else(|| OmemError::Storage("member_count is not UInt32".to_string()))?;
+        Ok(arr.value(0))
     }
 
     pub async fn decrement_member_count(
         &self,
         cluster_id: &str,
     ) -> Result<(), OmemError> {
-        self.with_cluster_lock(cluster_id, |mut cluster| async move {
-            cluster.member_count = cluster.member_count.saturating_sub(1);
-            cluster.updated_at = chrono::Utc::now().to_rfc3339();
-            Ok(((), cluster))
-        }).await
+        let safe_id = Self::escape_sql(cluster_id);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("member_count", "CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END")
+            .column("updated_at", format!("'{now}'"))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("decrement_member_count failed: {e}")))?;
+        Ok(())
     }
 
     pub async fn delete_cluster(

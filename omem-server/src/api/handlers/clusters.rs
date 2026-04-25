@@ -86,13 +86,16 @@ pub async fn trigger_clustering(
 
     cluster_store.create_job(&job).await?;
 
-    let clusterer = BackgroundClusterer::new(
+    let mut clusterer = BackgroundClusterer::new(
         store.clone(),
         cluster_store.clone(),
         state.embed.clone(),
         Some(state.llm.clone()),
     ).await?
     .with_event_bus(state.event_bus.clone(), auth.tenant_id.clone());
+
+    // Wire scheduler control so pause actually works for triggered clustering
+    clusterer = clusterer.with_scheduler_control(state.scheduler_control.clone());
 
         let job_id = job.id.clone();
         let tenant_id = auth.tenant_id.clone();
@@ -390,15 +393,8 @@ pub async fn delete_all_clusters(
 ) -> Result<Json<serde_json::Value>, OmemError> {
     let space_id = format!("personal/{}", auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
-    let all_memories = store.list_all_active().await?;
 
-    let mut unlinked = 0u32;
-    for mem in &all_memories {
-        if mem.cluster_id.is_some() {
-            store.update_memory_cluster_id(&mem.id, None, false).await?;
-            unlinked += 1;
-        }
-    }
+    let unlinked = store.clear_all_cluster_ids().await?;
 
     let deleted = state.cluster_store.delete_all_clusters_by_tenant(&auth.tenant_id).await?;
 
