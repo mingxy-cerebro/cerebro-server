@@ -8,7 +8,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
-use lancedb::index::scalar::FtsIndexBuilder;
+use lancedb::index::scalar::{BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuilder};
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::{NewColumnTransform, OptimizeAction, Table};
@@ -179,6 +179,47 @@ impl LanceStore {
                             "failed to add missing columns to session_recalls: {e}"
                         ))
                     })?;
+            }
+        }
+
+        self.ensure_scalar_indexes().await?;
+
+        // One-time purge of previously soft-deleted data
+        let table = self.open_table().await?;
+        match table.delete("state = 'deleted'").await {
+            Ok(_) => tracing::info!("Purged soft-deleted rows"),
+            Err(e) => tracing::warn!("Failed to purge deleted rows (non-critical): {e}"),
+        }
+
+        Ok(())
+    }
+
+    pub async fn ensure_scalar_indexes(&self) -> Result<(), OmemError> {
+        let table = self.open_table().await?;
+
+        let existing = table.list_indices().await
+            .map_err(|e| OmemError::Storage(format!("list_indices failed: {e}")))?;
+        let indexed_columns: std::collections::HashSet<String> = existing.iter()
+            .flat_map(|idx| idx.columns.clone())
+            .collect();
+
+        let btree_cols = ["id", "cluster_id", "created_at", "updated_at"];
+        for col in btree_cols {
+            if !indexed_columns.contains(col) {
+                table.create_index(&[col], Index::BTree(BTreeIndexBuilder::default()))
+                    .execute()
+                    .await
+                    .map_err(|e| OmemError::Storage(format!("create {col} btree index failed: {e}")))?;
+            }
+        }
+
+        let bitmap_cols = ["state", "category", "tier"];
+        for col in bitmap_cols {
+            if !indexed_columns.contains(col) {
+                table.create_index(&[col], Index::Bitmap(BitmapIndexBuilder::default()))
+                    .execute()
+                    .await
+                    .map_err(|e| OmemError::Storage(format!("create {col} bitmap index failed: {e}")))?;
             }
         }
 
@@ -661,7 +702,6 @@ impl LanceStore {
         let table = self.open_table().await?;
         let batches: Vec<RecordBatch> = table
             .query()
-            .only_if("state != 'deleted'")
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("list all query failed: {e}")))?
@@ -723,7 +763,7 @@ impl LanceStore {
         let table = self.open_table().await?;
         let batches: Vec<RecordBatch> = table
             .query()
-            .only_if(format!("id = '{}' AND state != 'deleted'", escape_sql(id)))
+            .only_if(format!("id = '{}'", escape_sql(id)))
             .limit(1)
             .execute()
             .await
@@ -817,23 +857,33 @@ impl LanceStore {
         Ok(result.rows_updated)
     }
 
-    pub async fn soft_delete(&self, id: &str) -> Result<(), OmemError> {
-        let memory = self
-            .get_by_id(id)
-            .await?
-            .ok_or_else(|| OmemError::NotFound(format!("memory {id}")))?;
+    pub async fn hard_delete(&self, id: &str) -> Result<(), OmemError> {
+        let table = self.open_table().await?;
+        table
+            .delete(&format!("id = '{}'", escape_sql(id)))
+            .await
+            .map_err(|e| OmemError::Storage(format!("hard_delete failed: {e}")))?;
+        Ok(())
+    }
 
-        let mut updated = memory;
-        updated.state = MemoryState::Deleted;
-        updated.updated_at = chrono::Utc::now().to_rfc3339();
-        self.update(&updated, None).await
+    pub async fn batch_hard_delete_by_ids(&self, ids: &[String]) -> Result<usize, OmemError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let table = self.open_table().await?;
+        let safe_ids: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+        let id_list = safe_ids.join(", ");
+        table
+            .delete(&format!("id IN ({id_list})"))
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch_hard_delete_by_ids failed: {e}")))?;
+        Ok(ids.len())
     }
 
     pub async fn list(&self, limit: usize, offset: usize) -> Result<Vec<Memory>, OmemError> {
         let table = self.open_table().await?;
         let batches: Vec<RecordBatch> = table
             .query()
-            .only_if("state != 'deleted'")
             .limit(limit + offset)
             .execute()
             .await
@@ -856,7 +906,7 @@ impl LanceStore {
         let safe_cid = cluster_id.replace("'", "''");
         let batches: Vec<RecordBatch> = table
             .query()
-            .only_if(format!("cluster_id = '{}' AND state != 'deleted'", safe_cid))
+            .only_if(format!("cluster_id = '{}'", safe_cid))
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("list_by_cluster_id query failed: {e}")))?
@@ -887,19 +937,27 @@ impl LanceStore {
 
         query = query.limit(limit);
 
-        let mut filter = "state != 'deleted'".to_string();
+        let mut filter = String::new();
         if let Some(scope) = scope_filter {
-            filter.push_str(&format!(" AND scope = '{}'", escape_sql(scope)));
+            filter.push_str(&format!("scope = '{}'", escape_sql(scope)));
         }
         if let Some(vis) = visibility_filter {
-            filter.push_str(&format!(" AND ({vis})"));
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(&format!("({vis})"));
         }
         if let Some(tags) = tags_filter {
             for tag in tags {
-                filter.push_str(&format!(" AND tags LIKE '%\"{}\"%'", escape_sql(tag)));
+                if !filter.is_empty() {
+                    filter.push_str(" AND ");
+                }
+                filter.push_str(&format!("tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
         }
-        query = query.only_if(filter);
+        if !filter.is_empty() {
+            query = query.only_if(filter);
+        }
 
         let batches: Vec<RecordBatch> = query
             .execute()
@@ -947,19 +1005,27 @@ impl LanceStore {
             .select(Select::All)
             .limit(limit);
 
-        let mut filter = "state != 'deleted'".to_string();
+        let mut filter = String::new();
         if let Some(scope) = scope_filter {
-            filter.push_str(&format!(" AND scope = '{}'", escape_sql(scope)));
+            filter.push_str(&format!("scope = '{}'", escape_sql(scope)));
         }
         if let Some(vis) = visibility_filter {
-            filter.push_str(&format!(" AND ({vis})"));
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(&format!("({vis})"));
         }
         if let Some(tags) = tags_filter {
             for tag in tags {
-                filter.push_str(&format!(" AND tags LIKE '%\"{}\"%'", escape_sql(tag)));
+                if !filter.is_empty() {
+                    filter.push_str(" AND ");
+                }
+                filter.push_str(&format!("tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
         }
-        q = q.postfilter().only_if(filter);
+        if !filter.is_empty() {
+            q = q.postfilter().only_if(filter);
+        }
 
         let batches: Vec<RecordBatch> = q
             .execute()
@@ -1002,6 +1068,14 @@ impl LanceStore {
 
     pub async fn create_vector_index(&self) -> Result<(), OmemError> {
         let table = self.open_table().await?;
+        let count = table.count_rows(None).await
+            .map_err(|e| OmemError::Storage(format!("count_rows failed: {e}")))?;
+
+        if count < 100_000 {
+            tracing::info!("Skipping vector index: {count} rows < 100K threshold");
+            return Ok(());
+        }
+
         table
             .create_index(
                 &["vector"],
@@ -1116,7 +1190,7 @@ impl LanceStore {
         }
 
         let filter = format!(
-            "state != 'deleted' AND provenance_source_id = '{}'",
+            "provenance_source_id = '{}'",
             escape_sql(source_memory_id)
         );
         let batches: Vec<RecordBatch> = table
@@ -1135,46 +1209,36 @@ impl LanceStore {
         Ok(memories)
     }
 
-    pub async fn batch_soft_delete(&self, filter: &str) -> Result<usize, OmemError> {
+    pub async fn batch_hard_delete(&self, filter: &str) -> Result<usize, OmemError> {
         let table = self.open_table().await?;
-        let full_filter = format!("{} AND state != 'deleted'", filter);
-        let batches: Vec<RecordBatch> = table
-            .query()
-            .only_if(&full_filter)
-            .execute()
+        let count = table
+            .count_rows(Some(filter.to_string()))
             .await
-            .map_err(|e| OmemError::Storage(format!("batch_soft_delete query failed: {e}")))?
-            .try_collect()
+            .map_err(|e| OmemError::Storage(format!("count_before_delete failed: {e}")))?;
+        table
+            .delete(filter)
             .await
-            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
-
-        let memories = tokio::task::spawn_blocking(move || {
-            Self::batch_to_memories(&batches)
-        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
-        let count = memories.len();
-
-        for mem in memories {
-            self.soft_delete(&mem.id).await?;
-        }
+            .map_err(|e| OmemError::Storage(format!("batch_hard_delete failed: {e}")))?;
         Ok(count)
     }
 
     pub async fn count_by_filter(&self, filter: &str) -> Result<usize, OmemError> {
         let table = self.open_table().await?;
-        let full_filter = format!("{} AND state != 'deleted'", filter);
         let count = table
-            .count_rows(Some(full_filter))
+            .count_rows(Some(filter.to_string()))
             .await
             .map_err(|e| OmemError::Storage(format!("count_by_filter failed: {e}")))?;
         Ok(count)
     }
 
     pub async fn delete_all(&self) -> Result<usize, OmemError> {
-        let all = self.list_all_active().await?;
-        let count = all.len();
-        for mem in all {
-            self.soft_delete(&mem.id).await?;
-        }
+        let table = self.open_table().await?;
+        let count = table.count_rows(None).await
+            .map_err(|e| OmemError::Storage(format!("count_rows failed: {e}")))?;
+        table
+            .delete("true")
+            .await
+            .map_err(|e| OmemError::Storage(format!("delete_all failed: {e}")))?;
         Ok(count)
     }
 
@@ -1191,7 +1255,7 @@ impl LanceStore {
             .map(|id| format!("'{}'", escape_sql(id)))
             .collect::<Vec<_>>()
             .join(", ");
-        let filter = format!("id IN ({}) AND state != 'deleted'", id_list);
+        let filter = format!("id IN ({id_list})");
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(&filter)
@@ -1211,9 +1275,8 @@ impl LanceStore {
     fn build_where_clause(filter: &ListFilter) -> String {
         let mut conditions = Vec::new();
 
-        match &filter.state {
-            Some(s) => conditions.push(format!("state = '{}'", escape_sql(s))),
-            None => conditions.push("state != 'deleted'".to_string()),
+        if let Some(s) = &filter.state {
+            conditions.push(format!("state = '{}'", escape_sql(s)));
         }
 
         if let Some(ref cat) = filter.category {
@@ -1377,7 +1440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_soft_delete() {
+    async fn test_hard_delete() {
         let (store, _dir) = setup().await;
         let mem = make_memory("t-001", "to be deleted");
 
@@ -1387,11 +1450,10 @@ mod tests {
         assert!(before.is_some());
         assert_eq!(before.unwrap().state, MemoryState::Active);
 
-        store.soft_delete(&mem.id).await.unwrap();
+        store.hard_delete(&mem.id).await.unwrap();
 
         let after = store.get_by_id(&mem.id).await.unwrap();
-        assert!(after.is_some());
-        assert_eq!(after.unwrap().state, MemoryState::Deleted);
+        assert!(after.is_none());
     }
 
     #[tokio::test]
@@ -1556,7 +1618,6 @@ mod tests {
         });
         let result = store.build_visibility_filter("", &[]);
         assert!(result.contains("visibility = 'global'"));
-        assert!(result.contains("state != 'deleted'"));
         assert!(!result.contains("private"));
     }
 

@@ -706,7 +706,7 @@ pub async fn delete_memory(
         .await?
         .ok_or_else(|| OmemError::NotFound(format!("memory {id}")))?;
 
-    store.soft_delete(&id).await?;
+    store.hard_delete(&id).await?;
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
@@ -908,13 +908,7 @@ pub async fn batch_delete(
         .await?;
 
     if let Some(ids) = body.memory_ids {
-        let mut deleted = 0usize;
-        for id in &ids {
-            if store.get_by_id(id).await?.is_some() {
-                store.soft_delete(id).await?;
-                deleted += 1;
-            }
-        }
+        let deleted = store.batch_hard_delete_by_ids(&ids).await?;
         return Ok(Json(serde_json::json!({
             "deleted": deleted,
             "mode": "ids"
@@ -931,7 +925,7 @@ pub async fn batch_delete(
             })));
         }
 
-        let deleted = store.batch_soft_delete(&where_clause).await?;
+        let deleted = store.batch_hard_delete(&where_clause).await?;
         return Ok(Json(serde_json::json!({
             "deleted": deleted,
             "mode": "filter"
@@ -1175,7 +1169,7 @@ pub async fn reembed_memories(
 
     let memories = store.list_all_active().await?;
     let mut re_embedded = 0usize;
-    let mut skipped_nonzero = 0usize;
+    let skipped_nonzero = 0usize;
     let mut errors = 0usize;
 
     for memory in &memories {
@@ -1238,6 +1232,14 @@ pub async fn session_ingest(
             "messages array is empty".to_string(),
         ));
     }
+
+    // Acquire per-session lock to prevent concurrent ingestion for the same session
+    let session_key = body.session_id.as_deref().unwrap_or("default");
+    let lock_arc = state
+        .session_locks
+        .entry(session_key.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+    let _session_guard = lock_arc.lock().await;
 
     const MAX_MESSAGES: usize = 40;
     let messages: &[MessageDto] = if body.messages.len() > MAX_MESSAGES {
@@ -1368,7 +1370,7 @@ pub async fn session_ingest(
                         first = false;
                     } else {
                         // Additional old memories merged into first → soft-delete the rest
-                        store.soft_delete(&old_mem.id).await.ok();
+                        store.hard_delete(&old_mem.id).await.ok();
                         tracing::info!(id = %old_mem.id, "Soft-deleted merged-away old summary");
                     }
                 }

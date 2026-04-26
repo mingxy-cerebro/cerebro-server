@@ -139,6 +139,7 @@ impl ClusterStore {
         .map_err(|e| OmemError::Storage(format!("failed to build cluster batch: {e}")))
     }
 
+    #[allow(dead_code)]
     async fn with_cluster_lock<F, Fut, T>(
         &self,
         cluster_id: &str,
@@ -315,6 +316,7 @@ impl ClusterStore {
         })
     }
 
+    #[allow(dead_code)]
     fn extract_anchor_vector(batch: &RecordBatch, row: usize) -> Result<Vec<f32>, OmemError> {
         use arrow::array::FixedSizeListArray;
 

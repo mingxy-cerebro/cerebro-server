@@ -100,6 +100,7 @@ async fn main() {
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         event_bus: Arc::new(omem_server::api::event_bus::EventBus::new()),
         scheduler_control: Arc::new(omem_server::api::scheduler_control::SchedulerControl::new()),
+        session_locks: Arc::new(dashmap::DashMap::new()),
     });
 
     let app = build_router(state.clone());

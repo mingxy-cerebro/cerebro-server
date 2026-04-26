@@ -156,7 +156,7 @@ pub async fn merge_memories(
     let mut consumed_ids = Vec::new();
     for (i, mem) in memories.iter().enumerate() {
         if i != primary_idx {
-            store.soft_delete(&mem.id).await?;
+            store.hard_delete(&mem.id).await?;
             consumed_ids.push(mem.id.clone());
         }
     }

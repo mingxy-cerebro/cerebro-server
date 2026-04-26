@@ -434,7 +434,7 @@ pub async fn rollback_import(
         "source = 'intelligence' AND created_at >= '{}'",
         task.created_at.replace('\'', "''")
     );
-    let memories_deleted = store.batch_soft_delete(&filter).await?;
+    let memories_deleted = store.batch_hard_delete(&filter).await?;
 
     let mut updated_task = task;
     updated_task.status = "rolled_back".to_string();

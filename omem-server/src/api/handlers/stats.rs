@@ -836,6 +836,7 @@ mod tests {
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             event_bus: Arc::new(crate::api::event_bus::EventBus::new()),
             scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
+            session_locks: Arc::new(dashmap::DashMap::new()),
         });
 
         (state, store_dir, space_dir, tenant_dir)

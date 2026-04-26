@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use crate::api::event_bus::{EventBus, ServerEvent, SharedEventBus};
+use crate::api::event_bus::SharedEventBus;
 use crate::api::scheduler_control::SharedSchedulerControl;
 use crate::cluster::background_clustering::BackgroundClusterer;
 use crate::cluster::cluster_store::ClusterStore;

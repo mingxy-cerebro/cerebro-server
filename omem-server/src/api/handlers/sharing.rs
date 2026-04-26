@@ -460,7 +460,7 @@ pub async fn unshare_memory(
         }
     }
 
-    target_store.soft_delete(&copy.id).await?;
+    target_store.hard_delete(&copy.id).await?;
 
     let agent_id = auth.agent_id.as_deref().unwrap_or("");
     let event = make_sharing_event(
@@ -782,7 +782,7 @@ pub async fn reshare_memory(
         .create(&new_copy, source_vector.as_deref())
         .await?;
 
-    target_store.soft_delete(&old_copy.id).await?;
+    target_store.hard_delete(&old_copy.id).await?;
 
     let event = make_sharing_event(
         SharingAction::Reshare,
@@ -1552,14 +1552,13 @@ mod tests {
         let copy = make_shared_copy(&mem, "team:backend", "user-001", "agent-1");
         target_store.create(&copy, None).await.expect("share");
 
-        target_store.soft_delete(&copy.id).await.expect("unshare");
+        target_store.hard_delete(&copy.id).await.expect("unshare");
 
         let deleted = target_store
             .get_by_id(&copy.id)
             .await
-            .expect("get")
-            .expect("exists");
-        assert_eq!(deleted.state, crate::domain::types::MemoryState::Deleted);
+            .expect("get");
+        assert!(deleted.is_none());
     }
 
     #[tokio::test]
@@ -1821,7 +1820,7 @@ mod tests {
             .await
             .expect("create new copy");
         target_store
-            .soft_delete(&copy_id)
+            .hard_delete(&copy_id)
             .await
             .expect("delete old");
 
@@ -1837,11 +1836,7 @@ mod tests {
         assert_eq!(prov.shared_from_memory, mem.id);
 
         let old = target_store.get_by_id(&copy_id).await.expect("get");
-        assert!(old.is_some());
-        assert_eq!(
-            old.unwrap().state,
-            crate::domain::types::MemoryState::Deleted
-        );
+        assert!(old.is_none());
     }
 
     #[tokio::test]

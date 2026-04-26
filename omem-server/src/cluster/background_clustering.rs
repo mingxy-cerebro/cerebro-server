@@ -83,7 +83,7 @@ impl BackgroundClusterer {
         let unassigned: Vec<_> = tokio::task::spawn_blocking(move || {
             memories
                 .into_iter()
-                .filter(|m| m.cluster_id.is_none() && m.state != crate::domain::types::MemoryState::Deleted)
+                .filter(|m| m.cluster_id.is_none())
                 .collect()
         }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking error: {e}")))?;
 

@@ -44,7 +44,6 @@ impl FromStr for MemoryType {
 pub enum MemoryState {
     Active,
     Archived,
-    Deleted,
 }
 
 impl fmt::Display for MemoryState {
@@ -52,7 +51,6 @@ impl fmt::Display for MemoryState {
         match self {
             Self::Active => write!(f, "active"),
             Self::Archived => write!(f, "archived"),
-            Self::Deleted => write!(f, "deleted"),
         }
     }
 }
@@ -64,7 +62,6 @@ impl FromStr for MemoryState {
         match s.to_lowercase().as_str() {
             "active" => Ok(Self::Active),
             "archived" => Ok(Self::Archived),
-            "deleted" => Ok(Self::Deleted),
             _ => Err(format!("unknown memory state: {s}")),
         }
     }
@@ -142,7 +139,6 @@ mod tests {
     fn memory_state_display_lowercase() {
         assert_eq!(MemoryState::Active.to_string(), "active");
         assert_eq!(MemoryState::Archived.to_string(), "archived");
-        assert_eq!(MemoryState::Deleted.to_string(), "deleted");
     }
 
     #[test]

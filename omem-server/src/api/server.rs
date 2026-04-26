@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use tokio::sync::Semaphore;
 
 use crate::api::event_bus::SharedEventBus;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub reconcile_semaphore: Arc<Semaphore>,
     pub event_bus: SharedEventBus,
     pub scheduler_control: SharedSchedulerControl,
+    pub session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Map tenant_id to their personal Space ID.

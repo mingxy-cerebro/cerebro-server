@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::api::event_bus::{EventBus, ServerEvent, SharedEventBus};
+use crate::api::event_bus::{ServerEvent, SharedEventBus};
 use crate::api::scheduler_control::SharedSchedulerControl;
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::manager::ClusterManager;
@@ -21,6 +21,7 @@ pub struct LifecycleScheduler {
     llm: Option<Arc<dyn crate::llm::LlmService>>,
     interval_secs: u64,
     run_on_start: bool,
+    #[allow(dead_code)]
     max_memories_per_store: usize,
     event_bus: Option<SharedEventBus>,
     scheduler_control: Option<SharedSchedulerControl>,

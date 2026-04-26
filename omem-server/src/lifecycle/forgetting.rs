@@ -43,7 +43,7 @@ impl AutoForgetter {
             if let Some(ttl) = Self::detect_ttl(&memory.content) {
                 if let Some(created) = parse_datetime(&memory.created_at) {
                     if created + ttl < now {
-                        self.store.soft_delete(&memory.id).await?;
+                        self.store.hard_delete(&memory.id).await?;
                         deleted.push(memory);
                     }
                 }
