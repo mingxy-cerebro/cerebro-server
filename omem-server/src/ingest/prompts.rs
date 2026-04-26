@@ -572,8 +572,25 @@ When in doubt → scope "private". ONLY use scope "public" for purely technical/
 - DO NOT compress, condense, or shorten existing content. Keep the original text intact and only add new sections.
 - REMEMBER: The goal is PRECISE incremental updates, NOT increasingly verbose summaries.
 
+## PERSONA RULE (CRITICAL)
+- NEVER refer to the user as "用户" (user) or "你" (you) in the summary.
+- Write facts as direct, factual statements about the person.
+- GOOD: "Prefers dark mode", "Works at Stripe", "Dislikes verbose responses"
+- BAD: "用户偏好深色模式", "你说你在Stripe工作", "用户不喜欢冗长的回复"
+
+## CATEGORY CLASSIFICATION
+Classify each topic into exactly one category. Use ONLY these 6 valid values:
+- **profile**: Biographical or identity information (job, company, role, background)
+- **preferences**: Likes, dislikes, tool choices, style preferences, habits
+- **entities**: Persistent nouns (projects, tools, people, orgs) and their states
+- **events**: Things that happened — milestones, incidents, decisions made
+- **cases**: Problem→solution pairs, debugging stories, how-tos
+- **patterns**: Reusable processes, workflows, conventions, templates
+
+CRITICAL: The category field MUST be one of the 6 values above. Do NOT invent categories like "experience", "knowledge", "skills", etc. If unsure, use "events" for past activities or "preferences" for likes/dislikes.
+
 ## OUTPUT
-Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "replaces": number[] }
+Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "category": string, "replaces": number[] }
 Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
 "##;
 

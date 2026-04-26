@@ -50,7 +50,8 @@ impl ProfileService {
         let static_facts: Vec<String> = static_memories
             .iter()
             .take(20)
-            .map(|m| m.content.clone())
+            .map(|m| sanitize_profile_content(&m.content))
+            .filter(|s| !s.is_empty())
             .collect();
 
         let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
@@ -66,7 +67,8 @@ impl ProfileService {
                         .unwrap_or(false)
             })
             .take(10)
-            .map(|m| m.content.clone())
+            .map(|m| sanitize_profile_content(&m.content))
+            .filter(|s| !s.is_empty())
             .collect();
 
         let profile = UserProfile {
@@ -96,6 +98,10 @@ impl ProfileService {
             search_results,
         })
     }
+}
+
+fn sanitize_profile_content(content: &str) -> String {
+    content.replace("用户", "").trim().to_string()
 }
 
 #[cfg(test)]

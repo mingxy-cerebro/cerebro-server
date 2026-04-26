@@ -25,6 +25,7 @@ pub const VECTOR_DIM: i32 = 1024;
 const TABLE_NAME: &str = "memories";
 
 pub struct ListFilter {
+    pub q: Option<String>,
     pub category: Option<String>,
     pub tier: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -38,6 +39,7 @@ pub struct ListFilter {
 impl Default for ListFilter {
     fn default() -> Self {
         Self {
+            q: None,
             category: None,
             tier: None,
             tags: None,
@@ -414,8 +416,15 @@ impl LanceStore {
         offset: usize,
     ) -> Result<Vec<SessionRecall>, OmemError> {
         let table = self.open_session_recalls_table().await?;
+        
+        let mut filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
+        if let Some(sid) = session_id {
+            filter.push_str(&format!(" AND session_id = '{}'", escape_sql(sid)));
+        }
+        
         let batches: Vec<RecordBatch> = table
             .query()
+            .only_if(&filter)
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("list session_recalls query failed: {e}")))?
@@ -423,15 +432,9 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let all = Self::batch_to_session_recalls(&batches)?;
-        let mut filtered: Vec<SessionRecall> = all.into_iter()
-            .filter(|r| r.tenant_id == tenant_id)
-            .collect();
-        if let Some(sid) = session_id {
-            filtered.retain(|r| r.session_id == sid);
-        }
-        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(filtered.into_iter().skip(offset).take(limit).collect())
+        let mut recalls = Self::batch_to_session_recalls(&batches)?;
+        recalls.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(recalls.into_iter().skip(offset).take(limit).collect())
     }
 
     pub async fn delete_session_recall(
@@ -1186,22 +1189,51 @@ impl LanceStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
-        let where_clause = Self::build_where_clause(filter);
+        let mut memories = if let Some(ref q) = filter.q {
+            // Full-text search path: use FTS with postfilter for other conditions
+            let table = self.open_table().await?;
+            let fts_query = lance_index::scalar::FullTextSearchQuery::new(q.to_string());
+            let mut query = table
+                .query()
+                .full_text_search(fts_query)
+                .select(Select::All)
+                .limit(10000);
 
-        let batches: Vec<RecordBatch> = table
-            .query()
-            .only_if(&where_clause)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("list_filtered query failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+            let where_clause = Self::build_where_clause(filter);
+            if where_clause != "true" {
+                query = query.postfilter().only_if(where_clause);
+            }
 
-        let mut memories = tokio::task::spawn_blocking(move || {
-            Self::batch_to_memories(&batches)
-        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+            let batches: Vec<RecordBatch> = query
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("FTS list query failed: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+            tokio::task::spawn_blocking(move || {
+                Self::batch_to_memories(&batches)
+            }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??
+        } else {
+            // Original scalar filter path
+            let table = self.open_table().await?;
+            let where_clause = Self::build_where_clause(filter);
+
+            let batches: Vec<RecordBatch> = table
+                .query()
+                .only_if(&where_clause)
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("list_filtered query failed: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+            tokio::task::spawn_blocking(move || {
+                Self::batch_to_memories(&batches)
+            }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??
+        };
 
         // Sort in Rust (LanceDB query builder doesn't support ORDER BY)
         match filter.sort.as_str() {
@@ -1222,15 +1254,46 @@ impl LanceStore {
     }
 
     pub async fn count_filtered(&self, filter: &ListFilter) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
-        let where_clause = Self::build_where_clause(filter);
+        if let Some(ref q) = filter.q {
+            // Full-text search path
+            let table = self.open_table().await?;
+            let fts_query = lance_index::scalar::FullTextSearchQuery::new(q.to_string());
+            let mut query = table
+                .query()
+                .full_text_search(fts_query)
+                .select(Select::All)
+                .limit(10000);
 
-        let count = table
-            .count_rows(Some(where_clause))
-            .await
-            .map_err(|e| OmemError::Storage(format!("count failed: {e}")))?;
+            let where_clause = Self::build_where_clause(filter);
+            if where_clause != "true" {
+                query = query.postfilter().only_if(where_clause);
+            }
 
-        Ok(count)
+            let batches: Vec<RecordBatch> = query
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("FTS count query failed: {e}")))?
+                .try_collect()
+                .await
+                .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+            let memories = tokio::task::spawn_blocking(move || {
+                Self::batch_to_memories(&batches)
+            }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+
+            Ok(memories.len())
+        } else {
+            // Original scalar filter path
+            let table = self.open_table().await?;
+            let where_clause = Self::build_where_clause(filter);
+
+            let count = table
+                .count_rows(Some(where_clause))
+                .await
+                .map_err(|e| OmemError::Storage(format!("count failed: {e}")))?;
+
+            Ok(count)
+        }
     }
 
     /// Find memories whose provenance.shared_from_memory matches the given original memory ID.

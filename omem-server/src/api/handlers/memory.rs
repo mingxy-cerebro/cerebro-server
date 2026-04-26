@@ -76,6 +76,7 @@ pub struct ListQuery {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    pub q: Option<String>,
     pub memory_type: Option<String>,
     pub state: Option<String>,
     pub category: Option<String>,
@@ -731,6 +732,7 @@ pub async fn list_memories(
         .await?;
 
     let filter = ListFilter {
+        q: params.q,
         category: params.category,
         tier: params.tier,
         tags: params
@@ -802,8 +804,18 @@ pub async fn batch_get_memories(
 #[derive(Deserialize)]
 pub struct BatchVisibilityRequest {
     pub memory_ids: Vec<String>,
-    pub visibility: String,
+    pub visibility: Option<String>,
     pub agent_id: Option<String>,
+    pub scope: Option<String>,
+}
+
+fn validate_scope(scope: &str) -> Result<(), OmemError> {
+    match scope {
+        "public" | "private" | "global" | "team" | "org" => Ok(()),
+        _ => Err(OmemError::Validation(
+            "scope must be 'public', 'private', 'global', 'team', or 'org'".to_string(),
+        )),
+    }
 }
 
 fn validate_visibility(visibility: &str) -> Result<(), OmemError> {
@@ -825,7 +837,17 @@ pub async fn batch_update_visibility(
         return Ok(Json(serde_json::json!({ "updated": 0 })));
     }
 
-    validate_visibility(&body.visibility)?;
+    if let Some(ref visibility) = body.visibility {
+        validate_visibility(visibility)?;
+    }
+    if let Some(ref scope) = body.scope {
+        validate_scope(scope)?;
+    }
+    if body.visibility.is_none() && body.scope.is_none() {
+        return Err(OmemError::Validation(
+            "at least one of 'visibility' or 'scope' must be provided".to_string(),
+        ));
+    }
 
     let store = state
         .store_manager
@@ -836,8 +858,25 @@ pub async fn batch_update_visibility(
     let mut updated = 0usize;
 
     for mut memory in memories {
-        memory.visibility = body.visibility.clone();
-        if body.visibility == "private" {
+        if let Some(ref visibility) = body.visibility {
+            memory.visibility = visibility.clone();
+        }
+        if let Some(ref scope) = body.scope {
+            memory.scope = scope.clone();
+            memory.visibility = if scope == "private" {
+                "private".to_string()
+            } else {
+                "global".to_string()
+            };
+            if scope == "private" {
+                if !memory.tags.contains(&"私密".to_string()) {
+                    memory.tags.push("私密".to_string());
+                }
+            } else {
+                memory.tags.retain(|t| t != "私密");
+            }
+        }
+        if memory.visibility == "private" {
             if let Some(ref agent_id) = body.agent_id {
                 memory.owner_agent_id = agent_id.clone();
             } else if let Some(ref agent_id) = auth.agent_id {
@@ -1021,6 +1060,7 @@ pub async fn get_tier_changes(
         .await?;
 
     let filter = ListFilter {
+        q: None,
         category: None,
         tier: None,
         tags: None,
@@ -1249,6 +1289,8 @@ struct SessionTopicSummary {
     scope: String,
     #[serde(default)]
     replaces: Vec<usize>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 fn default_scope() -> String {
@@ -1357,11 +1399,21 @@ pub async fn session_ingest(
         let mut stored = 0usize;
 
         for (i, topic) in topics.iter().enumerate() {
-            let category = if topic.scope == "private" {
-                Category::Profile
-            } else {
-                Category::Events
-            };
+            let category: Category = topic.category.as_deref().and_then(|c| {
+                // Map common invalid categories to valid ones before parsing
+                let normalized = match c.to_lowercase().as_str() {
+                    "experience" | "experiences" | "activity" | "activities" => "events",
+                    "knowledge" | "skill" | "skills" | "ability" | "abilities" => "patterns",
+                    _ => c,
+                };
+                normalized.parse().ok()
+            }).unwrap_or_else(|| {
+                if topic.scope == "private" {
+                    Category::Profile
+                } else {
+                    Category::Events
+                }
+            });
             let l1_overview = {
                 let s = &topic.summary;
                 if s.chars().count() <= 150 { s.clone() } else {
@@ -1507,17 +1559,18 @@ fn format_conversation_truncated(messages: &[MessageDto], max_chars: usize) -> S
 fn clean_message_content(content: &str) -> String {
     let mut cleaned = content.to_string();
 
+    // Remove XML-like system tags and their content
     let xml_patterns = [
         "<system-reminder>",
-        "<dcp-",
-        "<dcf-",
-        "<tool_call-",
-        "<dcp_message-",
+        "<auto-slash-command>",
+        "<thinking>",
+        "< omoc:",
+        "<analysis>",
     ];
     for pattern in xml_patterns {
         while let Some(start) = cleaned.find(pattern) {
             let tag_name_end = cleaned[start..]
-                .find(|c: char| c == '>' || c == ' ')
+                .find(|c: char| c == ' ' || c == '>')
                 .map(|i| start + i)
                 .unwrap_or(cleaned.len());
             let tag_name = &cleaned[start..tag_name_end];
@@ -1539,16 +1592,22 @@ fn clean_message_content(content: &str) -> String {
         }
     }
 
+    // Remove noise patterns
     let noise_patterns = [
         "[Compressed conversation section]",
         "[search-mode]",
         "[analyze-mode]",
         "MANDATORY delegate_task params",
+        "[SYSTEM DIRECTIVE",
+        "OH-MY-OPENCODE",
+        "Incomplete tasks",
+        "OMO_INTERNAL_INITIATOR",
     ];
     for pattern in noise_patterns {
         cleaned = cleaned.replace(pattern, "");
     }
 
+    // Filter out lines starting with system prefixes
     let lines: Vec<&str> = cleaned.lines().filter(|line| {
         let trimmed = line.trim();
         if trimmed.is_empty() { return false; }
@@ -1558,12 +1617,18 @@ fn clean_message_content(content: &str) -> String {
         if trimmed.starts_with("</dcf") { return false; }
         if trimmed.starts_with("<dcp_message") { return false; }
         if trimmed.starts_with("</dcp_message") { return false; }
+        if trimmed.starts_with("<system-reminder") { return false; }
+        if trimmed.starts_with("</system-reminder") { return false; }
+        if trimmed.starts_with("<auto-slash-command") { return false; }
+        if trimmed.starts_with("</auto-slash-command") { return false; }
         true
     }).collect();
 
     cleaned = lines.join("\n");
     cleaned.trim().to_string()
 }
+
+
 
 async fn fetch_existing_session_summaries(
     store: &crate::store::lancedb::LanceStore,
