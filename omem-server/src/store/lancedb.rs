@@ -11,7 +11,7 @@ use futures::TryStreamExt;
 use lancedb::index::scalar::{BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuilder};
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::{NewColumnTransform, OptimizeAction, Table};
+use lancedb::table::{CompactionOptions, NewColumnTransform, OptimizeAction, Table};
 use lancedb::Connection;
 
 use crate::domain::category::Category;
@@ -189,6 +189,14 @@ impl LanceStore {
         match table.delete("state = 'deleted'").await {
             Ok(_) => tracing::info!("Purged soft-deleted rows"),
             Err(e) => tracing::warn!("Failed to purge deleted rows (non-critical): {e}"),
+        }
+
+        // Compact + prune + index optimize on startup to recover from version bloat
+        let start = std::time::Instant::now();
+        if let Err(e) = self.optimize().await {
+            tracing::warn!(error = %e, "startup_optimize_failed");
+        } else {
+            tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "startup_optimize_completed");
         }
 
         Ok(())
@@ -798,26 +806,78 @@ impl LanceStore {
         mem.version = Some(mem.version.unwrap_or(0) + 1);
         mem.updated_at = chrono::Utc::now().to_rfc3339();
 
-        // Preserve existing vector when none is explicitly provided.
-        // Without this, update(&mem, None) would overwrite the stored vector with zeros.
-        let preserved: Option<Vec<f32>> = match vector {
-            Some(v) => Some(v.to_vec()),
-            None => self.get_vector_by_id(&mem.id).await?,
-        };
+        if let Some(v) = vector {
+            // Vector update path: delete + re-insert (vectors cannot be updated via expressions)
+            let table = self.open_table().await?;
+            table
+                .delete(&format!("id = '{}'", escape_sql(&mem.id)))
+                .await
+                .map_err(|e| OmemError::Storage(format!("delete for update failed: {e}")))?;
 
-        let table = self.open_table().await?;
-        table
-            .delete(&format!("id = '{}'", escape_sql(&mem.id)))
-            .await
-            .map_err(|e| OmemError::Storage(format!("delete for update failed: {e}")))?;
+            let batch = Self::memory_to_batch(&mem, Some(v))?;
+            let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
+            table
+                .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("re-insert for update failed: {e}")))?;
+        } else {
+            // Scalar-only update path: use native table.update() to avoid version bloat
+            let tags_json = serde_json::to_string(&mem.tags)
+                .map_err(|e| OmemError::Storage(format!("failed to serialize tags: {e}")))?;
+            let relations_json = serde_json::to_string(&mem.relations)
+                .map_err(|e| OmemError::Storage(format!("failed to serialize relations: {e}")))?;
+            let provenance_json: Option<String> = mem
+                .provenance
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| OmemError::Storage(format!("failed to serialize provenance: {e}")))?;
+            let provenance_source_id: Option<String> = mem
+                .provenance
+                .as_ref()
+                .map(|p| p.shared_from_memory.clone());
 
-        let batch = Self::memory_to_batch(&mem, preserved.as_deref())?;
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
-        table
-            .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("re-insert for update failed: {e}")))?;
+            let safe_id = escape_sql(&mem.id);
+            let table = self.open_table().await?;
+            table
+                .update()
+                .only_if(format!("id = '{safe_id}'"))
+                .column("content", sql_str(&mem.content))
+                .column("l0_abstract", sql_str(&mem.l0_abstract))
+                .column("l1_overview", sql_str(&mem.l1_overview))
+                .column("l2_content", sql_str(&mem.l2_content))
+                .column("category", sql_str(&mem.category.to_string()))
+                .column("memory_type", sql_str(&mem.memory_type.to_string()))
+                .column("state", sql_str(&mem.state.to_string()))
+                .column("tier", sql_str(&mem.tier.to_string()))
+                .column("importance", format!("{:.6}", mem.importance))
+                .column("confidence", format!("{:.6}", mem.confidence))
+                .column("access_count", format!("{}", mem.access_count as i32))
+                .column("tags", sql_str(&tags_json))
+                .column("scope", sql_str(&mem.scope))
+                .column("agent_id", sql_opt_str(&mem.agent_id))
+                .column("session_id", sql_opt_str(&mem.session_id))
+                .column("tenant_id", sql_str(&mem.tenant_id))
+                .column("source", sql_opt_str(&mem.source))
+                .column("relations", sql_str(&relations_json))
+                .column("superseded_by", sql_opt_str(&mem.superseded_by))
+                .column("invalidated_at", sql_opt_str(&mem.invalidated_at))
+                .column("updated_at", sql_str(&mem.updated_at))
+                .column("last_accessed_at", sql_opt_str(&mem.last_accessed_at))
+                .column("space_id", sql_str(&mem.space_id))
+                .column("visibility", sql_str(&mem.visibility))
+                .column("owner_agent_id", sql_str(&mem.owner_agent_id))
+                .column("provenance", sql_opt_str(&provenance_json))
+                .column("version", format!("{}", mem.version.unwrap_or(0)))
+                .column("provenance_source_id", sql_opt_str(&provenance_source_id))
+                .column("tier_history", sql_opt_str(&mem.tier_history))
+                .column("cluster_id", sql_opt_str(&mem.cluster_id))
+                .column("is_cluster_anchor", if mem.is_cluster_anchor { "true" } else { "false" })
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
+        }
         Ok(())
     }
 
@@ -1305,22 +1365,55 @@ impl LanceStore {
         }
     }
 
-    /// Optimize LanceDB tables: prune old versions to reclaim disk space from version bloat.
+    /// Optimize LanceDB tables: compact → prune → index optimize to reclaim disk space
+    /// and maintain query performance.
     pub async fn optimize(&self) -> Result<(), OmemError> {
         let table = self.open_table().await?;
+
+        // Step 1: Compact — merge small fragment files produced by frequent updates
+        table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("optimize compact failed: {e}")))?;
+
+        // Step 2: Prune — remove all old versions (we don't use time travel)
         table
             .optimize(OptimizeAction::Prune {
-                older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                older_than: Some(
+                    chrono::Duration::try_minutes(0)
+                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                ),
                 delete_unverified: Some(true),
                 error_if_tagged_old_versions: None,
             })
             .await
-            .map_err(|e| OmemError::Storage(format!("optimize memories prune failed: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("optimize prune failed: {e}")))?;
 
+        // Step 3: Optimize indices — merge unindexed data into existing indices
+        table
+            .optimize(OptimizeAction::Index(
+                lance_index::optimize::OptimizeOptions::default(),
+            ))
+            .await
+            .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
+
+        // Session recalls table — compact + prune only (no vector index)
         if let Ok(sr_table) = self.open_session_recalls_table().await {
             let _ = sr_table
+                .optimize(OptimizeAction::Compact {
+                    options: CompactionOptions::default(),
+                    remap_options: None,
+                })
+                .await;
+            let _ = sr_table
                 .optimize(OptimizeAction::Prune {
-                    older_than: Some(chrono::Duration::try_days(1).unwrap_or_else(|| chrono::Duration::days(1))),
+                    older_than: Some(
+                        chrono::Duration::try_minutes(0)
+                            .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                    ),
                     delete_unverified: Some(true),
                     error_if_tagged_old_versions: None,
                 })
@@ -1337,6 +1430,17 @@ fn option_str(opt: &Option<String>) -> Option<&str> {
 
 fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+fn sql_str(s: &str) -> String {
+    format!("'{}'", escape_sql(s))
+}
+
+fn sql_opt_str(opt: &Option<String>) -> String {
+    match opt {
+        Some(s) => format!("'{}'", escape_sql(s)),
+        None => "null".to_string(),
+    }
 }
 
 #[cfg(test)]
