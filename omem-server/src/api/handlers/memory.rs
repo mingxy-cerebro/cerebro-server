@@ -1220,6 +1220,8 @@ struct SessionTopicSummary {
     tags: Vec<String>,
     #[serde(default = "default_scope")]
     scope: String,
+    #[serde(default)]
+    replaces: Vec<usize>,
 }
 
 fn default_scope() -> String {
@@ -1297,9 +1299,14 @@ pub async fn session_ingest(
         .await
         .map_err(|e| OmemError::Embedding(format!("failed to embed topics: {e}")))?;
 
-    for old_mem in &existing_summaries {
-        store.soft_delete(&old_mem.id).await.ok();
-    }
+    let existing_count = existing_summaries.len();
+    // Build index map: (1-based index → old memory) for merge tracking
+    let old_map: std::collections::HashMap<usize, Memory> = existing_summaries
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| (i + 1, m))
+        .collect();
+    let mut replaced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut stored = 0usize;
     let agent_id = body.agent_id.or(auth.agent_id);
@@ -1310,15 +1317,7 @@ pub async fn session_ingest(
         } else {
             Category::Events
         };
-
-        let mut memory = Memory::new(
-            &topic.summary,
-            category,
-            MemoryType::Pinned,
-            &auth.tenant_id,
-        );
-        memory.l0_abstract = topic.topic.clone();
-        memory.l1_overview = {
+        let l1_overview = {
             let s = &topic.summary;
             if s.chars().count() <= 150 {
                 s.clone()
@@ -1327,7 +1326,7 @@ pub async fn session_ingest(
                 format!("{}...", truncated)
             }
         };
-        memory.l2_content = {
+        let l2_content = {
             let s = &topic.summary;
             if s.chars().count() <= 500 {
                 s.clone()
@@ -1336,36 +1335,84 @@ pub async fn session_ingest(
                 format!("{}...", truncated)
             }
         };
-        memory.source = Some("session_compress".to_string());
-        memory.session_id = body.session_id.clone();
-        memory.agent_id = agent_id.clone();
-        memory.tags = if topic.tags.is_empty() {
+        let tags = if topic.tags.is_empty() {
             vec!["session_compress".to_string()]
         } else {
-            let mut tags = topic.tags.clone();
-            tags.push("session_compress".to_string());
-            tags
+            let mut t = topic.tags.clone();
+            t.push("session_compress".to_string());
+            t
         };
-        if topic.scope == "private" {
-            memory.scope = "private".to_string();
-            memory.visibility = "private".to_string();
-        }
 
-        let vector = vectors.get(i).cloned();
-        store.create(&memory, vector.as_deref()).await?;
-        stored += 1;
+        if !topic.replaces.is_empty() {
+            // MERGE: update existing memory with new content (preserves ID, access_count, tier)
+            let mut first = true;
+            for &idx in &topic.replaces {
+                if let Some(old_mem) = old_map.get(&idx) {
+                    replaced_ids.insert(old_mem.id.clone());
+                    if first {
+                        let mut updated = old_mem.clone();
+                        updated.content = topic.summary.clone();
+                        updated.l0_abstract = topic.topic.clone();
+                        updated.l1_overview = l1_overview.clone();
+                        updated.l2_content = l2_content.clone();
+                        updated.tags = tags.clone();
+                        updated.category = category.clone();
+                        updated.source = Some("session_compress".to_string());
+                        if topic.scope == "private" {
+                            updated.scope = "private".to_string();
+                            updated.visibility = "private".to_string();
+                        }
+                        let vector = vectors.get(i).cloned();
+                        store.update(&updated, vector.as_deref()).await?;
+                        tracing::info!(id = %updated.id, replaces = ?topic.replaces, "Merged existing session summary");
+                        first = false;
+                    } else {
+                        // Additional old memories merged into first → soft-delete the rest
+                        store.soft_delete(&old_mem.id).await.ok();
+                        tracing::info!(id = %old_mem.id, "Soft-deleted merged-away old summary");
+                    }
+                }
+            }
+            stored += 1;
+        } else {
+            // CREATE: brand new topic with no old equivalent
+            let mut memory = Memory::new(
+                &topic.summary,
+                category,
+                MemoryType::Pinned,
+                &auth.tenant_id,
+            );
+            memory.l0_abstract = topic.topic.clone();
+            memory.l1_overview = l1_overview;
+            memory.l2_content = l2_content;
+            memory.source = Some("session_compress".to_string());
+            memory.session_id = body.session_id.clone();
+            memory.agent_id = agent_id.clone();
+            memory.tags = tags;
+            if topic.scope == "private" {
+                memory.scope = "private".to_string();
+                memory.visibility = "private".to_string();
+            }
+            let vector = vectors.get(i).cloned();
+            store.create(&memory, vector.as_deref()).await?;
+            stored += 1;
+        }
     }
+
+    let preserved_count = existing_count.saturating_sub(replaced_ids.len());
 
     tracing::info!(
         stored = stored,
-        replaced = existing_summaries.len(),
+        merged = replaced_ids.len(),
+        preserved = preserved_count,
         tenant = %auth.tenant_id,
-        "session_ingest: compressed and stored session summaries"
+        "session_ingest: merged session summaries"
     );
 
     Ok((StatusCode::OK, Json(serde_json::json!({
         "stored": stored,
-        "replaced": existing_summaries.len(),
+        "merged": replaced_ids.len(),
+        "preserved": preserved_count,
     })))
     .into_response())
 }

@@ -528,6 +528,13 @@ When "Previously Stored Summaries" exist, apply these operations:
 
 CRITICAL: Your output must be a SUPERSET of the old summaries. The updated summary MUST be at least as long as the old one. If you output something shorter, you are LOSING information.
 
+## REPLACES TRACKING
+Each output topic MUST include a `replaces` array listing the 1-based indices of "Previously Stored Summaries" it updates/replaces:
+- Updating Previous Summary 1 → `"replaces": [1]`
+- Merging Summary 1 and 2 into one → `"replaces": [1, 2]`
+- Brand new topic (no old equivalent) → `"replaces": []`
+- Old summaries NOT referenced in ANY topic's replaces → PRESERVED unchanged automatically (do NOT create a topic just to copy them)
+
 ## SMART CLASSIFICATION (max 3 entries)
 1. **MAIN** (always, 1): Incremental update of the primary session memory. Use ## sections for subtopics.
 2. **PRIVATE** (optional, 1): Intimate/emotional content → scope "private". This is NOT discarded — it's extracted separately.
@@ -558,8 +565,15 @@ When in doubt → scope "private". ONLY use scope "public" for purely technical/
 - Use > blockquotes for important decisions or user requirements
 - If previous summary uses Markdown, the updated version MUST use the same Markdown format. NEVER downgrade to plain text.
 
+## PRECISION RULES (PREVENT BLOAT)
+- When updating an existing summary, ONLY ADD genuinely new information. Do NOT re-summarize or rephrase existing content.
+- Updated summary length MUST stay within 120% of the original. If it grows beyond that, you are over-summarizing.
+- Focus on DELTA (what changed). Preserve the original structure and only append/modify the new parts.
+- DO NOT compress, condense, or shorten existing content. Keep the original text intact and only add new sections.
+- REMEMBER: The goal is PRECISE incremental updates, NOT increasingly verbose summaries.
+
 ## OUTPUT
-Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private" }
+Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "replaces": number[] }
 Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
 "##;
 
