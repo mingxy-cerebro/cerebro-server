@@ -336,7 +336,10 @@ pub async fn search_memories(
             accessible_spaces: accessible_space_ids.clone(),
         };
 
-        let retrieval_pipeline = RetrievalPipeline::new(store.clone());
+        let mut retrieval_pipeline = RetrievalPipeline::new(store.clone());
+        if let Some(ref reranker) = state.reranker {
+            retrieval_pipeline = retrieval_pipeline.with_reranker(reranker.clone());
+        }
         let search_results = retrieval_pipeline.search(&request).await?;
 
         let mut results: Vec<SearchResultDto> = search_results
@@ -425,6 +428,7 @@ pub async fn search_memories(
         let weight = acc.weight;
 
         let accessible_spaces_clone = accessible_space_ids.clone();
+        let reranker_clone = state.reranker.clone();
         join_set.spawn(async move {
             let request = SearchRequest {
                 query,
@@ -439,7 +443,10 @@ pub async fn search_memories(
                 agent_id_filter,
                 accessible_spaces: accessible_spaces_clone,
             };
-            let pipeline = RetrievalPipeline::new(store);
+            let mut pipeline = RetrievalPipeline::new(store);
+            if let Some(reranker) = reranker_clone {
+                pipeline = pipeline.with_reranker(reranker);
+            }
             let result = pipeline.search(&request).await;
             (space_id, weight, result)
         });
@@ -1168,33 +1175,59 @@ pub async fn reembed_memories(
         .await?;
 
     let memories = store.list_all_active().await?;
-    let mut re_embedded = 0usize;
-    let skipped_nonzero = 0usize;
-    let mut errors = 0usize;
+    let total = memories.len();
 
-    for memory in &memories {
-        let embed_text = if !memory.l0_abstract.is_empty() {
-            memory.l0_abstract.clone()
-        } else {
-            memory.content.clone()
-        };
+    // Spawn background task for batched re-embedding
+    let embed = state.embed.clone();
+    let import_semaphore = state.import_semaphore.clone();
+    let _permit = import_semaphore.acquire().await.map_err(|_| {
+        OmemError::Internal("import semaphore closed".to_string())
+    })?;
 
-        match state.embed.embed(&[embed_text]).await {
-            Ok(vectors) => {
-                if let Some(vec) = vectors.into_iter().next() {
-                    match store.update(memory, Some(&vec)).await {
-                        Ok(_) => re_embedded += 1,
-                        Err(_) => errors += 1,
+    tokio::spawn(async move {
+        let batch_size = 20usize;
+        let mut re_embedded = 0usize;
+        let mut errors = 0usize;
+
+        for chunk in memories.chunks(batch_size) {
+            let texts: Vec<String> = chunk
+                .iter()
+                .map(|m| {
+                    if !m.l0_abstract.is_empty() {
+                        m.l0_abstract.clone()
+                    } else {
+                        m.content.clone()
                     }
-                } else {
-                    errors += 1;
+                })
+                .collect();
+
+            match embed.embed(&texts).await {
+                Ok(vectors) => {
+                    for (memory, vector) in chunk.iter().zip(vectors.into_iter()) {
+                        match store.update(memory, Some(&vector)).await {
+                            Ok(_) => re_embedded += 1,
+                            Err(e) => {
+                                tracing::warn!(id = %memory.id, error = %e, "re-embed update failed");
+                                errors += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "re-embed batch failed, skipping {} memories", chunk.len());
+                    errors += chunk.len();
                 }
             }
-            Err(_) => errors += 1,
         }
-    }
 
-    Ok(Json(ReEmbedResponseDto { re_embedded, skipped_nonzero, errors }))
+        tracing::info!(total, re_embedded, errors, "re-embed completed");
+    });
+
+    Ok(Json(ReEmbedResponseDto {
+        re_embedded: 0,
+        skipped_nonzero: 0,
+        errors: 0,
+    }))
 }
 
 // ── Session Ingest ──────────────────────────────────────────────────

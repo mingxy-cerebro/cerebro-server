@@ -837,6 +837,7 @@ mod tests {
             event_bus: Arc::new(crate::api::event_bus::EventBus::new()),
             scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
             session_locks: Arc::new(dashmap::DashMap::new()),
+            reranker: None,
         });
 
         (state, store_dir, space_dir, tenant_dir)

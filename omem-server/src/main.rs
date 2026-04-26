@@ -101,6 +101,7 @@ async fn main() {
         event_bus: Arc::new(omem_server::api::event_bus::EventBus::new()),
         scheduler_control: Arc::new(omem_server::api::scheduler_control::SchedulerControl::new()),
         session_locks: Arc::new(dashmap::DashMap::new()),
+        reranker: omem_server::retrieve::reranker::Reranker::from_env(),
     });
 
     let app = build_router(state.clone());

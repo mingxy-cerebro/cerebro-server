@@ -9,6 +9,7 @@ use crate::cluster::cluster_store::ClusterStore;
 use crate::config::OmemConfig;
 use crate::embed::EmbedService;
 use crate::llm::LlmService;
+use crate::retrieve::reranker::Reranker;
 use crate::store::{SpaceStore, StoreManager, TenantStore};
 
 pub struct AppState {
@@ -25,6 +26,7 @@ pub struct AppState {
     pub event_bus: SharedEventBus,
     pub scheduler_control: SharedSchedulerControl,
     pub session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub reranker: Option<Reranker>,
 }
 
 /// Map tenant_id to their personal Space ID.

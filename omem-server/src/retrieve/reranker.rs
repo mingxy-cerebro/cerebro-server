@@ -10,12 +10,15 @@ pub struct Reranker {
     provider: String,
     endpoint: String,
     api_key: String,
+    model: String,
     client: Client,
     timeout: Duration,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 struct RerankRequest<'a> {
+    model: &'a str,
     query: &'a str,
     documents: Vec<&'a str>,
     top_n: usize,
@@ -45,6 +48,7 @@ impl Reranker {
                 "jina" => "https://api.jina.ai/v1/rerank".to_string(),
                 "voyage" => "https://api.voyageai.com/v1/rerank".to_string(),
                 "pinecone" => "https://api.pinecone.io/rerank".to_string(),
+                "siliconflow" => "https://api.siliconflow.cn/v1/rerank".to_string(),
                 _ => String::new(),
             });
 
@@ -52,12 +56,18 @@ impl Reranker {
             return None;
         }
 
+        let model = std::env::var("OMEM_RERANK_MODEL").unwrap_or_else(|_| match provider.as_str() {
+            "siliconflow" => "Pro/BAAI/bge-reranker-v2-m3".to_string(),
+            _ => String::new(),
+        });
+
         Some(Self {
             provider,
             endpoint,
             api_key,
+            model,
             client: Client::new(),
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(10),
         })
     }
 
@@ -67,6 +77,7 @@ impl Reranker {
             provider: provider.to_string(),
             endpoint: endpoint.to_string(),
             api_key: api_key.to_string(),
+            model: String::new(),
             client: Client::new(),
             timeout: Duration::from_secs(5),
         }
@@ -82,6 +93,7 @@ impl Reranker {
         }
 
         let body = RerankRequest {
+            model: &self.model,
             query,
             documents: documents.to_vec(),
             top_n: documents.len(),
@@ -164,6 +176,7 @@ mod tests {
             provider: "jina".to_string(),
             endpoint: "http://192.0.2.1:1/rerank".to_string(),
             api_key: "test".to_string(),
+            model: String::new(),
             client: Client::new(),
             timeout: Duration::from_millis(100),
         };
@@ -175,6 +188,7 @@ mod tests {
     #[test]
     fn test_rerank_request_serialization() {
         let req = RerankRequest {
+            model: "test-model",
             query: "test query",
             documents: vec!["doc1", "doc2"],
             top_n: 2,
