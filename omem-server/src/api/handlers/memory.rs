@@ -43,7 +43,7 @@ pub struct CreateMemoryBody {
     pub visibility: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct MessageDto {
     pub role: String,
     pub content: String,
@@ -1233,188 +1233,196 @@ pub async fn session_ingest(
         ));
     }
 
-    // Acquire per-session lock to prevent concurrent ingestion for the same session
-    let session_key = body.session_id.as_deref().unwrap_or("default");
-    let lock_arc = state
-        .session_locks
-        .entry(session_key.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
-    let _session_guard = lock_arc.lock().await;
-
+    // Validate conversation content synchronously before going async
     const MAX_MESSAGES: usize = 40;
-    let messages: &[MessageDto] = if body.messages.len() > MAX_MESSAGES {
-        &body.messages[body.messages.len() - MAX_MESSAGES..]
+    let messages: Vec<MessageDto> = if body.messages.len() > MAX_MESSAGES {
+        body.messages[body.messages.len() - MAX_MESSAGES..].to_vec()
     } else {
-        &body.messages
+        body.messages.clone()
     };
 
     const MAX_CONVERSATION_CHARS: usize = 30_000;
-    let conversation = format_conversation_truncated(messages, MAX_CONVERSATION_CHARS);
+    let conversation = format_conversation_truncated(&messages, MAX_CONVERSATION_CHARS);
     if conversation.is_empty() {
         return Err(OmemError::Validation(
             "no valid conversation content after cleaning".to_string(),
         ));
     }
 
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
+    let tenant_id = auth.tenant_id.clone();
+    let agent_id = body.agent_id.or(auth.agent_id.clone());
+    let session_id = body.session_id.clone();
+    let session_key = body.session_id.as_deref().unwrap_or("default").to_string();
+    let response_session_id = session_id.clone();
 
-    let existing_summaries = fetch_existing_session_summaries(
-        &store,
-        body.session_id.as_deref(),
-    ).await;
+    // Fire-and-forget: process in background, return 202 immediately
+    tokio::spawn(async move {
+        // Acquire per-session lock inside background task
+        let lock_arc = state
+            .session_locks
+            .entry(session_key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+        let _session_guard = lock_arc.lock().await;
 
-    let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_compress_prompt(
-        &conversation,
-        &existing_summaries.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
-    );
+        let store = match state
+            .store_manager
+            .get_store(&personal_space_id(&tenant_id))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "session_ingest_bg: failed to get store");
+                return;
+            }
+        };
 
-    let topics: Vec<SessionTopicSummary> = crate::llm::complete_json(
-        state.llm.as_ref(),
-        &system_prompt,
-        &user_prompt,
-    )
-    .await
-    .map_err(|e| {
-        tracing::warn!(error = %e, "session_ingest: LLM compress failed");
-        OmemError::Llm(format!("session compress failed: {e}"))
-    })?;
+        let existing_summaries = fetch_existing_session_summaries(
+            &store,
+            session_id.as_deref(),
+        ).await;
 
-    if topics.is_empty() {
-        tracing::info!(
-            tenant = %auth.tenant_id,
-            "session_ingest: LLM returned no topics"
+        let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_compress_prompt(
+            &conversation,
+            &existing_summaries.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
         );
-        return Ok((StatusCode::OK, Json(serde_json::json!({
-            "stored": 0,
-            "reason": "no topics extracted"
-        })))
-        .into_response());
-    }
 
-    let topic_texts: Vec<String> = topics.iter().map(|t| t.topic.clone()).collect();
-    let vectors = state
-        .embed
-        .embed(&topic_texts)
+        let topics: Vec<SessionTopicSummary> = match crate::llm::complete_json(
+            state.llm.as_ref(),
+            &system_prompt,
+            &user_prompt,
+        )
         .await
-        .map_err(|e| OmemError::Embedding(format!("failed to embed topics: {e}")))?;
-
-    let existing_count = existing_summaries.len();
-    // Build index map: (1-based index → old memory) for merge tracking
-    let old_map: std::collections::HashMap<usize, Memory> = existing_summaries
-        .into_iter()
-        .enumerate()
-        .map(|(i, m)| (i + 1, m))
-        .collect();
-    let mut replaced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let mut stored = 0usize;
-    let agent_id = body.agent_id.or(auth.agent_id);
-
-    for (i, topic) in topics.iter().enumerate() {
-        let category = if topic.scope == "private" {
-            Category::Profile
-        } else {
-            Category::Events
-        };
-        let l1_overview = {
-            let s = &topic.summary;
-            if s.chars().count() <= 150 {
-                s.clone()
-            } else {
-                let truncated: String = s.chars().take(147).collect();
-                format!("{}...", truncated)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "session_ingest_bg: LLM compress failed");
+                return;
             }
         };
-        let l2_content = {
-            let s = &topic.summary;
-            if s.chars().count() <= 500 {
-                s.clone()
-            } else {
-                let truncated: String = s.chars().take(497).collect();
-                format!("{}...", truncated)
+
+        if topics.is_empty() {
+            tracing::info!(tenant = %tenant_id, "session_ingest_bg: LLM returned no topics");
+            return;
+        }
+
+        let topic_texts: Vec<String> = topics.iter().map(|t| t.topic.clone()).collect();
+        let vectors = match state.embed.embed(&topic_texts).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "session_ingest_bg: failed to embed topics");
+                return;
             }
         };
-        let tags = if topic.tags.is_empty() {
-            vec!["session_compress".to_string()]
-        } else {
-            let mut t = topic.tags.clone();
-            t.push("session_compress".to_string());
-            t
-        };
 
-        if !topic.replaces.is_empty() {
-            // MERGE: update existing memory with new content (preserves ID, access_count, tier)
-            let mut first = true;
-            for &idx in &topic.replaces {
-                if let Some(old_mem) = old_map.get(&idx) {
-                    replaced_ids.insert(old_mem.id.clone());
-                    if first {
-                        let mut updated = old_mem.clone();
-                        updated.content = topic.summary.clone();
-                        updated.l0_abstract = topic.topic.clone();
-                        updated.l1_overview = l1_overview.clone();
-                        updated.l2_content = l2_content.clone();
-                        updated.tags = tags.clone();
-                        updated.category = category.clone();
-                        updated.source = Some("session_compress".to_string());
-                        if topic.scope == "private" {
-                            updated.scope = "private".to_string();
-                            updated.visibility = "private".to_string();
+        let existing_count = existing_summaries.len();
+        let old_map: std::collections::HashMap<usize, Memory> = existing_summaries
+            .into_iter()
+            .enumerate()
+            .map(|(i, m)| (i + 1, m))
+            .collect();
+        let mut replaced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stored = 0usize;
+
+        for (i, topic) in topics.iter().enumerate() {
+            let category = if topic.scope == "private" {
+                Category::Profile
+            } else {
+                Category::Events
+            };
+            let l1_overview = {
+                let s = &topic.summary;
+                if s.chars().count() <= 150 { s.clone() } else {
+                    let truncated: String = s.chars().take(147).collect();
+                    format!("{}...", truncated)
+                }
+            };
+            let l2_content = {
+                let s = &topic.summary;
+                if s.chars().count() <= 500 { s.clone() } else {
+                    let truncated: String = s.chars().take(497).collect();
+                    format!("{}...", truncated)
+                }
+            };
+            let tags = if topic.tags.is_empty() {
+                vec!["session_compress".to_string()]
+            } else {
+                let mut t = topic.tags.clone();
+                t.push("session_compress".to_string());
+                t
+            };
+
+            if !topic.replaces.is_empty() {
+                let mut first = true;
+                for &idx in &topic.replaces {
+                    if let Some(old_mem) = old_map.get(&idx) {
+                        replaced_ids.insert(old_mem.id.clone());
+                        if first {
+                            let mut updated = old_mem.clone();
+                            updated.content = topic.summary.clone();
+                            updated.l0_abstract = topic.topic.clone();
+                            updated.l1_overview = l1_overview.clone();
+                            updated.l2_content = l2_content.clone();
+                            updated.tags = tags.clone();
+                            updated.category = category.clone();
+                            updated.source = Some("session_compress".to_string());
+                            if topic.scope == "private" {
+                                updated.scope = "private".to_string();
+                                updated.visibility = "private".to_string();
+                            }
+                            let vector = vectors.get(i).cloned();
+                            if let Err(e) = store.update(&updated, vector.as_deref()).await {
+                                tracing::error!(error = %e, "session_ingest_bg: update failed");
+                                return;
+                            }
+                            tracing::info!(id = %updated.id, replaces = ?topic.replaces, "Merged existing session summary");
+                            first = false;
+                        } else {
+                            store.hard_delete(&old_mem.id).await.ok();
+                            tracing::info!(id = %old_mem.id, "Deleted merged-away old summary");
                         }
-                        let vector = vectors.get(i).cloned();
-                        store.update(&updated, vector.as_deref()).await?;
-                        tracing::info!(id = %updated.id, replaces = ?topic.replaces, "Merged existing session summary");
-                        first = false;
-                    } else {
-                        // Additional old memories merged into first → soft-delete the rest
-                        store.hard_delete(&old_mem.id).await.ok();
-                        tracing::info!(id = %old_mem.id, "Soft-deleted merged-away old summary");
                     }
                 }
+                stored += 1;
+            } else {
+                let mut memory = Memory::new(
+                    &topic.summary,
+                    category,
+                    MemoryType::Pinned,
+                    &tenant_id,
+                );
+                memory.l0_abstract = topic.topic.clone();
+                memory.l1_overview = l1_overview;
+                memory.l2_content = l2_content;
+                memory.source = Some("session_compress".to_string());
+                memory.session_id = session_id.clone();
+                memory.agent_id = agent_id.clone();
+                memory.tags = tags;
+                if topic.scope == "private" {
+                    memory.scope = "private".to_string();
+                    memory.visibility = "private".to_string();
+                }
+                let vector = vectors.get(i).cloned();
+                if let Err(e) = store.create(&memory, vector.as_deref()).await {
+                    tracing::error!(error = %e, "session_ingest_bg: create failed");
+                    return;
+                }
+                stored += 1;
             }
-            stored += 1;
-        } else {
-            // CREATE: brand new topic with no old equivalent
-            let mut memory = Memory::new(
-                &topic.summary,
-                category,
-                MemoryType::Pinned,
-                &auth.tenant_id,
-            );
-            memory.l0_abstract = topic.topic.clone();
-            memory.l1_overview = l1_overview;
-            memory.l2_content = l2_content;
-            memory.source = Some("session_compress".to_string());
-            memory.session_id = body.session_id.clone();
-            memory.agent_id = agent_id.clone();
-            memory.tags = tags;
-            if topic.scope == "private" {
-                memory.scope = "private".to_string();
-                memory.visibility = "private".to_string();
-            }
-            let vector = vectors.get(i).cloned();
-            store.create(&memory, vector.as_deref()).await?;
-            stored += 1;
         }
-    }
 
-    let preserved_count = existing_count.saturating_sub(replaced_ids.len());
+        let preserved_count = existing_count.saturating_sub(replaced_ids.len());
+        tracing::info!(
+            stored = stored,
+            merged = replaced_ids.len(),
+            preserved = preserved_count,
+            tenant = %tenant_id,
+            "session_ingest: merged session summaries"
+        );
+    });
 
-    tracing::info!(
-        stored = stored,
-        merged = replaced_ids.len(),
-        preserved = preserved_count,
-        tenant = %auth.tenant_id,
-        "session_ingest: merged session summaries"
-    );
-
-    Ok((StatusCode::OK, Json(serde_json::json!({
-        "stored": stored,
-        "merged": replaced_ids.len(),
-        "preserved": preserved_count,
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({
+        "status": "accepted",
+        "session_id": response_session_id,
     })))
     .into_response())
 }
