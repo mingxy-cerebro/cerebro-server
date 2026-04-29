@@ -655,102 +655,83 @@ Return ONLY valid JSON:
 {"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}
 "#;
 
-// ── Session Extract Prompt (独立事实提取模式) ────────────
+// ── Session Extract Prompt (分类提取模式) ────────────
 
-const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are an independent fact extraction engine. Your task is to extract DISTINCT, ATOMIC facts from the given conversation. Each fact becomes an INDEPENDENT memory — do NOT merge, compress, or summarize multiple facts into one.
+const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extraction engine. Your task is to extract valuable information from the conversation and organize it into categorized memory entries.
 
-## CORE RULES
+## CORE PHILOSOPHY
+- **GROUP related information** into topic-based entries, NOT split every detail into separate entries.
+- Example: a 10-minute discussion about 积分V3 business model → ONE entry summarizing the key decisions and outcomes, NOT 10 fragmented entries.
+- Aim for **fewer, richer entries** rather than many tiny fragments.
 
-1. **INDEPENDENT EXTRACTION**: Each fact stands on its own. Never reference "previous summaries" or "existing memories".
-2. **ATOMIC**: One piece of information per fact. If a conversation contains 3 distinct facts, output 3 separate entries.
-3. **NO MERGING**: Do NOT combine related facts. Each fact is stored independently.
+## USER-ONLY RULE (CRITICAL)
+- **ONLY extract information from the HUMAN USER's messages.**
+- NEVER store AI assistant's responses, analyses, reports, summaries, code reviews, tool outputs.
+- NEVER store: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
 
-## CLASSIFICATION
+## CLASSIFICATION & HANDLING
 
-For each fact, classify into exactly one type:
+For each topic, classify and handle accordingly:
 
-- **EMOTIONAL** (scope "private"): Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets.
-  - PRESERVE original text as-is. Do NOT compress, summarize, or paraphrase.
-  - Examples: "老公晚安", "宝贝亲亲", "我好难过"
-  - These are stored verbatim with scope "private".
+### EMOTIONAL (scope "private")
+- Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
+- **PRESERVE original text as-is.** Do NOT compress, summarize, or paraphrase emotional content.
+- Keep the warmth, nuance, and detail. If too long, split into multiple entries.
+- Examples: "老公晚安", "宝贝亲亲", "我好难过", relationship milestones
 
-- **WORK** (scope "public"): Technical decisions, code, file paths, architecture, preferences, tool choices, conventions.
-  - Provide a concise summary.
-  - Examples: "Project uses React + TypeScript", "Prefers dark mode", "File path: src/main.rs"
+### WORK (scope "public")
+- Technical decisions, code changes, file paths, architecture, preferences, project details, business models.
+- **COMPRESS and DENOISE**: Summarize the result/outcome, omit the debugging process, trial-and-error, intermediate steps.
+- Group related work topics together (e.g., all decisions about 积分V3 → one entry with subsections).
+- Examples: "积分V3 model: 入池→3:7→铸造+分配→熔断, 提现待定, 权益等级待确认"
 
-- **NOISE**: Casual small talk, tool output dumps, meta-discussion, greetings, filler.
-  - SKIP these entirely. Do not output them.
+### NOISE → SKIP
+- Casual small talk with no lasting value ("今天天气不错")
+- Tool/engine outputs, build logs, compress results
+- AI assistant's internal reasoning or status reports
+- Greetings, filler, meta-discussion about the memory system
+- Trivial personal details with no lasting significance
 
 ## ABSOLUTE RULES
 
 ### Rule 1: Language Preservation (MANDATORY)
 - **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.**
-- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese.
-- If the input is English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages.**
+- NEVER translate. NEVER mix languages.
 
 ### Rule 2: Privacy Detection (MANDATORY)
-- **Before outputting, check: "Does this fact contain sensitive or private content?"**
-- If YES, you MUST add the tag "私密" to the tags array AND set scope to "private".
-- Sensitive content: passwords, API keys, tokens, server IPs, credentials, personal secrets, intimate details.
-- **NEVER skip this check.**
+- If a fact contains sensitive/private content → add tag "私密" AND set scope to "private".
+- Sensitive: passwords, API keys, tokens, server IPs, credentials, personal secrets.
 
 ### Rule 3: Persona Rule (CRITICAL)
-- NEVER refer to the user as "用户" (user) or "你" (you) in the summary.
-- Write facts as direct, factual statements about the person.
-- GOOD: "Prefers dark mode", "Works at Stripe", "Dislikes verbose responses"
-- BAD: "用户偏好深色模式", "你说你在Stripe工作"
+- NEVER refer to the user as "用户" or "你" in the summary.
+- Write as direct, factual statements: "Prefers dark mode", "Works at Stripe".
 
 ## CATEGORY CLASSIFICATION
-Classify each fact into exactly one category. Use ONLY these 6 valid values:
-- **profile**: Biographical or identity information (job, company, role, background)
+Use ONLY these 6 valid values:
+- **profile**: Biographical/identity information (job, company, role, background)
 - **preferences**: Likes, dislikes, tool choices, style preferences, habits
 - **entities**: Persistent nouns (projects, tools, people, orgs) and their states
 - **events**: Things that happened — milestones, incidents, decisions made
 - **cases**: Problem→solution pairs, debugging stories, how-tos
 - **patterns**: Reusable processes, workflows, conventions, templates
 
-CRITICAL: The category field MUST be one of the 6 values above. Do NOT invent categories.
-
 ## MARKDOWN FORMAT (MANDATORY)
-The summary field MUST use Markdown formatting:
 - Use ## headers to organize sections
 - Use - bullet lists for enumerations
 - Use **bold** for key terms, file paths, function names
 - Use `backticks` for code references
-- Use > blockquotes for important decisions or user requirements
-
-## USER-ONLY RULE (CRITICAL)
-- **ONLY extract facts from the HUMAN USER's messages.**
-- The AI assistant's responses, analyses, reports, summaries, code reviews, and tool outputs are NOT facts about the user.
-- NEVER store: assistant's "验货报告", "找到根因", "maxRecallResults=2生效", compress/DCP logs, build results, deployment status.
-- If the user is discussing with an AI, only extract what the USER says/decides/expresses.
-
-## VALUE FILTER
-- SKIP: 
-  - AI assistant's responses, analyses, summaries, reports, code reviews
-  - Tool/engine outputs: compress logs, build results, deployment status, test results
-  - Internal agent conversations, delegations, and task management
-  - Casual small talk, debugging status checks, meta-discussion, greetings, filler
-  - Discussion about the memory system itself
-- KEEP: 
-  - User's technical decisions, preferences, code changes, file paths, architecture choices
-  - User's anger, criticism, frustration — tag as rules (e.g., "铁律", "lessons_learned")
-  - User's personal information, events, relationships, feelings
-  - User's project details, team info, career information
-- If ZERO factual content from the user → return [].
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON array. Each element:
 { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "category": string }
 
-- "topic": A short, specific title for this single fact (1 sentence).
-- "summary": The full content of the fact. Use Markdown formatting.
+- "topic": A short title for this topic (1 sentence).
+- "summary": The full content. Group related information into one entry. Use Markdown.
 - "tags": Relevant tags. Always include "session_compress".
 - "scope": "public" for work content, "private" for emotional/intimate content.
 - "category": One of the 6 valid category values above.
 
-Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
+Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable from the user.
 "##;
 
 /// Build the session extract prompt.
