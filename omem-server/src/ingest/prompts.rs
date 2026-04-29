@@ -720,11 +720,25 @@ The summary field MUST use Markdown formatting:
 - Use `backticks` for code references
 - Use > blockquotes for important decisions or user requirements
 
+## USER-ONLY RULE (CRITICAL)
+- **ONLY extract facts from the HUMAN USER's messages.**
+- The AI assistant's responses, analyses, reports, summaries, code reviews, and tool outputs are NOT facts about the user.
+- NEVER store: assistant's "验货报告", "找到根因", "maxRecallResults=2生效", compress/DCP logs, build results, deployment status.
+- If the user is discussing with an AI, only extract what the USER says/decides/expresses.
+
 ## VALUE FILTER
-- SKIP: casual small talk, debugging status checks, tool/engine internal outputs, meta-discussion, greetings, filler.
-- KEEP: technical decisions, user preferences, code changes, file paths, architecture, user anger/criticism.
-- ANGER RULE: User frustration MUST be preserved as tagged rules (e.g., "铁律", "lessons_learned").
-- If ZERO factual content → return [].
+- SKIP: 
+  - AI assistant's responses, analyses, summaries, reports, code reviews
+  - Tool/engine outputs: compress logs, build results, deployment status, test results
+  - Internal agent conversations, delegations, and task management
+  - Casual small talk, debugging status checks, meta-discussion, greetings, filler
+  - Discussion about the memory system itself
+- KEEP: 
+  - User's technical decisions, preferences, code changes, file paths, architecture choices
+  - User's anger, criticism, frustration — tag as rules (e.g., "铁律", "lessons_learned")
+  - User's personal information, events, relationships, feelings
+  - User's project details, team info, career information
+- If ZERO factual content from the user → return [].
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON array. Each element:
