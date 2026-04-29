@@ -8,8 +8,15 @@ function showToast(tui: any, title: string, message: string, variant: string = "
   setTimeout(() => {
     try {
       tui.showToast({ body: { title, message, variant, duration: 5000 } });
-    } catch {}
+    } catch (err) {
+      console.error("[cerebro] showToast failed:", err);
+    }
   }, delayMs);
+}
+
+function extractUserRequest(content: string): string {
+  const match = content.match(/<user-request>([\s\S]*?)<\/user-request>/);
+  return match ? match[1].trim() : content;
 }
 
 const keywordDetectedSessions = new Set<string>();
@@ -130,14 +137,15 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
     try {
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
-      const query_text = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
+      const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
+      const query_text = extractUserRequest(rawQuery);
       const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
 
       const projectTags = containerTags.filter(t => t.startsWith("omem_project_"));
       const shouldRecallRes = await client.shouldRecall(query_text, last_query_text, input.sessionID, similarityThreshold, maxRecallResults, projectTags.length > 0 ? projectTags : undefined);
 
       if (!shouldRecallRes) {
-        showToast(tui, "🧠 Omem Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
+        showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
         return;
       }
 
@@ -244,14 +252,14 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         // Server returned error (500, etc.) with details
         const cleanMsg = errMsg.replace(/^\[omem\]\s*/, "");
         if (cleanMsg.startsWith("500")) {
-          showToast(tui, "🧠 Omem Server Error", cleanMsg.substring(0, 200), "error");
+          showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
         } else if (cleanMsg.includes("timed out")) {
-          showToast(tui, "🧠 Omem Service Timeout", cleanMsg.substring(0, 100), "error");
+          showToast(tui, "🧠 Cerebro Service Timeout", cleanMsg.substring(0, 100), "error");
         } else {
-          showToast(tui, "🧠 Omem Error", cleanMsg.substring(0, 150), "error");
+          showToast(tui, "🧠 Cerebro Error", cleanMsg.substring(0, 150), "error");
         }
       } else if (errMsg.includes("fetch") || errMsg.includes("network")) {
-        showToast(tui, "🧠 Omem Service Unavailable", "Network error · check API connection", "error");
+        showToast(tui, "🧠 Cerebro Service Unavailable", "Network error · check API connection", "error");
       } else {
         showToast(tui, "🧠 Memory Recall Error", errMsg.substring(0, 100), "error");
       }
@@ -296,29 +304,33 @@ export function keywordDetectionHook(_client: OmemClient, _containerTags: string
   };
 }
 
-export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart") {
+export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean) {
   return async (
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
   ) => {
     if (input.sessionID && sessionMessages.has(input.sessionID)) {
-      const messages = sessionMessages.get(input.sessionID)!;
-      if (messages.length > 0) {
-        try {
-          const result = await client.ingestMessages(messages, {
-            mode: ingestMode,
-            tags: [...containerTags, "auto-capture"],
-            sessionId: input.sessionID,
-          });
-          if (result === null) {
-            showToast(tui, "🔴 Archive Failed", "Session archive blocked · check spiritual realm status", "error");
-          } else {
-            showToast(tui, "📦 Session Archived", `${messages.length} residual dialogues archived · merged into the realm`, "success");
-          }
-        } catch {
-          showToast(tui, "🔴 Archive Failed", "Session archive blocked · spiritual pulse anomaly", "error");
-        }
+      if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
+      } else {
+        const messages = sessionMessages.get(input.sessionID)!;
+        if (messages.length > 0) {
+          try {
+            const result = await client.ingestMessages(messages, {
+              mode: ingestMode,
+              tags: [...containerTags, "auto-capture"],
+              sessionId: input.sessionID,
+            });
+            if (result === null) {
+              showToast(tui, "🔴 Archive Failed", "Session archive blocked · check spiritual realm status", "error");
+            } else {
+              showToast(tui, "📦 Session Archived", `${messages.length} residual dialogues archived · merged into the realm`, "success");
+            }
+          } catch {
+            showToast(tui, "🔴 Archive Failed", "Session archive blocked · spiritual pulse anomaly", "error");
+          }
+          sessionMessages.delete(input.sessionID);
+        }
       }
     }
 
@@ -344,6 +356,7 @@ export function sessionIdleHook(
   _ingestMode: "smart" | "raw" = "smart",
   threshold: number = 0,
   getMainSessionId?: () => string | undefined,
+  isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
@@ -353,6 +366,8 @@ export function sessionIdleHook(
 
     const sessionID = input.event.properties?.sessionID;
     if (!sessionID) return;
+
+    if (isAutoStoreEnabled && !isAutoStoreEnabled(sessionID)) return;
 
     if (getMainSessionId) {
       const mainId = getMainSessionId();

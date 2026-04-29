@@ -1,5 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import type { OmemClient } from "./client.js";
+import { isAutoStoreEnabled, setAutoStoreEnabled } from "./index.js";
 
 function extractMemoryIds(result: unknown): string[] {
   if (!result) return [];
@@ -371,6 +372,33 @@ export function buildTools(client: OmemClient, containerTags: string[], context:
         );
         if (!result) return JSON.stringify({ ok: false, error: "Failed to reshare memory" });
         return JSON.stringify({ ok: true, result });
+      },
+    }),
+
+    memory_toggle: tool({
+      description:
+        "Toggle Cerebro auto-store ON or OFF for current session. Does NOT affect manual memory_store calls.",
+      args: {
+        state: tool.schema
+          .string()
+          .optional()
+          .describe("Set to 'on' or 'off'. Omit to check current status."),
+      },
+      async execute(args) {
+        const sessionId = context.getSessionId();
+        if (!sessionId) return JSON.stringify({ ok: false, error: "No active session" });
+
+        const state = args.state?.toLowerCase();
+        if (state === "on") {
+          setAutoStoreEnabled(sessionId, true);
+          return JSON.stringify({ ok: true, auto_store: true, message: "Cerebro auto-store: ON" });
+        } else if (state === "off") {
+          setAutoStoreEnabled(sessionId, false);
+          return JSON.stringify({ ok: true, auto_store: false, message: "Cerebro auto-store: OFF" });
+        } else {
+          const current = isAutoStoreEnabled(sessionId);
+          return JSON.stringify({ ok: true, auto_store: current, message: `Cerebro auto-store: ${current ? "ON" : "OFF"}` });
+        }
       },
     }),
   };

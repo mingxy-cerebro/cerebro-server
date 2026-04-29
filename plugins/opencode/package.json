@@ -1,11 +1,22 @@
 {
   "name": "@mingxy/cerebro",
-  "version": "1.5.9",
+  "version": "1.7.5",
   "description": "Cerebro persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools with clustering",
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./tui": {
+      "types": "./src/tui.tsx",
+      "default": "./src/tui.tsx"
+    }
+  },
   "oc-plugin": [
-    "server"
+    "server",
+    "tui"
   ],
   "keywords": [
     "opencode",
@@ -24,7 +35,10 @@
     "directory": "plugins/opencode"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.0.162"
+    "@opencode-ai/plugin": "^1.0.162",
+    "@opentui/core": "^0.1.92",
+    "@opentui/solid": "^0.1.92",
+    "solid-js": "^1.9.10"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

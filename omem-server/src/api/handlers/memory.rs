@@ -1288,8 +1288,6 @@ struct SessionTopicSummary {
     #[serde(default = "default_scope")]
     scope: String,
     #[serde(default)]
-    replaces: Vec<usize>,
-    #[serde(default)]
     category: Option<String>,
 }
 
@@ -1338,6 +1336,8 @@ pub async fn session_ingest(
             .entry(session_key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
         let _session_guard = lock_arc.lock().await;
+        let cluster_store = state.cluster_store.clone();
+        let llm_for_cluster = Some(state.llm.clone());
 
         let store = match state
             .store_manager
@@ -1351,14 +1351,15 @@ pub async fn session_ingest(
             }
         };
 
-        let existing_summaries = fetch_existing_session_summaries(
+        // 获取同session最后一条记忆（用于cluster归簇）
+        let _last_summary = fetch_last_session_summary(
             &store,
             session_id.as_deref(),
         ).await;
 
-        let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_compress_prompt(
+        // 独立提取模式：只处理当前conversation，不传旧summaries
+        let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt(
             &conversation,
-            &existing_summaries.iter().map(|m| m.content.clone()).collect::<Vec<_>>(),
         );
 
         let topics: Vec<SessionTopicSummary> = match crate::llm::complete_json(
@@ -1370,7 +1371,7 @@ pub async fn session_ingest(
         {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!(error = %e, "session_ingest_bg: LLM compress failed");
+                tracing::error!(error = %e, "session_ingest_bg: LLM extract failed");
                 return;
             }
         };
@@ -1389,18 +1390,11 @@ pub async fn session_ingest(
             }
         };
 
-        let existing_count = existing_summaries.len();
-        let old_map: std::collections::HashMap<usize, Memory> = existing_summaries
-            .into_iter()
-            .enumerate()
-            .map(|(i, m)| (i + 1, m))
-            .collect();
-        let mut replaced_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut stored = 0usize;
+        let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
 
         for (i, topic) in topics.iter().enumerate() {
             let category: Category = topic.category.as_deref().and_then(|c| {
-                // Map common invalid categories to valid ones before parsing
                 let normalized = match c.to_lowercase().as_str() {
                     "experience" | "experiences" | "activity" | "activities" => "events",
                     "knowledge" | "skill" | "skills" | "ability" | "abilities" => "patterns",
@@ -1414,6 +1408,7 @@ pub async fn session_ingest(
                     Category::Events
                 }
             });
+
             let l1_overview = {
                 let s = &topic.summary;
                 if s.chars().count() <= 150 { s.clone() } else {
@@ -1436,72 +1431,68 @@ pub async fn session_ingest(
                 t
             };
 
-            if !topic.replaces.is_empty() {
-                let mut first = true;
-                for &idx in &topic.replaces {
-                    if let Some(old_mem) = old_map.get(&idx) {
-                        replaced_ids.insert(old_mem.id.clone());
-                        if first {
-                            let mut updated = old_mem.clone();
-                            updated.content = topic.summary.clone();
-                            updated.l0_abstract = topic.topic.clone();
-                            updated.l1_overview = l1_overview.clone();
-                            updated.l2_content = l2_content.clone();
-                            updated.tags = tags.clone();
-                            updated.category = category.clone();
-                            updated.source = Some("session_compress".to_string());
-                            if topic.scope == "private" {
-                                updated.scope = "private".to_string();
-                                updated.visibility = "private".to_string();
-                            }
-                            let vector = vectors.get(i).cloned();
-                            if let Err(e) = store.update(&updated, vector.as_deref()).await {
-                                tracing::error!(error = %e, "session_ingest_bg: update failed");
-                                return;
-                            }
-                            tracing::info!(id = %updated.id, replaces = ?topic.replaces, "Merged existing session summary");
-                            first = false;
-                        } else {
-                            store.hard_delete(&old_mem.id).await.ok();
-                            tracing::info!(id = %old_mem.id, "Deleted merged-away old summary");
+            let mut memory = Memory::new(
+                &topic.summary,
+                category,
+                MemoryType::Pinned,
+                &tenant_id,
+            );
+            memory.l0_abstract = topic.topic.clone();
+            memory.l1_overview = l1_overview;
+            memory.l2_content = l2_content;
+            memory.source = Some("session_compress".to_string());
+            memory.session_id = session_id.clone();
+            memory.agent_id = agent_id.clone();
+            memory.tags = tags;
+            if topic.scope == "private" {
+                memory.scope = "private".to_string();
+                memory.visibility = "private".to_string();
+            }
+
+            let vector = vectors.get(i).cloned();
+            if let Err(e) = store.create(&memory, vector.as_deref()).await {
+                tracing::error!(error = %e, "session_ingest_bg: create failed");
+                return;
+            }
+            stored += 1;
+            created_memories.push((memory.clone(), vector.clone()));
+        }
+
+        // ── Cluster归簇：同session记忆归入同一cluster ──
+        if !created_memories.is_empty() {
+            let cluster_manager = crate::cluster::manager::ClusterManager::new(
+                cluster_store,
+                llm_for_cluster,
+            );
+
+            if let Some((anchor_mem, Some(anchor_vec))) = created_memories.iter().find(|(_, v)| v.is_some()) {
+                match cluster_manager.create_cluster(anchor_mem, anchor_vec).await {
+                    Ok(cluster) => {
+                        // Assign anchor
+                        if let Err(e) = store.update_memory_cluster_id(&anchor_mem.id, Some(&cluster.id), true).await {
+                            tracing::warn!(error = %e, "session_ingest: failed to set anchor cluster_id");
                         }
+                        // Assign all others
+                        for (mem, _) in &created_memories {
+                            if mem.id != anchor_mem.id {
+                                if let Err(e) = store.update_memory_cluster_id(&mem.id, Some(&cluster.id), false).await {
+                                    tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to set cluster_id");
+                                }
+                            }
+                        }
+                        tracing::info!(cluster_id = %cluster.id, count = created_memories.len(), "session_ingest: session memories clustered");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: cluster creation failed, memories stored without cluster");
                     }
                 }
-                stored += 1;
-            } else {
-                let mut memory = Memory::new(
-                    &topic.summary,
-                    category,
-                    MemoryType::Pinned,
-                    &tenant_id,
-                );
-                memory.l0_abstract = topic.topic.clone();
-                memory.l1_overview = l1_overview;
-                memory.l2_content = l2_content;
-                memory.source = Some("session_compress".to_string());
-                memory.session_id = session_id.clone();
-                memory.agent_id = agent_id.clone();
-                memory.tags = tags;
-                if topic.scope == "private" {
-                    memory.scope = "private".to_string();
-                    memory.visibility = "private".to_string();
-                }
-                let vector = vectors.get(i).cloned();
-                if let Err(e) = store.create(&memory, vector.as_deref()).await {
-                    tracing::error!(error = %e, "session_ingest_bg: create failed");
-                    return;
-                }
-                stored += 1;
             }
         }
 
-        let preserved_count = existing_count.saturating_sub(replaced_ids.len());
         tracing::info!(
             stored = stored,
-            merged = replaced_ids.len(),
-            preserved = preserved_count,
             tenant = %tenant_id,
-            "session_ingest: merged session summaries"
+            "session_ingest: created independent memories"
         );
     });
 
@@ -1630,25 +1621,24 @@ fn clean_message_content(content: &str) -> String {
 
 
 
-async fn fetch_existing_session_summaries(
+/// Fetch the most recent session_compress memory for a given session.
+/// Returns only the latest one (for cluster assignment).
+async fn fetch_last_session_summary(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
-) -> Vec<Memory> {
-    let Some(sid) = session_id else {
-        return Vec::new();
-    };
+) -> Option<Memory> {
+    let Some(sid) = session_id else { return None; };
 
     let filter = ListFilter {
         tags: Some(vec!["session_compress".to_string()]),
         ..Default::default()
     };
 
-    match store.list_filtered(&filter, 50, 0).await {
+    match store.list_filtered(&filter, 1, 0).await {
         Ok(memories) => memories
             .into_iter()
-            .filter(|m| m.session_id.as_deref() == Some(sid))
-            .collect(),
-        Err(_) => Vec::new(),
+            .find(|m| m.session_id.as_deref() == Some(sid)),
+        Err(_) => None,
     }
 }
 

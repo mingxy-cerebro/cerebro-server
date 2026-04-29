@@ -648,3 +648,98 @@ Given multiple memories covering related topics, produce:
 Return ONLY valid JSON:
 {"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}
 "#;
+
+// ── Session Extract Prompt (独立事实提取模式) ────────────
+
+const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are an independent fact extraction engine. Your task is to extract DISTINCT, ATOMIC facts from the given conversation. Each fact becomes an INDEPENDENT memory — do NOT merge, compress, or summarize multiple facts into one.
+
+## CORE RULES
+
+1. **INDEPENDENT EXTRACTION**: Each fact stands on its own. Never reference "previous summaries" or "existing memories".
+2. **ATOMIC**: One piece of information per fact. If a conversation contains 3 distinct facts, output 3 separate entries.
+3. **NO MERGING**: Do NOT combine related facts. Each fact is stored independently.
+
+## CLASSIFICATION
+
+For each fact, classify into exactly one type:
+
+- **EMOTIONAL** (scope "private"): Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets.
+  - PRESERVE original text as-is. Do NOT compress, summarize, or paraphrase.
+  - Examples: "老公晚安", "宝贝亲亲", "我好难过"
+  - These are stored verbatim with scope "private".
+
+- **WORK** (scope "public"): Technical decisions, code, file paths, architecture, preferences, tool choices, conventions.
+  - Provide a concise summary.
+  - Examples: "Project uses React + TypeScript", "Prefers dark mode", "File path: src/main.rs"
+
+- **NOISE**: Casual small talk, tool output dumps, meta-discussion, greetings, filler.
+  - SKIP these entirely. Do not output them.
+
+## ABSOLUTE RULES
+
+### Rule 1: Language Preservation (MANDATORY)
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.**
+- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese.
+- If the input is English, EVERY SINGLE FIELD must be in English.
+- **NEVER translate. NEVER mix languages.**
+
+### Rule 2: Privacy Detection (MANDATORY)
+- **Before outputting, check: "Does this fact contain sensitive or private content?"**
+- If YES, you MUST add the tag "私密" to the tags array AND set scope to "private".
+- Sensitive content: passwords, API keys, tokens, server IPs, credentials, personal secrets, intimate details.
+- **NEVER skip this check.**
+
+### Rule 3: Persona Rule (CRITICAL)
+- NEVER refer to the user as "用户" (user) or "你" (you) in the summary.
+- Write facts as direct, factual statements about the person.
+- GOOD: "Prefers dark mode", "Works at Stripe", "Dislikes verbose responses"
+- BAD: "用户偏好深色模式", "你说你在Stripe工作"
+
+## CATEGORY CLASSIFICATION
+Classify each fact into exactly one category. Use ONLY these 6 valid values:
+- **profile**: Biographical or identity information (job, company, role, background)
+- **preferences**: Likes, dislikes, tool choices, style preferences, habits
+- **entities**: Persistent nouns (projects, tools, people, orgs) and their states
+- **events**: Things that happened — milestones, incidents, decisions made
+- **cases**: Problem→solution pairs, debugging stories, how-tos
+- **patterns**: Reusable processes, workflows, conventions, templates
+
+CRITICAL: The category field MUST be one of the 6 values above. Do NOT invent categories.
+
+## MARKDOWN FORMAT (MANDATORY)
+The summary field MUST use Markdown formatting:
+- Use ## headers to organize sections
+- Use - bullet lists for enumerations
+- Use **bold** for key terms, file paths, function names
+- Use `backticks` for code references
+- Use > blockquotes for important decisions or user requirements
+
+## VALUE FILTER
+- SKIP: casual small talk, debugging status checks, tool/engine internal outputs, meta-discussion, greetings, filler.
+- KEEP: technical decisions, user preferences, code changes, file paths, architecture, user anger/criticism.
+- ANGER RULE: User frustration MUST be preserved as tagged rules (e.g., "铁律", "lessons_learned").
+- If ZERO factual content → return [].
+
+## OUTPUT FORMAT
+Return ONLY valid JSON array. Each element:
+{ "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "category": string }
+
+- "topic": A short, specific title for this single fact (1 sentence).
+- "summary": The full content of the fact. Use Markdown formatting.
+- "tags": Relevant tags. Always include "session_compress".
+- "scope": "public" for work content, "private" for emotional/intimate content.
+- "category": One of the 6 valid category values above.
+
+Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
+"##;
+
+/// Build the session extract prompt.
+/// `conversation` is the formatted conversation text.
+/// Extracts independent facts without referencing old summaries.
+pub fn build_session_extract_prompt(conversation: &str) -> (String, String) {
+    let system = SESSION_EXTRACT_SYSTEM_PROMPT.to_string();
+    let user = format!(
+        "## Current Conversation\n\n{conversation}\n\nReturn ONLY valid JSON array. Use Markdown in summary fields."
+    );
+    (system, user)
+}
