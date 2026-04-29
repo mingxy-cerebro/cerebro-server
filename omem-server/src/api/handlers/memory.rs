@@ -24,6 +24,12 @@ use crate::store::StoreManager;
 // ── Request / Response DTOs ──────────────────────────────────────────
 
 #[derive(Deserialize)]
+struct ClusterSummaryResponse {
+    title: String,
+    summary: String,
+}
+
+#[derive(Deserialize)]
 pub struct CreateMemoryBody {
     // Message-based ingest
     pub messages: Option<Vec<MessageDto>>,
@@ -1461,8 +1467,8 @@ pub async fn session_ingest(
         // ── Cluster归簇：同session记忆归入同一cluster ──
         if !created_memories.is_empty() {
             let cluster_manager = crate::cluster::manager::ClusterManager::new(
-                cluster_store,
-                llm_for_cluster,
+                cluster_store.clone(),
+                llm_for_cluster.clone(),
             );
 
             if let Some((anchor_mem, Some(anchor_vec))) = created_memories.iter().find(|(_, v)| v.is_some()) {
@@ -1481,6 +1487,34 @@ pub async fn session_ingest(
                             }
                         }
                         tracing::info!(cluster_id = %cluster.id, count = created_memories.len(), "session_ingest: session memories clustered");
+
+                        if created_memories.len() >= 2 {
+                            if let Some(ref llm) = llm_for_cluster {
+                                let member_contents: Vec<String> = created_memories
+                                    .iter()
+                                    .map(|(m, _)| m.content.chars().take(500).collect())
+                                    .collect();
+                                let (sys, usr) = crate::ingest::prompts::build_cluster_summary_prompt(
+                                    &cluster.title,
+                                    &cluster.summary,
+                                    &member_contents,
+                                );
+                                match crate::llm::complete_json::<ClusterSummaryResponse>(llm.as_ref(), &sys, &usr).await {
+                                    Ok(resp) => {
+                                        if let Err(e) = cluster_store.update_summary(&cluster.id, &resp.summary).await {
+                                            tracing::warn!(error = %e, "session_ingest: failed to update cluster summary");
+                                        }
+                                        if let Err(e) = cluster_store.update_title(&cluster.id, &resp.title).await {
+                                            tracing::warn!(error = %e, "session_ingest: failed to update cluster title");
+                                        }
+                                        tracing::info!(cluster_id = %cluster.id, title = %resp.title, "session_ingest: regenerated cluster summary");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "session_ingest: cluster summary regeneration failed, keeping initial");
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "session_ingest: cluster creation failed, memories stored without cluster");

@@ -404,7 +404,7 @@ User says: "我的服务器IP是47.93.199.242，root密码是Mengfanbo@0714，�
 ```
 "#;
 
-const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a concise title and summary for a cluster of related memories.
+const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a comprehensive title and summary for a cluster of related memories.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)
 
@@ -417,12 +417,18 @@ const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summariz
 
 ## Task
 Given a set of related memory entries, produce:
-1. A **title**: at most 5 words, highly condensed, capturing the core theme.
-2. A **summary**: 1-2 sentences that概括 (summarize) the shared topic across all members.
+1. A **title**: at most 8 characters (Chinese) or 5 words (English), highly condensed, capturing the core theme.
+2. A **summary**: 3-6 bullet points, each capturing a DISTINCT key topic from the members. Use Markdown formatting.
+
+## Summary Rules
+- Cover ALL major topics present in the member memories.
+- Each bullet point = one distinct topic (e.g., career, project, team, preferences).
+- Be specific: include key facts, names, numbers from the members.
+- Do NOT just repeat one member — synthesize across ALL members.
 
 ## Output Format
 Return ONLY valid JSON:
-{"title": "...", "summary": "..."}
+{"title": "...", "summary": "- point1\n- point2\n- point3"}
 "#;
 
 const CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to generate a concise title and summary for a new memory cluster based on its anchor memory.
@@ -461,8 +467,8 @@ pub fn build_cluster_summary_prompt(
     }
     user.push_str("\n## Member Memories\n");
     for (i, content) in member_contents.iter().enumerate() {
-        let truncated: String = content.chars().take(200).collect();
-        let display = if content.chars().count() > 200 {
+        let truncated: String = content.chars().take(500).collect();
+        let display = if content.chars().count() > 500 {
             format!("{}...", truncated)
         } else {
             truncated
