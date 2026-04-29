@@ -1357,8 +1357,8 @@ pub async fn session_ingest(
             }
         };
 
-        // 获取同session最后一条记忆（用于cluster归簇）
-        let _last_summary = fetch_last_session_summary(
+        // 获取同session的EMOTIONAL记忆（用于追加到已有记忆）
+        let mut existing_emotional = fetch_session_emotional_memory(
             &store,
             session_id.as_deref(),
         ).await;
@@ -1453,6 +1453,49 @@ pub async fn session_ingest(
             if topic.scope == "private" {
                 memory.scope = "private".to_string();
                 memory.visibility = "private".to_string();
+            }
+
+            // EMOTIONAL类追加逻辑：同session的private记忆追加到已有记忆
+            if topic.scope == "private" {
+                if let Some(existing) = existing_emotional.clone() {
+                    let new_content = format!(
+                        "{}\n\n---\n\n## {}\n{}",
+                        existing.content,
+                        topic.topic,
+                        topic.summary
+                    );
+
+                    if new_content.chars().count() <= 3000 {
+                        let mut updated = existing;
+                        updated.content = new_content.clone();
+                        let abstract_text: String = new_content.chars().take(200).collect();
+                        updated.l0_abstract = abstract_text;
+                        updated.l1_overview = if new_content.chars().count() <= 150 {
+                            new_content.clone()
+                        } else {
+                            format!("{}...", new_content.chars().take(147).collect::<String>())
+                        };
+                        updated.l2_content = if new_content.chars().count() <= 500 {
+                            new_content.clone()
+                        } else {
+                            format!("{}...", new_content.chars().take(497).collect::<String>())
+                        };
+                        for tag in &topic.tags {
+                            if !updated.tags.contains(tag) {
+                                updated.tags.push(tag.clone());
+                            }
+                        }
+
+                        if let Err(e) = store.update(&updated, None).await {
+                            tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
+                        } else {
+                            tracing::info!(memory_id = %updated.id, "session_ingest: appended to existing emotional memory");
+                            existing_emotional = Some(updated);
+                            continue;
+                        }
+                    }
+                    tracing::info!("session_ingest: emotional memory exceeded limit or update failed, creating new");
+                }
             }
 
             let vector = vectors.get(i).cloned();
@@ -1655,9 +1698,9 @@ fn clean_message_content(content: &str) -> String {
 
 
 
-/// Fetch the most recent session_compress memory for a given session.
-/// Returns only the latest one (for cluster assignment).
-async fn fetch_last_session_summary(
+/// Fetch the most recent private (EMOTIONAL) session_compress memory for a given session.
+/// Used to append new emotional topics to the same memory within a session.
+async fn fetch_session_emotional_memory(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
 ) -> Option<Memory> {
@@ -1668,10 +1711,11 @@ async fn fetch_last_session_summary(
         ..Default::default()
     };
 
-    match store.list_filtered(&filter, 1, 0).await {
+    match store.list_filtered(&filter, 20, 0).await {
         Ok(memories) => memories
             .into_iter()
-            .find(|m| m.session_id.as_deref() == Some(sid)),
+            .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope == "private")
+            .max_by_key(|m| m.updated_at.clone()),
         Err(_) => None,
     }
 }
