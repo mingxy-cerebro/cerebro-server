@@ -664,10 +664,10 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extractio
 - Example: a 10-minute discussion about 积分V3 business model → ONE entry summarizing the key decisions and outcomes, NOT 10 fragmented entries.
 - Aim for **fewer, richer entries** rather than many tiny fragments.
 
-## USER-ONLY RULE (CRITICAL)
-- **ONLY extract information from the HUMAN USER's messages.**
-- NEVER store AI assistant's responses, analyses, reports, summaries, code reviews, tool outputs.
-- NEVER store: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
+## EXTRACTION SCOPE RULE (CRITICAL)
+- **WORK/Technical topics**: ONLY extract from the HUMAN USER's messages. Omit AI's analyses, code reviews, tool outputs, debugging process.
+- **EMOTIONAL/Intimate topics**: Preserve KEY interactions from BOTH sides — the user's expressions AND the AI's meaningful emotional responses. Keep the warmth and back-and-forth dynamics. Do NOT include AI's non-emotional content (task reports, tool usage, factual answers).
+- **ALWAYS exclude**: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
 
 ## CLASSIFICATION & HANDLING
 
