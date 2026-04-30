@@ -32,6 +32,10 @@ impl ClusterManager {
         &self.cluster_store
     }
 
+    pub fn llm(&self) -> Option<&Arc<dyn LlmService>> {
+        self.llm.as_ref()
+    }
+
     fn get_dedup_threshold() -> f32 {
         std::env::var("OMEM_CLUSTER_DEDUP_THRESHOLD")
             .ok()
@@ -130,30 +134,10 @@ impl ClusterManager {
 
         debug!(memory_id, cluster_id, "assigned memory to cluster");
 
-        if new_count >= 2 {
-            if let Some(ref llm) = self.llm {
-                let cluster_store = self.cluster_store.clone();
-                let llm = llm.clone();
-                let cluster_id = cluster_id.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = Self::regenerate_summary(
-                        &cluster_store,
-                        &lance_store,
-                        llm.as_ref(),
-                        &cluster_id,
-                    )
-                    .await
-                    {
-                        warn!(cluster_id, error = %e, "failed to regenerate cluster summary");
-                    }
-                });
-            }
-        }
-
         Ok(())
     }
 
-    async fn regenerate_summary(
+    pub async fn regenerate_summary(
         cluster_store: &ClusterStore,
         lance_store: &crate::store::LanceStore,
         llm: &dyn LlmService,

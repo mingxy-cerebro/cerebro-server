@@ -135,6 +135,8 @@ impl BackgroundClusterer {
             cluster_members.entry(label).or_default().push(idx);
         }
 
+        let mut created_cluster_ids: Vec<String> = Vec::new();
+
         for (_label, member_indices) in cluster_members {
             let anchor_idx = match member_indices.first() {
                 Some(&i) => i,
@@ -160,6 +162,7 @@ impl BackgroundClusterer {
             };
 
             stats.created_new_clusters += 1;
+            created_cluster_ids.push(cluster.id.clone());
 
             let anchor_preview: String = anchor_memory.content.chars().take(40).collect();
             self.emit("cluster.memory_progress", serde_json::json!({
@@ -209,6 +212,24 @@ impl BackgroundClusterer {
                 }
 
                 tokio::task::yield_now().await;
+            }
+        }
+
+        self.emit("cluster.stage", serde_json::json!({
+            "stage": "summarizing",
+            "message": format!("Generating summaries for {} clusters...", created_cluster_ids.len())
+        }));
+
+        for cluster_id in &created_cluster_ids {
+            if let Some(llm) = self.cluster_manager.llm() {
+                if let Err(e) = ClusterManager::regenerate_summary(
+                    self.cluster_manager.cluster_store(),
+                    &self.store,
+                    llm.as_ref(),
+                    cluster_id,
+                ).await {
+                    warn!(cluster_id, error = %e, "Failed to regenerate cluster summary");
+                }
             }
         }
 
