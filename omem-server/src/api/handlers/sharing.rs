@@ -252,6 +252,7 @@ fn make_shared_copy(source: &Memory, target_space: &str, user_id: &str, agent_id
         tier_history: None,
         cluster_id: None,
         is_cluster_anchor: false,
+        metadata: None,
     }
 }
 

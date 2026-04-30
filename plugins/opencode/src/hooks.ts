@@ -419,8 +419,20 @@ export function sessionIdleHook(
           return;
         }
 
+        let sessionTitle: string | undefined;
+        let projectName: string | undefined;
         try {
-          await omemClient.sessionIngest(conversationMessages, sessionID);
+          const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
+          sessionTitle = sessionInfo?.title;
+          projectName = sessionInfo?.project?.rootPath
+            ? sessionInfo.project.rootPath.split("/").pop()
+            : undefined;
+        } catch (e) {
+          // 获取失败不影响主流程
+        }
+
+        try {
+          await omemClient.sessionIngest(conversationMessages, sessionID, undefined, sessionTitle, projectName);
           for (const id of newMessageIds) {
             processedMessageIds.add(id);
           }

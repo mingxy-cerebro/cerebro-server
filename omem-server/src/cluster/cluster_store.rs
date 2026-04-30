@@ -44,6 +44,7 @@ impl ClusterStore {
             Field::new("member_count", DataType::UInt32, false),
             Field::new("importance", DataType::Float32, false),
             Field::new("keywords", DataType::Utf8, false),
+            Field::new("tags", DataType::Utf8, false),
             Field::new("anchor_memory_id", DataType::Utf8, false),
             Field::new(
                 "anchor_vector",
@@ -111,6 +112,9 @@ impl ClusterStore {
         let keywords_json = serde_json::to_string(&cluster.keywords)
             .map_err(|e| OmemError::Storage(format!("failed to serialize keywords: {e}")))?;
 
+        let tags_json = serde_json::to_string(&cluster.tags)
+            .map_err(|e| OmemError::Storage(format!("failed to serialize tags: {e}")))?;
+
         let vec_data: Vec<Option<f32>> = anchor_vector.iter().map(|&x| Some(x)).collect();
         let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
             vec![Some(vec_data)],
@@ -129,6 +133,7 @@ impl ClusterStore {
                 Arc::new(UInt32Array::from(vec![cluster.member_count])),
                 Arc::new(Float32Array::from(vec![cluster.importance])),
                 Arc::new(StringArray::from(vec![keywords_json.as_str()])),
+                Arc::new(StringArray::from(vec![tags_json.as_str()])),
                 Arc::new(StringArray::from(vec![cluster.anchor_memory_id.as_str()])),
                 Arc::new(vector_array),
                 Arc::new(StringArray::from(vec![cluster.created_at.as_str()])),
@@ -290,6 +295,10 @@ impl ClusterStore {
         let keywords: Vec<String> = serde_json::from_str(&keywords_json)
             .map_err(|e| OmemError::Storage(format!("failed to parse keywords: {e}")))?;
 
+        let tags_json = get_str("tags")?;
+        let tags: Vec<String> = serde_json::from_str(&tags_json)
+            .map_err(|e| OmemError::Storage(format!("failed to parse tags: {e}")))?;
+
         Ok(MemoryCluster {
             id: get_str("id")?,
             tenant_id: get_str("tenant_id")?,
@@ -309,6 +318,7 @@ impl ClusterStore {
                 .map(|arr| arr.value(row))
                 .unwrap_or(0.5),
             keywords,
+            tags,
             anchor_memory_id: get_str("anchor_memory_id")?,
             created_at: get_str("created_at")?,
             updated_at: get_str("updated_at")?,

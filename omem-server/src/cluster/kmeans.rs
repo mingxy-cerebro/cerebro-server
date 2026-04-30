@@ -14,6 +14,21 @@ pub fn kmeans(data: &[Vec<f32>], max_k: usize, max_iterations: usize) -> KMeansR
         };
     }
 
+    // 内存保护：估算K-Means内存占用
+    // 每条向量: 1024 dims × 4 bytes = 4KB
+    // K-Means额外 ≈ 3x (points copy + centroids + labels)
+    let estimated_mb = (n as u64 * 1024 * 4 * 3) / (1024 * 1024);
+    if estimated_mb > 500 {
+        tracing::warn!(
+            n,
+            estimated_mb,
+            "K-Means would use >500MB, capping at 500 memories"
+        );
+        // 用前500条（它们按向量ID排序，基本是时间序的，够用了）
+        let capped_data: Vec<Vec<f32>> = data.iter().take(500).cloned().collect();
+        return kmeans(&capped_data, max_k, max_iterations);
+    }
+
     let points: Vec<Vec<f32>> = data.iter().map(|v| normalize(v)).collect();
     let k = (n as f64 / 2.0).sqrt().ceil() as usize;
     let k = k.min(max_k).max(1).min(n);

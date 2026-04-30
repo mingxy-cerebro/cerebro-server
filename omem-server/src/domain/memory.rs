@@ -45,6 +45,8 @@ pub struct Memory {
     pub cluster_id: Option<String>,
     #[serde(default)]
     pub is_cluster_anchor: bool,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl Memory {
@@ -89,6 +91,7 @@ impl Memory {
             tier_history: None,
             cluster_id: None,
             is_cluster_anchor: false,
+            metadata: None,
         }
     }
 

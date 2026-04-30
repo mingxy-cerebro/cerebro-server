@@ -1277,6 +1277,8 @@ pub struct SessionIngestBody {
     pub messages: Vec<MessageDto>,
     pub session_id: Option<String>,
     pub agent_id: Option<String>,
+    pub session_title: Option<String>,
+    pub project_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1289,6 +1291,8 @@ struct SessionTopicSummary {
     scope: String,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    memory_type: Option<String>,
 }
 
 fn default_scope() -> String {
@@ -1338,11 +1342,6 @@ pub async fn session_ingest(
         let _session_guard = lock_arc.lock().await;
         let cluster_store = state.cluster_store.clone();
         let llm_for_cluster = Some(state.llm.clone());
-        let cluster_assigner = crate::cluster::assigner::ClusterAssigner::new(
-            cluster_store.clone(),
-            state.embed.clone(),
-        ).with_llm(state.llm.clone());
-
         let store = match state
             .store_manager
             .get_store(&personal_space_id(&tenant_id))
@@ -1355,8 +1354,21 @@ pub async fn session_ingest(
             }
         };
 
+        let cluster_assigner = crate::cluster::assigner::ClusterAssigner::new(
+            cluster_store.clone(),
+            state.embed.clone(),
+        )
+        .with_llm(state.llm.clone())
+        .with_lance_store(Some(store.clone()));
+
         // 获取同session的EMOTIONAL记忆（用于追加到已有记忆）
         let mut existing_emotional = fetch_session_emotional_memory(
+            &store,
+            session_id.as_deref(),
+        ).await;
+
+        // 获取同session的WORK记忆（用于追加到已有记忆）
+        let mut existing_work_memory = fetch_session_work_memory(
             &store,
             session_id.as_deref(),
         ).await;
@@ -1398,6 +1410,17 @@ pub async fn session_ingest(
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
 
         for (i, topic) in topics.iter().enumerate() {
+            let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
+                // 兼容旧prompt：根据scope和category推断
+                if topic.scope == "private" {
+                    "EMOTIONAL"
+                } else if topic.category.as_deref() == Some("preferences") {
+                    "PREFERENCE"
+                } else {
+                    "WORK"
+                }
+            });
+
             let category: Category = topic.category.as_deref().and_then(|c| {
                 let normalized = match c.to_lowercase().as_str() {
                     "experience" | "experiences" | "activity" | "activities" => "events",
@@ -1432,6 +1455,9 @@ pub async fn session_ingest(
             } else {
                 let mut t = topic.tags.clone();
                 t.push("session_compress".to_string());
+                if memory_type == "PREFERENCE" {
+                    t.push("preference_extract".to_string());
+                }
                 t
             };
 
@@ -1496,6 +1522,49 @@ pub async fn session_ingest(
                 }
             }
 
+            // WORK类追加逻辑：同session的WORK记忆追加到已有记忆
+            if memory_type == "WORK" {
+                if let Some(existing_work) = existing_work_memory.clone() {
+                    let new_content = format!(
+                        "{}\n\n---\n\n## {}\n{}",
+                        existing_work.content,
+                        topic.topic,
+                        topic.summary
+                    );
+
+                    if new_content.chars().count() <= 3000 {
+                        let mut updated = existing_work;
+                        updated.content = new_content.clone();
+                        let abstract_text: String = new_content.chars().take(200).collect();
+                        updated.l0_abstract = abstract_text;
+                        updated.l1_overview = if new_content.chars().count() <= 150 {
+                            new_content.clone()
+                        } else {
+                            format!("{}...", new_content.chars().take(147).collect::<String>())
+                        };
+                        updated.l2_content = if new_content.chars().count() <= 500 {
+                            new_content.clone()
+                        } else {
+                            format!("{}...", new_content.chars().take(497).collect::<String>())
+                        };
+                        for tag in &topic.tags {
+                            if !updated.tags.contains(tag) {
+                                updated.tags.push(tag.clone());
+                            }
+                        }
+
+                        if let Err(e) = store.update(&updated, None).await {
+                            tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
+                        } else {
+                            tracing::info!(memory_id = %updated.id, "session_ingest: appended to existing WORK memory");
+                            existing_work_memory = Some(updated);
+                            continue;
+                        }
+                    }
+                    tracing::info!("session_ingest: WORK memory exceeded limit, creating new");
+                }
+            }
+
             let vector = vectors.get(i).cloned();
             if let Err(e) = store.create(&memory, vector.as_deref()).await {
                 tracing::error!(error = %e, "session_ingest_bg: create failed");
@@ -1531,7 +1600,7 @@ pub async fn session_ingest(
                             crate::cluster::assigner::AssignAction::CreateNew => {
                                 // 用已有的vector创建cluster（避免重复embed）
                                 if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec).await {
+                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
                                         Ok(cluster) => {
                                             if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
                                                 tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to new cluster");
@@ -1559,7 +1628,7 @@ pub async fn session_ingest(
                                         }
                                     }
                                 } else if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec).await {
+                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
                                         Ok(cluster) => {
                                             if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
                                                 tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to LLM-judged new cluster");
@@ -1731,6 +1800,28 @@ async fn fetch_session_emotional_memory(
         Ok(memories) => memories
             .into_iter()
             .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope == "private")
+            .max_by_key(|m| m.updated_at.clone()),
+        Err(_) => None,
+    }
+}
+
+/// Fetch the most recent public (WORK) session_compress memory for a given session.
+/// Used to append new work topics to the same memory within a session.
+async fn fetch_session_work_memory(
+    store: &crate::store::lancedb::LanceStore,
+    session_id: Option<&str>,
+) -> Option<Memory> {
+    let Some(sid) = session_id else { return None; };
+
+    let filter = ListFilter {
+        tags: Some(vec!["session_compress".to_string()]),
+        ..Default::default()
+    };
+
+    match store.list_filtered(&filter, 20, 0).await {
+        Ok(memories) => memories
+            .into_iter()
+            .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope != "private")
             .max_by_key(|m| m.updated_at.clone()),
         Err(_) => None,
     }

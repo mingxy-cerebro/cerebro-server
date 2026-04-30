@@ -364,11 +364,15 @@ export class OmemClient {
     messages: Array<{ role: string; content: string }>,
     sessionId?: string,
     agentId?: string,
+    sessionTitle?: string,
+    projectName?: string,
   ): Promise<unknown> {
     return this.post("/v1/memories/session-ingest", {
       messages,
       session_id: sessionId,
       agent_id: agentId,
+      session_title: sessionTitle,
+      project_name: projectName,
     }, 60000);
   }
 }

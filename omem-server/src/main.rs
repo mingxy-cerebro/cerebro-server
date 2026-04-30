@@ -8,7 +8,7 @@ use omem_server::embed::{create_embed_service, EmbedService};
 use omem_server::cluster::cluster_store::ClusterStore;
 use omem_server::cluster::scheduler::ClusteringScheduler;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
-use omem_server::llm::{create_llm_service, create_recall_llm_service, LlmService};
+use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
 
 fn init_tracing(config: &OmemConfig) {
@@ -80,6 +80,18 @@ async fn main() {
             .expect("failed to create recall LLM service"),
     );
 
+    let cluster_llm: Arc<dyn LlmService> = if !config.cluster_llm_provider.is_empty() {
+        match create_cluster_llm_service(&config).await {
+            Ok(svc) => Arc::from(svc),
+            Err(e) => {
+                tracing::warn!("Failed to create cluster_llm: {e}, falling back to primary llm");
+                llm.clone()
+            }
+        }
+    } else {
+        llm.clone()
+    };
+
     let cluster_store = Arc::new(
         ClusterStore::new(&lancedb::connect(&base_uri).execute().await.expect("db connect")
         )
@@ -94,6 +106,7 @@ async fn main() {
         embed,
         llm,
         recall_llm,
+        cluster_llm,
         cluster_store,
         config: config.clone(),
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),

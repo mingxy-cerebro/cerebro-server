@@ -685,40 +685,44 @@ Return ONLY valid JSON:
 
 // ── Session Extract Prompt (分类提取模式) ────────────
 
-const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extraction engine. Your task is to extract valuable information from the conversation and organize it into categorized memory entries.
-
-## CORE PHILOSOPHY
-- **GROUP related information** into topic-based entries, NOT split every detail into separate entries.
-- Example: a 10-minute discussion about 积分V3 business model → ONE entry summarizing the key decisions and outcomes, NOT 10 fragmented entries.
-- Aim for **fewer, richer entries** rather than many tiny fragments.
+const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
 
 ## EXTRACTION SCOPE RULE (CRITICAL)
 - **WORK/Technical topics**: ONLY extract from the HUMAN USER's messages. Omit AI's analyses, code reviews, tool outputs, debugging process.
-- **EMOTIONAL/Intimate topics**: Preserve KEY interactions from BOTH sides — the user's expressions AND the AI's meaningful emotional responses. Keep the warmth and back-and-forth dynamics. Do NOT include AI's non-emotional content (task reports, tool usage, factual answers).
+- **EMOTIONAL/Intimate topics**: Preserve KEY interactions from BOTH sides — the user's expressions AND the AI's meaningful emotional responses. Keep the warmth and back-and-forth dynamics.
+- **PREFERENCE topics**: Extract user preferences, personality traits, communication style, likes/dislikes from the conversation. These are about WHO the user IS, not what they're DOING.
 - **ALWAYS exclude**: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
 
-## CLASSIFICATION & HANDLING
+## THREE CATEGORIES
 
-For each topic, classify and handle accordingly:
-
-### EMOTIONAL (scope "private")
+### EMOTIONAL (scope "private", category "profile")
 - Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
-- **PRESERVE original text as-is.** Do NOT compress, summarize, or paraphrase emotional content.
-- Keep the warmth, nuance, and detail. If too long, split into multiple entries.
-- Examples: "老公晚安", "宝贝亲亲", "我好难过", relationship milestones
+- **PRESERVE original text as-is.** Do NOT compress or summarize.
+- Keep the warmth, nuance, and detail.
+- Auto-tag with emotional subcategory:
+  - "私密" — sexual/flirtatious content
+  - "谈心" — deep emotional exchange, trust building
+  - "日常撒娇" — playful banter, teasing, cute interactions
+  - "危机修复" — arguments, apologies, reconciliation
 
-### WORK (scope "public")
-- Technical decisions, code changes, file paths, architecture, preferences, project details, business models.
-- **COMPRESS and DENOISE**: Summarize the result/outcome, omit the debugging process, trial-and-error, intermediate steps.
-- Group related work topics together (e.g., all decisions about 积分V3 → one entry with subsections).
-- Examples: "积分V3 model: 入池→3:7→铸造+分配→熔断, 提现待定, 权益等级待确认"
+### WORK (scope "public", category auto-detect)
+- Technical decisions, code changes, file paths, architecture, project details, business models.
+- **COMPRESS and DENOISE**: Summarize the result/outcome, omit debugging process, trial-and-error.
+- Group related work topics into one entry.
+- **MANDATORY**: If you can identify the project name, include it as a tag (e.g., "omem", "农服", "小小月").
+- **MANDATORY**: If you can identify the sub-topic, include it as a tag (e.g., "设计决策", "编码", "测试", "部署", "bug修复").
+
+### PREFERENCE (scope "public", category "preferences")
+- User's personality traits, communication style, coding preferences, tool choices, workflow habits.
+- These describe WHO the user is, not what they're currently working on.
+- Examples: "Prefers concise communication", "Likes dark themes", "Values direct feedback"
+- **IMPORTANT**: Do NOT include project-specific technical decisions here — those are WORK.
 
 ### NOISE → SKIP
-- Casual small talk with no lasting value ("今天天气不错")
+- Casual small talk with no lasting value
 - Tool/engine outputs, build logs, compress results
 - AI assistant's internal reasoning or status reports
 - Greetings, filler, meta-discussion about the memory system
-- Trivial personal details with no lasting significance
 
 ## ABSOLUTE RULES
 
@@ -728,38 +732,64 @@ For each topic, classify and handle accordingly:
 
 ### Rule 2: Privacy Detection (MANDATORY)
 - If a fact contains sensitive/private content → add tag "私密" AND set scope to "private".
-- Sensitive: passwords, API keys, tokens, server IPs, credentials, personal secrets.
 
 ### Rule 3: Persona Rule (CRITICAL)
 - NEVER refer to the user as "用户" or "你" in the summary.
-- Write as direct, factual statements: "Prefers dark mode", "Works at Stripe".
+- Write as direct, factual statements.
 
-## CATEGORY CLASSIFICATION
-Use ONLY these 6 valid values:
-- **profile**: Biographical/identity information (job, company, role, background)
-- **preferences**: Likes, dislikes, tool choices, style preferences, habits
-- **entities**: Persistent nouns (projects, tools, people, orgs) and their states
-- **events**: Things that happened — milestones, incidents, decisions made
-- **cases**: Problem→solution pairs, debugging stories, how-tos
-- **patterns**: Reusable processes, workflows, conventions, templates
-
-## MARKDOWN FORMAT (MANDATORY)
-- Use ## headers to organize sections
-- Use - bullet lists for enumerations
-- Use **bold** for key terms, file paths, function names
-- Use `backticks` for code references
+## CATEGORY CLASSIFICATION (for WORK topics)
+Use ONLY these 6 valid values for category:
+- **profile**: Biographical/identity information
+- **preferences**: Likes, dislikes, tool choices, style preferences
+- **entities**: Persistent nouns (projects, tools, people, orgs)
+- **events**: Things that happened — milestones, incidents, decisions
+- **cases**: Problem→solution pairs, debugging stories
+- **patterns**: Reusable processes, workflows, conventions
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON array. Each element:
-{ "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "category": string }
+{
+  "topic": string,
+  "summary": string,
+  "tags": string[],
+  "scope": "public"|"private",
+  "category": string,
+  "memory_type": "EMOTIONAL"|"WORK"|"PREFERENCE"
+}
 
-- "topic": A short title for this topic (1 sentence).
-- "summary": The full content. Group related information into one entry. Use Markdown.
-- "tags": Relevant tags. Always include "session_compress".
-- "scope": "public" for work content, "private" for emotional/intimate content.
-- "category": One of the 6 valid category values above.
+- "topic": Short title (1 sentence).
+- "summary": Full content. Use Markdown.
+- "tags": Relevant tags + ALWAYS "session_compress".
+- "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
+- "category": For EMOTIONAL always "profile", for WORK use 6 categories above, for PREFERENCE always "preferences".
+- "memory_type": The classification label.
 
-Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable from the user.
+Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
+"##;
+
+const PREFERENCE_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a user preference extraction engine. Analyze the conversation and extract ONLY genuine user preferences, personality traits, and lasting characteristics.
+
+## WHAT TO EXTRACT
+- Communication style (e.g., "prefers concise answers", "likes detailed explanations")
+- Technical preferences (e.g., "prefers dark mode", "uses vim keybindings")
+- Personality traits (e.g., "perfectionist about code quality", "values direct feedback")
+- Workflow habits (e.g., "works late at night", "prefers incremental commits")
+
+## WHAT NOT TO EXTRACT
+- Project-specific technical decisions (those are WORK memories)
+- Temporary states ("tired today", "busy this week")
+- Tool outputs, build results, AI analyses
+- Casual conversation with no lasting preference signal
+
+## OUTPUT FORMAT
+Return ONLY valid JSON array. Each element:
+{
+  "preference": string,
+  "confidence": number,
+  "category": string
+}
+
+Return [] if no clear preferences found.
 "##;
 
 /// Build the session extract prompt.

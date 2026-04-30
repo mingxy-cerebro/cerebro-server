@@ -279,6 +279,7 @@ impl LanceStore {
             Field::new("tier_history", DataType::Utf8, true),
             Field::new("cluster_id", DataType::Utf8, true),
             Field::new("is_cluster_anchor", DataType::Boolean, true),
+            Field::new("metadata", DataType::Utf8, true),
         ]))
     }
 
@@ -689,6 +690,7 @@ impl LanceStore {
             tier_history: get_opt_str("tier_history")?,
             cluster_id: get_opt_str("cluster_id")?,
             is_cluster_anchor: get_bool_or("is_cluster_anchor", false),
+            metadata: None,
         })
     }
 
@@ -716,6 +718,30 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("list all query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+        Ok(memories)
+    }
+
+    pub async fn find_memories_by_session_id(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, OmemError> {
+        let table = self.open_table().await?;
+        let filter = format!("session_id = '{}'", escape_sql(session_id));
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .limit(limit)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("find_memories_by_session_id query failed: {e}")))?
             .try_collect()
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;

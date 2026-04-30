@@ -280,7 +280,7 @@ impl IngestPipeline {
                                         match embed.embed(&[mem.content.clone()]).await {
                                             Ok(vectors) => {
                                                 if let Some(vector) = vectors.first() {
-                                                    match cluster_manager.create_cluster(mem, vector).await {
+                                                    match cluster_manager.create_cluster(mem, vector, mem.tags.clone()).await {
                                                         Ok(cluster) => {
                                                             // 回写 memory.cluster_id，否则召回时聚合器找不到簇关系
                                                             if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {

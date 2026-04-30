@@ -16,6 +16,7 @@ pub struct BackgroundClusterer {
     event_bus: Option<Arc<EventBus>>,
     scheduler_control: Option<SharedSchedulerControl>,
     tenant_id: String,
+    clustering_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl BackgroundClusterer {
@@ -32,6 +33,7 @@ impl BackgroundClusterer {
             event_bus: None,
             scheduler_control: None,
             tenant_id: String::new(),
+            clustering_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -67,6 +69,19 @@ impl BackgroundClusterer {
     }
 
     pub async fn cluster_global_kmeans(&self) -> Result<ClusterStats, OmemError> {
+        // 互斥锁：防止scheduler和手动触发并发跑K-Means
+        let lock = self.clustering_lock.try_lock();
+        if lock.is_err() {
+            info!("K-Means clustering already running, skipping duplicate");
+            return Ok(ClusterStats {
+                processed: 0,
+                assigned_to_existing: 0,
+                created_new_clusters: 0,
+                errors: 0,
+            });
+        }
+        let _guard = lock.unwrap();
+
         info!("Starting global K-Means clustering");
 
         self.emit("cluster.stage", serde_json::json!({
@@ -152,7 +167,7 @@ impl BackgroundClusterer {
             };
             let anchor_vector = &vectors[anchor_idx];
 
-            let cluster = match self.cluster_manager.create_cluster(anchor_memory, anchor_vector).await {
+            let cluster = match self.cluster_manager.create_cluster(anchor_memory, anchor_vector, anchor_memory.tags.clone()).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(memory_id = %anchor_id, error = %e, "Failed to create cluster");

@@ -15,6 +15,7 @@ pub struct ClusterAssigner {
     cluster_store: Arc<ClusterStore>,
     embed: Arc<dyn EmbedService>,
     llm: Option<Arc<dyn LlmService>>,
+    lance_store: Option<Arc<crate::store::lancedb::LanceStore>>,
     similarity_threshold: f32,
     auto_merge_threshold: f32,
     candidate_count: usize,
@@ -44,6 +45,7 @@ impl ClusterAssigner {
             cluster_store,
             embed,
             llm: None,
+            lance_store: None,
             similarity_threshold: Self::get_env_threshold("OMEM_CLUSTER_SIMILARITY_THRESHOLD", DEFAULT_SIMILARITY_THRESHOLD),
             auto_merge_threshold: Self::get_env_threshold("OMEM_CLUSTER_AUTO_MERGE_THRESHOLD", DEFAULT_AUTO_MERGE_THRESHOLD),
             candidate_count: std::env::var("OMEM_CLUSTER_CANDIDATE_COUNT")
@@ -68,7 +70,37 @@ impl ClusterAssigner {
         self
     }
 
+    pub fn with_lance_store(mut self, store: Option<Arc<crate::store::lancedb::LanceStore>>) -> Self {
+        self.lance_store = store;
+        self
+    }
+
     pub async fn assign(&self, memory: &Memory) -> Result<AssignResult, OmemError> {
+        if let Some(ref session_id) = memory.session_id {
+            if !session_id.is_empty() {
+                if let Some(ref lance_store) = self.lance_store {
+                    match lance_store.find_memories_by_session_id(session_id, 5).await {
+                        Ok(session_memories) => {
+                            if let Some(first_memory) = session_memories.first() {
+                                if let Some(ref cluster_id) = first_memory.cluster_id {
+                                    if !cluster_id.is_empty() {
+                                        return Ok(AssignResult {
+                                            action: AssignAction::AutoAssign,
+                                            cluster_id: Some(cluster_id.clone()),
+                                            confidence: 1.0,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, session_id, "session_id优先匹配失败，继续向量搜索");
+                        }
+                    }
+                }
+            }
+        }
+
         if memory.cluster_id.is_some() {
             return Ok(AssignResult {
                 cluster_id: memory.cluster_id.clone(),

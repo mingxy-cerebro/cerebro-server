@@ -19,6 +19,13 @@ pub struct OmemConfig {
     pub recall_llm_api_key: String,
     pub recall_llm_model: String,
     pub recall_llm_base_url: String,
+
+    // Cluster LLM (cheaper model for clustering/profile tasks, e.g. Qwen3.5-4B via SiliconFlow)
+    pub cluster_llm_provider: String,
+    pub cluster_llm_api_key: String,
+    pub cluster_llm_model: String,
+    pub cluster_llm_base_url: String,
+
     pub scheduler_interval_secs: u64,
     pub scheduler_run_on_start: bool,
 
@@ -77,6 +84,10 @@ impl Default for OmemConfig {
             recall_llm_api_key: String::new(),
             recall_llm_model: String::new(),
             recall_llm_base_url: String::new(),
+            cluster_llm_provider: String::new(),
+            cluster_llm_api_key: String::new(),
+            cluster_llm_model: String::new(),
+            cluster_llm_base_url: String::new(),
             scheduler_interval_secs: 21600,
             scheduler_run_on_start: true,
             should_recall_min_interval_secs: 30,
@@ -117,6 +128,10 @@ impl OmemConfig {
             recall_llm_api_key: env::var("OMEM_RECALL_LLM_API_KEY").unwrap_or(defaults.recall_llm_api_key),
             recall_llm_model: env::var("OMEM_RECALL_LLM_MODEL").unwrap_or(defaults.recall_llm_model),
             recall_llm_base_url: env::var("OMEM_RECALL_LLM_BASE_URL").unwrap_or(defaults.recall_llm_base_url),
+            cluster_llm_provider: env::var("OMEM_CLUSTER_LLM_PROVIDER").unwrap_or(defaults.cluster_llm_provider),
+            cluster_llm_api_key: env::var("OMEM_CLUSTER_LLM_API_KEY").unwrap_or(defaults.cluster_llm_api_key),
+            cluster_llm_model: env::var("OMEM_CLUSTER_LLM_MODEL").unwrap_or(defaults.cluster_llm_model),
+            cluster_llm_base_url: env::var("OMEM_CLUSTER_LLM_BASE_URL").unwrap_or(defaults.cluster_llm_base_url),
             scheduler_interval_secs: env::var("OMEM_SCHEDULER_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -47,6 +47,7 @@ impl ClusterManager {
         &self,
         memory: &Memory,
         anchor_vector: &[f32],
+        tags: Vec<String>,
     ) -> Result<MemoryCluster, OmemError> {
         let dedup_threshold = Self::get_dedup_threshold();
 
@@ -106,7 +107,7 @@ impl ClusterManager {
             }
         }
 
-        let cluster = MemoryCluster::new(
+        let mut cluster = MemoryCluster::new(
             memory.tenant_id.clone(),
             memory.space_id.clone(),
             title,
@@ -114,6 +115,7 @@ impl ClusterManager {
             memory.category.clone(),
             memory.id.clone(),
         );
+        cluster.tags = tags;
 
         self.cluster_store.create(&cluster, anchor_vector).await?;
 
