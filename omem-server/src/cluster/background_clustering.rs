@@ -161,12 +161,41 @@ impl BackgroundClusterer {
 
             stats.created_new_clusters += 1;
 
+            let anchor_preview: String = anchor_memory.content.chars().take(40).collect();
+            self.emit("cluster.memory_progress", serde_json::json!({
+                "memory_id": anchor_id,
+                "content_preview": anchor_preview,
+                "stage": "creating_cluster",
+                "action": "create_new",
+                "cluster_id": cluster.id,
+                "processed": stats.processed,
+                "total": total,
+                "pct": (stats.processed as f64 / total as f64 * 100.0).round() as u32,
+            }));
+
             for &member_idx in &member_indices {
                 let member_id = &ids[member_idx];
                 if member_id == anchor_id {
                     stats.processed += 1;
                     continue;
                 }
+
+                let content_preview: String = memory_map
+                    .get(member_id)
+                    .map(|m| m.content.chars().take(40).collect())
+                    .unwrap_or_default();
+
+                self.emit("cluster.memory_progress", serde_json::json!({
+                    "memory_id": member_id,
+                    "content_preview": content_preview,
+                    "stage": "assigning",
+                    "action": "assign_existing",
+                    "cluster_id": cluster.id,
+                    "processed": stats.processed + 1,
+                    "total": total,
+                    "pct": ((stats.processed + 1) as f64 / total as f64 * 100.0).round() as u32,
+                }));
+
                 if let Err(e) = self.cluster_manager.assign_to_cluster(
                     member_id,
                     &cluster.id,
@@ -178,6 +207,8 @@ impl BackgroundClusterer {
                     stats.assigned_to_existing += 1;
                     stats.processed += 1;
                 }
+
+                tokio::task::yield_now().await;
             }
         }
 
