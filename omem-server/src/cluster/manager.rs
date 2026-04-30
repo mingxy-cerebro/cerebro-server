@@ -28,6 +28,10 @@ impl ClusterManager {
         }
     }
 
+    pub fn cluster_store(&self) -> &Arc<ClusterStore> {
+        &self.cluster_store
+    }
+
     fn get_dedup_threshold() -> f32 {
         std::env::var("OMEM_CLUSTER_DEDUP_THRESHOLD")
             .ok()

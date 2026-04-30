@@ -803,6 +803,52 @@ impl LanceStore {
         Ok(Some(float_arr.values().to_vec()))
     }
 
+    pub async fn get_all_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, OmemError> {
+        let table = self.open_table().await?;
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .select(Select::columns(&["id", "vector"]))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("get_all_vectors query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut results = Vec::new();
+        for batch in &batches {
+            let id_col = batch
+                .column_by_name("id")
+                .ok_or_else(|| OmemError::Storage("missing id column".to_string()))?;
+            let id_arr = id_col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| OmemError::Storage("id column is not StringArray".to_string()))?;
+
+            let vec_col = batch
+                .column_by_name("vector")
+                .ok_or_else(|| OmemError::Storage("missing vector column".to_string()))?;
+            let fsl = vec_col
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .ok_or_else(|| OmemError::Storage("vector column is not FixedSizeList".to_string()))?;
+
+            for row in 0..batch.num_rows() {
+                if fsl.is_null(row) {
+                    continue;
+                }
+                let id = id_arr.value(row).to_string();
+                let inner = fsl.value(row);
+                let float_arr = inner
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or_else(|| OmemError::Storage("vector inner is not Float32".to_string()))?;
+                results.push((id, float_arr.values().to_vec()));
+            }
+        }
+        Ok(results)
+    }
+
     pub async fn update(&self, memory: &Memory, vector: Option<&[f32]>) -> Result<(), OmemError> {
         // Auto-increment version on every update
         let mut mem = memory.clone();
