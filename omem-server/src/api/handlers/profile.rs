@@ -25,7 +25,7 @@ pub async fn get_profile(
         .store_manager
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
-    let profile_service = ProfileService::new(store).with_llm(state.cluster_llm.clone());
+    let profile_service = ProfileService::new(store).with_llm(state.llm.clone());
 
     let query = if params.q.is_empty() {
         None

@@ -522,6 +522,7 @@ impl LanceStore {
                 Arc::new(StringArray::from(vec![option_str(&memory.tier_history)])),
                 Arc::new(StringArray::from(vec![option_str(&memory.cluster_id)])),
                 Arc::new(arrow_array::BooleanArray::from(vec![memory.is_cluster_anchor])),
+                Arc::new(StringArray::from(vec![memory.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok())])),
             ],
         )
         .map_err(|e| OmemError::Storage(format!("failed to build RecordBatch: {e}")))
@@ -690,7 +691,7 @@ impl LanceStore {
             tier_history: get_opt_str("tier_history")?,
             cluster_id: get_opt_str("cluster_id")?,
             is_cluster_anchor: get_bool_or("is_cluster_anchor", false),
-            metadata: None,
+            metadata: get_opt_str("metadata")?.and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
