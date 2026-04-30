@@ -24,12 +24,6 @@ use crate::store::StoreManager;
 // ── Request / Response DTOs ──────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct ClusterSummaryResponse {
-    title: String,
-    summary: String,
-}
-
-#[derive(Deserialize)]
 pub struct CreateMemoryBody {
     // Message-based ingest
     pub messages: Option<Vec<MessageDto>>,
@@ -1344,6 +1338,10 @@ pub async fn session_ingest(
         let _session_guard = lock_arc.lock().await;
         let cluster_store = state.cluster_store.clone();
         let llm_for_cluster = Some(state.llm.clone());
+        let cluster_assigner = crate::cluster::assigner::ClusterAssigner::new(
+            cluster_store.clone(),
+            state.embed.clone(),
+        ).with_llm(state.llm.clone());
 
         let store = match state
             .store_manager
@@ -1507,60 +1505,78 @@ pub async fn session_ingest(
             created_memories.push((memory.clone(), vector.clone()));
         }
 
-        // ── Cluster归簇：同session记忆归入同一cluster ──
+        // ── Cluster语义归簇：逐条匹配已有cluster ──
         if !created_memories.is_empty() {
             let cluster_manager = crate::cluster::manager::ClusterManager::new(
                 cluster_store.clone(),
                 llm_for_cluster.clone(),
             );
 
-            if let Some((anchor_mem, Some(anchor_vec))) = created_memories.iter().find(|(_, v)| v.is_some()) {
-                match cluster_manager.create_cluster(anchor_mem, anchor_vec).await {
-                    Ok(cluster) => {
-                        // Assign anchor
-                        if let Err(e) = store.update_memory_cluster_id(&anchor_mem.id, Some(&cluster.id), true).await {
-                            tracing::warn!(error = %e, "session_ingest: failed to set anchor cluster_id");
-                        }
-                        // Assign all others
-                        for (mem, _) in &created_memories {
-                            if mem.id != anchor_mem.id {
-                                if let Err(e) = store.update_memory_cluster_id(&mem.id, Some(&cluster.id), false).await {
-                                    tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to set cluster_id");
+            for (mem, vector) in &created_memories {
+                match cluster_assigner.assign(mem).await {
+                    Ok(result) => {
+                        match result.action {
+                            crate::cluster::assigner::AssignAction::AutoAssign => {
+                                if let Some(ref cid) = result.cluster_id {
+                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
+                                        Ok(_) => {
+                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: assigned to existing cluster");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to assign to cluster");
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        tracing::info!(cluster_id = %cluster.id, count = created_memories.len(), "session_ingest: session memories clustered");
-
-                        if created_memories.len() >= 2 {
-                            if let Some(ref llm) = llm_for_cluster {
-                                let member_contents: Vec<String> = created_memories
-                                    .iter()
-                                    .map(|(m, _)| m.content.chars().take(500).collect())
-                                    .collect();
-                                let (sys, usr) = crate::ingest::prompts::build_cluster_summary_prompt(
-                                    &cluster.title,
-                                    &cluster.summary,
-                                    &member_contents,
-                                );
-                                match crate::llm::complete_json::<ClusterSummaryResponse>(llm.as_ref(), &sys, &usr).await {
-                                    Ok(resp) => {
-                                        if let Err(e) = cluster_store.update_summary(&cluster.id, &resp.summary).await {
-                                            tracing::warn!(error = %e, "session_ingest: failed to update cluster summary");
+                            crate::cluster::assigner::AssignAction::CreateNew => {
+                                // 用已有的vector创建cluster（避免重复embed）
+                                if let Some(vec) = vector {
+                                    match cluster_manager.create_cluster(mem, vec).await {
+                                        Ok(cluster) => {
+                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
+                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to new cluster");
+                                            } else {
+                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: created new cluster");
+                                            }
                                         }
-                                        if let Err(e) = cluster_store.update_title(&cluster.id, &resp.title).await {
-                                            tracing::warn!(error = %e, "session_ingest: failed to update cluster title");
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to create cluster");
                                         }
-                                        tracing::info!(cluster_id = %cluster.id, title = %resp.title, "session_ingest: regenerated cluster summary");
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "session_ingest: cluster summary regeneration failed, keeping initial");
+                                } else {
+                                    tracing::warn!(memory_id = %mem.id, "session_ingest: no vector available for cluster creation");
+                                }
+                            }
+                            crate::cluster::assigner::AssignAction::LlmJudge => {
+                                // LLM裁决：有cluster_id则归入，无则创建新cluster
+                                if let Some(ref cid) = result.cluster_id {
+                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
+                                        Ok(_) => {
+                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: LLM-judged assignment to existing cluster");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed LLM-judged assignment");
+                                        }
+                                    }
+                                } else if let Some(vec) = vector {
+                                    match cluster_manager.create_cluster(mem, vec).await {
+                                        Ok(cluster) => {
+                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
+                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to LLM-judged new cluster");
+                                            } else {
+                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: LLM-judged new cluster created");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: LLM-judged cluster creation failed");
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "session_ingest: cluster creation failed, memories stored without cluster");
+                        tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: cluster assignment failed");
                     }
                 }
             }
