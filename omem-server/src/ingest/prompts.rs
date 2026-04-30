@@ -499,6 +499,34 @@ pub fn build_cluster_initial_summary_prompt(
     (CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT.to_string(), user)
 }
 
+/// Profile static_facts 过滤 prompt —— 从候选记忆中识别真正的用户画像信息
+pub const PROFILE_FILTER_SYSTEM_PROMPT: &str = r#"你是一个用户画像分析专家。你的任务是从给定的记忆条目中，筛选出**真正的用户个人画像信息**。
+
+## 画像信息（保留）
+- 用户的性格特征、身份描述、个人习惯
+- 用户明确表达的偏好（喜欢/不喜欢什么、沟通风格、工作风格）
+- 用户的长期兴趣和价值观
+- 用户的技术栈偏好（长期使用的技术，而非临时任务中的工具）
+- 用户的人际关系描述
+
+## 非画像信息（排除）
+- 临时工作指令或任务描述
+- 技术实现建议或方案讨论
+- 工具使用记录、操作步骤
+- 项目进度更新、bug修复记录
+- agent委派或执行反馈
+- 系统部署状态信息
+- 临时对话片段
+
+## 输出格式
+返回JSON：
+{
+  "facts": ["保留的画像条目1", "保留的画像条目2", ...]
+}
+
+如果没有任何真正的画像信息，返回：{"facts": []}
+只保留画像信息，原样返回文本内容。"#;
+
 /// Returns (system_prompt, user_prompt) for merging multiple memories into one.
 pub fn build_merge_prompt(memories: &[Memory]) -> (String, String) {
     let system = MERGE_SYSTEM_PROMPT.to_string();

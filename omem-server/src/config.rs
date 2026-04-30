@@ -83,9 +83,9 @@ impl Default for OmemConfig {
             admission_preset: "high_recall".to_string(),
             admission_reject_threshold: None,
             admission_admit_threshold: None,
-            cluster_similarity_threshold: 0.75,
+            cluster_similarity_threshold: 0.55,
             cluster_auto_merge_threshold: 0.90,
-            cluster_candidate_count: 5,
+            cluster_candidate_count: 15,
             cluster_llm_judge_enabled: true,
         }
     }

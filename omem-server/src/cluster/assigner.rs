@@ -7,9 +7,9 @@ use crate::domain::memory::Memory;
 use crate::embed::EmbedService;
 use crate::llm::{complete_json, LlmService};
 
-const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.75;
+const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.55;
 const DEFAULT_AUTO_MERGE_THRESHOLD: f32 = 0.90;
-const DEFAULT_CANDIDATE_COUNT: usize = 5;
+const DEFAULT_CANDIDATE_COUNT: usize = 15;
 
 pub struct ClusterAssigner {
     cluster_store: Arc<ClusterStore>,

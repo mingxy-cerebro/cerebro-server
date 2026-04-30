@@ -1,13 +1,21 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::domain::profile::UserProfile;
+use crate::ingest::prompts::PROFILE_FILTER_SYSTEM_PROMPT;
 use crate::lifecycle::decay::parse_datetime;
+use crate::llm::LlmService;
 use crate::retrieve::SearchResult;
 use crate::store::lancedb::{LanceStore, ListFilter};
+
+#[derive(Deserialize)]
+struct ProfileFilterResponse {
+    facts: Vec<String>,
+}
 
 pub struct ProfileResponse {
     pub profile: UserProfile,
@@ -16,11 +24,17 @@ pub struct ProfileResponse {
 
 pub struct ProfileService {
     store: Arc<LanceStore>,
+    llm: Option<Arc<dyn LlmService>>,
 }
 
 impl ProfileService {
     pub fn new(store: Arc<LanceStore>) -> Self {
-        Self { store }
+        Self { store, llm: None }
+    }
+
+    pub fn with_llm(mut self, llm: Arc<dyn LlmService>) -> Self {
+        self.llm = Some(llm);
+        self
     }
 
     pub async fn get_profile(&self, query: Option<&str>) -> Result<ProfileResponse, OmemError> {
@@ -53,6 +67,37 @@ impl ProfileService {
             .map(|m| sanitize_profile_content(&m.content))
             .filter(|s| !s.is_empty())
             .collect();
+
+        // LLM过滤：去除非画像内容
+        let static_facts = if !static_facts.is_empty() {
+            if let Some(ref llm) = self.llm {
+                match crate::llm::complete_json::<ProfileFilterResponse>(
+                    &**llm,
+                    PROFILE_FILTER_SYSTEM_PROMPT,
+                    &format!(
+                        "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
+                        static_facts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| format!("{}. {}", i + 1, f))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                )
+                .await
+                {
+                    Ok(resp) => resp.facts,
+                    Err(e) => {
+                        tracing::warn!("Profile LLM filter failed, using raw facts: {}", e);
+                        static_facts
+                    }
+                }
+            } else {
+                static_facts
+            }
+        } else {
+            static_facts
+        };
 
         let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
         let dynamic_context: Vec<String> = all_memories
