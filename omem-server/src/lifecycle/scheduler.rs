@@ -175,6 +175,9 @@ impl LifecycleScheduler {
             warn!(error = %e, "scheduler_cluster_optimize_failed");
         }
 
+        let session_optimized = self.store_manager.optimize_session_stores().await;
+        info!(session_stores_optimized = session_optimized, "scheduler_session_optimize_done");
+
         self.emit("lifecycle.complete", "system", json!({"stores": stores.len()}));
 
         Ok(())

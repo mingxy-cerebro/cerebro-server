@@ -5,7 +5,7 @@ use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::Table;
+use lancedb::table::{CompactionOptions, OptimizeAction, Table};
 use lancedb::Connection;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -57,6 +57,29 @@ impl SessionStore {
             OmemError::Storage(format!("failed to connect to LanceDB for sessions: {e}"))
         })?;
         Ok(Self { db })
+    }
+
+    pub async fn optimize(&self) -> Result<(), OmemError> {
+        let table = self.open_table().await?;
+        table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("session compact failed: {e}")))?;
+        table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(
+                    chrono::Duration::try_minutes(0)
+                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                ),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("session prune failed: {e}")))?;
+        Ok(())
     }
 
     pub async fn init_table(&self) -> Result<(), OmemError> {

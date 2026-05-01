@@ -224,6 +224,36 @@ impl StoreManager {
         }
         optimized
     }
+
+    pub async fn optimize_session_stores(&self) -> usize {
+        let personal_dir = format!("{}/personal", self.base_uri);
+        let Ok(entries) = std::fs::read_dir(&personal_dir) else {
+            tracing::warn!("cannot read personal dir for session optimization");
+            return 0;
+        };
+
+        let mut optimized = 0usize;
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('_') || name.starts_with('.') {
+                continue;
+            }
+            match self.get_session_store(&name).await {
+                Ok(store) => match store.optimize().await {
+                    Ok(()) => {
+                        optimized += 1;
+                        tracing::info!(tenant_id = %name, "session_optimize_ok");
+                    }
+                    Err(e) => tracing::warn!(tenant_id = %name, error = %e, "session_optimize_failed"),
+                },
+                Err(e) => tracing::warn!(tenant_id = %name, error = %e, "session_store_open_failed"),
+            }
+        }
+        optimized
+    }
 }
 
 #[cfg(test)]
