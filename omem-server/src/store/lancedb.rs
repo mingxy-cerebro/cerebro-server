@@ -773,6 +773,7 @@ impl LanceStore {
             }
         }
 
+        self.maybe_optimize().await;
         Ok(())
     }
 
@@ -954,6 +955,7 @@ impl LanceStore {
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
         }
+        self.maybe_optimize().await;
         Ok(())
     }
 
@@ -999,6 +1001,7 @@ impl LanceStore {
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
             .map_err(|e| OmemError::Storage(format!("hard_delete failed: {e}")))?;
+        self.maybe_optimize().await;
         Ok(())
     }
 
@@ -1557,6 +1560,31 @@ impl LanceStore {
         }
 
         Ok(())
+    }
+
+    /// Lazy compact: check version count after write ops, auto-compact when > threshold.
+    /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
+    pub async fn maybe_optimize(&self) {
+        let table = match self.open_table().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "maybe_optimize: failed to open table");
+                return;
+            }
+        };
+
+        let version: u64 = table.version().await.unwrap_or(0);
+        const COMPACT_THRESHOLD: u64 = 50;
+
+        if version <= COMPACT_THRESHOLD {
+            return;
+        }
+
+        tracing::info!(%version, threshold = COMPACT_THRESHOLD, "lazy_compact: version count exceeded threshold, running optimize");
+
+        if let Err(e) = self.optimize().await {
+            tracing::warn!(error = %e, "lazy_compact: optimize failed");
+        }
     }
 }
 
