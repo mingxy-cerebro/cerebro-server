@@ -71,24 +71,28 @@ impl ProfileService {
         // LLM过滤：去除非画像内容
         let static_facts = if !static_facts.is_empty() {
             if let Some(ref llm) = self.llm {
-                match crate::llm::complete_json::<ProfileFilterResponse>(
+                let user_prompt = format!(
+                    "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
+                    static_facts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| format!("{}. {}", i + 1, f))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                let filter_fut = crate::llm::complete_json::<ProfileFilterResponse>(
                     &**llm,
                     PROFILE_FILTER_SYSTEM_PROMPT,
-                    &format!(
-                        "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
-                        static_facts
-                            .iter()
-                            .enumerate()
-                            .map(|(i, f)| format!("{}. {}", i + 1, f))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    ),
-                )
-                .await
-                {
-                    Ok(resp) => resp.facts,
-                    Err(e) => {
+                    &user_prompt,
+                );
+                match tokio::time::timeout(std::time::Duration::from_secs(3), filter_fut).await {
+                    Ok(Ok(resp)) => resp.facts,
+                    Ok(Err(e)) => {
                         tracing::warn!("Profile LLM filter failed, using raw facts: {}", e);
+                        static_facts
+                    }
+                    Err(_) => {
+                        tracing::warn!("Profile LLM filter timed out (3s), using raw facts");
                         static_facts
                     }
                 }
