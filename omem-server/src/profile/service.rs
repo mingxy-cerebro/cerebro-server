@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use serde::Deserialize;
+use tokio::sync::RwLock;
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
@@ -17,6 +19,14 @@ struct ProfileFilterResponse {
     facts: Vec<String>,
 }
 
+/// Cache TTL for profile responses (5 minutes)
+const PROFILE_CACHE_TTL_SECS: u64 = 300;
+
+struct CachedProfile {
+    profile: UserProfile,
+    cached_at: Instant,
+}
+
 pub struct ProfileResponse {
     pub profile: UserProfile,
     pub search_results: Option<Vec<SearchResult>>,
@@ -25,11 +35,16 @@ pub struct ProfileResponse {
 pub struct ProfileService {
     store: Arc<LanceStore>,
     llm: Option<Arc<dyn LlmService>>,
+    cache: RwLock<Option<CachedProfile>>,
 }
 
 impl ProfileService {
     pub fn new(store: Arc<LanceStore>) -> Self {
-        Self { store, llm: None }
+        Self {
+            store,
+            llm: None,
+            cache: RwLock::new(None),
+        }
     }
 
     pub fn with_llm(mut self, llm: Arc<dyn LlmService>) -> Self {
@@ -38,6 +53,18 @@ impl ProfileService {
     }
 
     pub async fn get_profile(&self, query: Option<&str>) -> Result<ProfileResponse, OmemError> {
+        if query.is_none() {
+            let cache = self.cache.read().await;
+            if let Some(ref cached) = *cache {
+                if cached.cached_at.elapsed().as_secs() < PROFILE_CACHE_TTL_SECS {
+                    return Ok(ProfileResponse {
+                        profile: cached.profile.clone(),
+                        search_results: None,
+                    });
+                }
+            }
+        }
+
         let filter = ListFilter {
             state: Some("active".to_string()),
             sort: "created_at".to_string(),
@@ -142,10 +169,20 @@ impl ProfileService {
             None => None,
         };
 
-        Ok(ProfileResponse {
+        let response = ProfileResponse {
             profile,
             search_results,
-        })
+        };
+
+        if query.is_none() {
+            let mut cache = self.cache.write().await;
+            *cache = Some(CachedProfile {
+                profile: response.profile.clone(),
+                cached_at: Instant::now(),
+            });
+        }
+
+        Ok(response)
     }
 }
 

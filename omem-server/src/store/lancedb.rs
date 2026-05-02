@@ -1016,6 +1016,7 @@ impl LanceStore {
             .delete(&format!("id IN ({id_list})"))
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete_by_ids failed: {e}")))?;
+        self.maybe_optimize().await;
         Ok(ids.len())
     }
 
@@ -1418,6 +1419,7 @@ impl LanceStore {
             .delete(filter)
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete failed: {e}")))?;
+        self.maybe_optimize().await;
         Ok(count)
     }
 
