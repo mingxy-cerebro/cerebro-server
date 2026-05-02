@@ -132,7 +132,7 @@ impl ClusterManager {
         lance_store
             .update_memory_cluster_id(memory_id, Some(cluster_id), false)
             .await?;
-        let new_count = self.cluster_store.increment_member_count(cluster_id).await?;
+        let _new_count = self.cluster_store.increment_member_count(cluster_id).await?;
 
         debug!(memory_id, cluster_id, "assigned memory to cluster");
 

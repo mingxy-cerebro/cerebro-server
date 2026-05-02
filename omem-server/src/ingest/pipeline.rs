@@ -34,6 +34,7 @@ pub struct IngestPipeline {
     noise_filter: Arc<tokio::sync::Mutex<NoiseFilter>>,
     admission: Arc<AdmissionControl>,
     embed: Arc<dyn EmbedService>,
+    ingest_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl IngestPipeline {
@@ -66,7 +67,13 @@ impl IngestPipeline {
             noise_filter,
             admission,
             embed,
+            ingest_semaphore: None,
         })
+    }
+
+    pub fn with_ingest_semaphore(mut self, sem: Arc<tokio::sync::Semaphore>) -> Self {
+        self.ingest_semaphore = Some(sem);
+        self
     }
 
     pub async fn ingest(&self, request: IngestRequest) -> Result<IngestResponse, OmemError> {
@@ -129,8 +136,14 @@ impl IngestPipeline {
         let entity_context = request.entity_context.clone();
         let tenant_id = request.tenant_id.clone();
         let bg_task_id = task_id.clone();
+        let ingest_sem = self.ingest_semaphore.clone();
 
         tokio::spawn(async move {
+            let _permit = match ingest_sem {
+                Some(sem) => Some(sem.acquire_owned().await.expect("ingest semaphore")),
+                None => None,
+            };
+
             info!(task_id = %bg_task_id, message_count = selected.len(), "slow path: starting extraction");
 
             let sanitized: Vec<IngestMessage> = selected

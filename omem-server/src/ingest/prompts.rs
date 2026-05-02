@@ -767,6 +767,7 @@ Return ONLY valid JSON array. Each element:
 Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
 "##;
 
+#[allow(dead_code)]
 const PREFERENCE_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a user preference extraction engine. Analyze the conversation and extract ONLY genuine user preferences, personality traits, and lasting characteristics.
 
 ## WHAT TO EXTRACT

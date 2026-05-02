@@ -28,6 +28,9 @@ pub struct AppState {
     pub scheduler_control: SharedSchedulerControl,
     pub session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub reranker: Option<Reranker>,
+    /// Limits concurrent background ingest tasks (LLM extraction + reconciliation).
+    /// Prevents OOM under burst load. Default: 10.
+    pub ingest_semaphore: Arc<Semaphore>,
 }
 
 /// Map tenant_id to their personal Space ID.

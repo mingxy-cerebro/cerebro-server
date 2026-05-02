@@ -66,6 +66,8 @@ pub struct SearchQuery {
     pub check_stale: bool,
 }
 
+const MAX_SEARCH_LIMIT: usize = 1000;
+
 fn default_limit() -> usize {
     20
 }
@@ -202,7 +204,7 @@ pub async fn create_memory(
                 &state.config.admission_preset,
                 state.config.admission_reject_threshold,
                 state.config.admission_admit_threshold,
-            ).await?;
+            ).await?.with_ingest_semaphore(state.ingest_semaphore.clone());
 
         let response = ingest_pipeline.ingest(request).await?;
         return Ok((StatusCode::ACCEPTED, Json(serde_json::json!(response))).into_response());
@@ -300,6 +302,8 @@ pub async fn search_memories(
         ));
     }
 
+    let search_limit = params.limit.min(MAX_SEARCH_LIMIT);
+
     let vectors = state
         .embed
         .embed(std::slice::from_ref(&params.q))
@@ -325,7 +329,7 @@ pub async fn search_memories(
             query_vector,
             tenant_id: auth.tenant_id,
             scope_filter: params.scope,
-            limit: Some(params.limit),
+            limit: Some(search_limit),
             min_score: params.min_score,
             include_trace: params.include_trace,
             tags_filter: params
@@ -415,7 +419,7 @@ pub async fn search_memories(
         let query_vector = query_vector.clone();
         let tenant_id = auth.tenant_id.clone();
         let scope_filter = params.scope.clone();
-        let limit = params.limit;
+        let limit = search_limit;
         let min_score = params.min_score;
         let tags_filter = params.tags.as_ref().map(|t| {
             t.split(',')
@@ -483,7 +487,7 @@ pub async fn search_memories(
     }
 
     all_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    all_results.truncate(params.limit);
+    all_results.truncate(search_limit);
 
     let mut results: Vec<SearchResultDto> = all_results
         .into_iter()

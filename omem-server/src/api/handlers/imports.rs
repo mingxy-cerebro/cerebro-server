@@ -21,6 +21,8 @@ pub struct ListImportsQuery {
     pub limit: usize,
 }
 
+const MAX_IMPORT_FILE_SIZE: usize = 50 * 1024 * 1024; // 50MB, matches files.rs limit
+
 fn default_import_limit() -> usize {
     50
 }
@@ -112,6 +114,13 @@ pub async fn create_import(
     }
 
     let data = file_data.ok_or_else(|| OmemError::Validation("no 'file' field".to_string()))?;
+    if data.len() > MAX_IMPORT_FILE_SIZE {
+        return Err(OmemError::Validation(format!(
+            "file too large: {} bytes (max {} bytes)",
+            data.len(),
+            MAX_IMPORT_FILE_SIZE
+        )));
+    }
     let content = String::from_utf8(data)
         .map_err(|_| OmemError::Validation("not valid UTF-8".to_string()))?;
 

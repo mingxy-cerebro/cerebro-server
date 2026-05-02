@@ -82,7 +82,8 @@ mod tests {
             space_store,
             embed,
             llm: llm.clone(),
-            recall_llm: llm,
+            recall_llm: llm.clone(),
+            cluster_llm: llm,
             cluster_store,
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
@@ -91,6 +92,7 @@ mod tests {
             scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
             session_locks: Arc::new(dashmap::DashMap::new()),
             reranker: None,
+            ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
         });
 
         (build_router(state), dir)
