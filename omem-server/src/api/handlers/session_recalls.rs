@@ -352,11 +352,10 @@ pub async fn should_recall(
 
     let confidence = memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32;
 
-    for recalled in &memories {
-        if let Ok(Some(mut mem)) = store.get_by_id(&recalled.memory.id).await {
-            mem.access_count += 1;
-            mem.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
-            let _ = store.update(&mem, None).await;
+    let recalled_ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
+    if !recalled_ids.is_empty() {
+        if let Err(e) = store.batch_bump_access_count(&recalled_ids).await {
+            tracing::warn!(error = %e, "failed_to_batch_bump_access_count_after_recall");
         }
     }
 

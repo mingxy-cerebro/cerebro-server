@@ -19,6 +19,7 @@ omem-server-source/
       retrieve/         # Hybrid retrieval with reranking
       multimodal/       # Code/PDF/image/video processing
       lifecycle/        # Weibull decay, auto-forgetting, tier management
+      cluster/          # Memory clustering (k-means, auto-grouping)
       profile/          # User profile auto-generation
       connectors/       # GitHub integration
   plugins/
@@ -43,9 +44,11 @@ Concurrency limits: import semaphore (3), reconcile semaphore (1)
 ## Module Reference
 
 ### api/ — HTTP Layer
-- `router.rs`, `server.rs`, `middleware/` — Route definitions, AppState, auth middleware
+- `router.rs`, `server.rs`, `middleware/` — Route definitions, AppState (15 fields), auth middleware
 - `handlers/` — 12 handler files: files, github, imports, memory, mod, profile, session_recalls, sharing, spaces, stats, tenant, vault — 48+ REST endpoints
-- `error.rs` — Unified error response types
+- `error.rs` — Unified error response types (`OmemError` enum with thiserror)
+- `event_bus.rs` — Event bus for lifecycle notifications
+- `scheduler_control.rs` — Manual lifecycle trigger control
 
 ### ingest/ — 11-Stage Ingestion Pipeline
 - `pipeline.rs` — Orchestrator for the full pipeline
@@ -109,6 +112,22 @@ Concurrency limits: import semaphore (3), reconcile semaphore (1)
 ### connectors/ — External Integrations
 - `github.rs` — GitHub API integration
 
+### cluster/ — Memory Clustering
+- `mod.rs` — Module exports
+- `manager.rs` — ClusterManager: orchestrates clustering operations
+- `background_clustering.rs` — Background clustering task runner
+- `cluster_store.rs` — ClusterStore: cluster metadata persistence (LanceDB)
+- `kmeans.rs` — K-means clustering algorithm
+- `assigner.rs` — Memory-to-cluster assignment logic
+- `aggregator.rs` — Cluster summary and aggregation
+
+## Stats
+
+- **92 Rust source files**, ~28,927 lines of production code
+- **373 inline tests** across 49 files
+- **13 top-level modules** in omem-server/src/
+- **4 TypeScript plugins** in plugins/
+
 ## Plugins (TypeScript)
 
 ### opencode/ (9 source files)
@@ -122,6 +141,18 @@ MCP server implementation. Files: client, index, tools.
 
 ### claude-code/
 Claude Code hooks + skills integration (no src/ — uses hooks/ and skills/ directories).
+
+## Hierarchical AGENTS.md
+
+This project uses a hierarchical knowledge base:
+
+| Location | Scope |
+|----------|-------|
+| `./AGENTS.md` (this file) | Project overview, all modules, config, deployment |
+| `omem-server/src/AGENTS.md` | Rust source: architecture, patterns, key types, conventions |
+| `omem-server/src/api/AGENTS.md` | HTTP layer: routes, handlers, middleware, AppState |
+| `omem-server/src/ingest/AGENTS.md` | 11-stage ingestion pipeline: flow, stages, LLM usage |
+| `plugins/AGENTS.md` | TypeScript plugins: structure, patterns, build |
 
 ## Configuration
 

@@ -366,28 +366,18 @@ pub async fn search_memories(
 
         let trace = build_trace(params.include_trace, &search_results.trace);
 
-        // Fire-and-forget: increment access_count and evaluate tier for search results
+        // Fire-and-forget: batch increment access_count for search results (single LanceDB version)
         {
             let update_store = store;
-            let memories_to_update: Vec<Memory> = results.iter().map(|r| r.memory.clone()).collect();
-            tracing::debug!(count = memories_to_update.len(), "search_access_count_update_start");
-            tokio::spawn(async move {
-                for mut memory in memories_to_update {
-                    let old_tier = memory.tier.clone();
-                    let old_count = memory.access_count;
-                    memory.access_count += 1;
-                    memory.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
-                    let new_tier = TierManager::with_defaults().evaluate_tier(&memory);
-                    if new_tier != old_tier {
-                        tracing::info!(memory_id = %memory.id, old_tier = %old_tier, new_tier = %new_tier, access_count = old_count + 1, "tier_promoted_via_search");
-                        memory.append_tier_change(&old_tier.to_string(), &new_tier.to_string(), "access_via_search");
+            let result_ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
+            if !result_ids.is_empty() {
+                tracing::debug!(count = result_ids.len(), "search_access_count_update_start");
+                tokio::spawn(async move {
+                    if let Err(e) = update_store.batch_bump_access_count(&result_ids).await {
+                        tracing::warn!(error = %e, "failed_to_batch_update_access_count_after_search");
                     }
-                    memory.tier = new_tier;
-                    if let Err(e) = update_store.update(&memory, None).await {
-                        tracing::warn!(memory_id = %memory.id, error = %e, "failed_to_update_access_count_after_search");
-                    }
-                }
-            });
+                });
+            }
         }
 
         return Ok(Json(SearchResponseDto { results, trace }));
@@ -504,29 +494,24 @@ pub async fn search_memories(
         }
     }
 
-    // Fire-and-forget: increment access_count and evaluate tier for cross-space search results
+    // Fire-and-forget: batch increment access_count for cross-space search results
     {
         let mgr = state.store_manager.clone();
-        let memories_to_update: Vec<(String, Memory)> = results
-            .iter()
-            .map(|r| (r.memory.space_id.clone(), r.memory.clone()))
-            .collect();
-        tracing::debug!(count = memories_to_update.len(), query = %params.q, "cross_space_access_count_update_start");
+        let memories_by_store: Vec<(String, Vec<String>)> = {
+            let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for r in &results {
+                map.entry(r.memory.space_id.clone())
+                    .or_default()
+                    .push(r.memory.id.clone());
+            }
+            map.into_iter().collect()
+        };
+        tracing::debug!(store_count = memories_by_store.len(), "cross_space_access_count_update_start");
         tokio::spawn(async move {
-            for (space_id, mut memory) in memories_to_update {
+            for (space_id, ids) in memories_by_store {
                 if let Ok(store) = mgr.get_store(&space_id).await {
-                    let old_tier = memory.tier.clone();
-                    let old_count = memory.access_count;
-                    memory.access_count += 1;
-                    memory.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
-                    let new_tier = TierManager::with_defaults().evaluate_tier(&memory);
-                    if new_tier != old_tier {
-                        tracing::info!(memory_id = %memory.id, old_tier = %old_tier, new_tier = %new_tier, access_count = old_count + 1, space_id = %space_id, "tier_promoted_via_cross_space_search");
-                        memory.append_tier_change(&old_tier.to_string(), &new_tier.to_string(), "access_via_cross_space_search");
-                    }
-                    memory.tier = new_tier;
-                    if let Err(e) = store.update(&memory, None).await {
-                        tracing::warn!(memory_id = %memory.id, error = %e, "failed_to_update_access_count_after_cross_space_search");
+                    if let Err(e) = store.batch_bump_access_count(&ids).await {
+                        tracing::warn!(space_id = %space_id, error = %e, "failed_to_batch_update_access_count_after_cross_space_search");
                     }
                 }
             }

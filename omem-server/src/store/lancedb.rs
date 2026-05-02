@@ -994,6 +994,28 @@ impl LanceStore {
         Ok(result.rows_updated)
     }
 
+    /// Batch increment access_count for multiple memories in a single LanceDB version.
+    /// Uses SQL IN clause to update all matching IDs at once (1 version instead of N).
+    pub async fn batch_bump_access_count(&self, ids: &[String]) -> Result<(), OmemError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        let now = chrono::Utc::now().to_rfc3339();
+        // Build SQL IN clause: id IN ('id1','id2',...)
+        let id_list: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+        let filter = format!("id IN ({})", id_list.join(","));
+        table
+            .update()
+            .only_if(filter)
+            .column("access_count", "access_count + 1")
+            .column("last_accessed_at", sql_str(&now))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch_bump_access_count failed: {e}")))?;
+        Ok(())
+    }
+
     pub async fn hard_delete(&self, id: &str) -> Result<(), OmemError> {
         let table = self.open_table().await?;
         table
@@ -1516,12 +1538,12 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("optimize compact failed: {e}")))?;
 
-        // Step 2: Prune — remove all old versions (we don't use time travel)
+        // Step 2: Prune — 10-minute safety window for concurrent writes
         table
             .optimize(OptimizeAction::Prune {
                 older_than: Some(
-                    chrono::Duration::try_minutes(0)
-                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                    chrono::Duration::try_minutes(10)
+                        .unwrap_or_else(|| chrono::Duration::minutes(10)),
                 ),
                 delete_unverified: Some(true),
                 error_if_tagged_old_versions: None,
@@ -1548,8 +1570,8 @@ impl LanceStore {
             let _ = sr_table
                 .optimize(OptimizeAction::Prune {
                     older_than: Some(
-                        chrono::Duration::try_minutes(0)
-                            .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                        chrono::Duration::try_minutes(10)
+                            .unwrap_or_else(|| chrono::Duration::minutes(10)),
                     ),
                     delete_unverified: Some(true),
                     error_if_tagged_old_versions: None,
@@ -1599,8 +1621,8 @@ impl LanceStore {
         let stats = table
             .optimize(OptimizeAction::Prune {
                 older_than: Some(
-                    chrono::Duration::try_minutes(0)
-                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                    chrono::Duration::try_minutes(10)
+                        .unwrap_or_else(|| chrono::Duration::minutes(10)),
                 ),
                 delete_unverified: Some(true),
                 error_if_tagged_old_versions: None,

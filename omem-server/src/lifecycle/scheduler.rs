@@ -183,9 +183,6 @@ impl LifecycleScheduler {
         }
 
         for store in &stores {
-            if let Err(e) = store.prune_old_versions().await {
-                warn!(error = %e, "scheduler_prune_failed");
-            }
             if let Err(e) = store.optimize().await {
                 warn!(error = %e, "scheduler_optimize_failed");
             }
