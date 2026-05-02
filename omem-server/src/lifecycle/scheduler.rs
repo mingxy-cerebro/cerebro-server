@@ -85,6 +85,23 @@ impl LifecycleScheduler {
                 warn!(error = %e, "lifecycle_scheduler_initial_run_failed");
             }
         }
+
+        // Spawn background prune daemon — runs every 60s, only prunes if version > 100
+        let prune_self = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let stores = prune_self.store_manager.cached_stores().await;
+                for store in &stores {
+                    if let Ok(v) = store.prune_old_versions().await {
+                        if v > 100 {
+                            info!(version = %v, "prune_daemon: high version count after prune");
+                        }
+                    }
+                }
+            }
+        });
+
         loop {
             let delay = self.next_run_delay();
             info!(
@@ -166,6 +183,9 @@ impl LifecycleScheduler {
         }
 
         for store in &stores {
+            if let Err(e) = store.prune_old_versions().await {
+                warn!(error = %e, "scheduler_prune_failed");
+            }
             if let Err(e) = store.optimize().await {
                 warn!(error = %e, "scheduler_optimize_failed");
             }

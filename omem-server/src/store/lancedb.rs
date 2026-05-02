@@ -773,7 +773,7 @@ impl LanceStore {
             }
         }
 
-        self.maybe_optimize().await;
+        // OOM guard: no maybe_optimize on write path — auto_cleanup handles it
         Ok(())
     }
 
@@ -955,7 +955,6 @@ impl LanceStore {
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
         }
-        self.maybe_optimize().await;
         Ok(())
     }
 
@@ -1001,7 +1000,6 @@ impl LanceStore {
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
             .map_err(|e| OmemError::Storage(format!("hard_delete failed: {e}")))?;
-        self.maybe_optimize().await;
         Ok(())
     }
 
@@ -1016,7 +1014,6 @@ impl LanceStore {
             .delete(&format!("id IN ({id_list})"))
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete_by_ids failed: {e}")))?;
-        self.maybe_optimize().await;
         Ok(ids.len())
     }
 
@@ -1419,7 +1416,6 @@ impl LanceStore {
             .delete(filter)
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete failed: {e}")))?;
-        self.maybe_optimize().await;
         Ok(count)
     }
 
@@ -1566,6 +1562,7 @@ impl LanceStore {
 
     /// Lazy compact: check version count after write ops, auto-compact when > threshold.
     /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
+    /// NOTE: No longer called from write path. Used by PruneDaemon background task only.
     pub async fn maybe_optimize(&self) {
         let table = match self.open_table().await {
             Ok(t) => t,
@@ -1587,6 +1584,35 @@ impl LanceStore {
         if let Err(e) = self.optimize().await {
             tracing::warn!(error = %e, "lazy_compact: optimize failed");
         }
+    }
+
+    /// Prune old versions without compacting — safe to run concurrently with writes.
+    /// Prune only deletes manifest files, does not rewrite data, so no commit conflicts.
+    pub async fn prune_old_versions(&self) -> Result<u64, OmemError> {
+        let table = self.open_table().await?;
+        let version: u64 = table.version().await.unwrap_or(0);
+
+        if version <= 10 {
+            return Ok(version);
+        }
+
+        let stats = table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(
+                    chrono::Duration::try_minutes(0)
+                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                ),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("prune failed: {e}")))?;
+
+        let pruned = stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
+        tracing::info!(version_before = %version, bytes_removed = %pruned, "prune_old_versions completed");
+
+        let new_version: u64 = table.version().await.unwrap_or(version);
+        Ok(new_version)
     }
 }
 
