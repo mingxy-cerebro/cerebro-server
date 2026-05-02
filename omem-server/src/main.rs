@@ -148,13 +148,15 @@ async fn main() {
             "lifecycle_scheduler_started"
         );
 
+        // Clustering: NEVER run on start — K-Means全量归簇会疯狂写LanceDB导致版本爆炸+数据损坏
+        // 等 lifecycle scheduler 先跑完 pruning/compact，首次 clustering 由定时器触发
         let clustering_scheduler = Arc::new(
             ClusteringScheduler::new(
                 state.store_manager.clone(),
                 state.cluster_store.clone(),
                 state.embed.clone(),
                 scheduler_interval,
-                config.scheduler_run_on_start,
+                false, // hardcoded false: clustering must not run on startup
             )
             .with_llm(state.llm.clone())
             .with_event_bus(state.event_bus.clone())
@@ -163,7 +165,6 @@ async fn main() {
         tokio::spawn(async move { clustering_scheduler.run().await });
         tracing::info!(
             interval_secs = config.scheduler_interval_secs,
-            run_on_start = config.scheduler_run_on_start,
             "clustering_scheduler_started"
         );
     }
