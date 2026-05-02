@@ -6,7 +6,6 @@ use omem_server::api::{build_router, AppState};
 use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
 use omem_server::cluster::cluster_store::ClusterStore;
-use omem_server::cluster::scheduler::ClusteringScheduler;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
 use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
@@ -146,26 +145,6 @@ async fn main() {
             interval_secs = config.scheduler_interval_secs,
             run_on_start = config.scheduler_run_on_start,
             "lifecycle_scheduler_started"
-        );
-
-        // Clustering: NEVER run on start — K-Means全量归簇会疯狂写LanceDB导致版本爆炸+数据损坏
-        // 等 lifecycle scheduler 先跑完 pruning/compact，首次 clustering 由定时器触发
-        let clustering_scheduler = Arc::new(
-            ClusteringScheduler::new(
-                state.store_manager.clone(),
-                state.cluster_store.clone(),
-                state.embed.clone(),
-                scheduler_interval,
-                false, // hardcoded false: clustering must not run on startup
-            )
-            .with_llm(state.llm.clone())
-            .with_event_bus(state.event_bus.clone())
-            .with_scheduler_control(ctrl)
-        );
-        tokio::spawn(async move { clustering_scheduler.run().await });
-        tracing::info!(
-            interval_secs = config.scheduler_interval_secs,
-            "clustering_scheduler_started"
         );
     }
 
