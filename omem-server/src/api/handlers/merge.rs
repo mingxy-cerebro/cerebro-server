@@ -109,7 +109,7 @@ pub async fn merge_memories(
     }
 
     if strategy == "manual" {
-        let merged_content = body.merged_content.unwrap();
+        let merged_content = body.merged_content.ok_or_else(|| OmemError::Validation("merged_content required".into()))?;
         primary.content = merged_content.clone();
         primary.l2_content = merged_content.clone();
         primary.l0_abstract = merged_content.chars().take(100).collect();

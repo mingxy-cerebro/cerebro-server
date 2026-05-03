@@ -111,6 +111,8 @@ pub async fn should_recall(
     // Per-tenant rate limiting
     {
         let mut last_times = LAST_RECALL_TIME.lock().await;
+        let now = chrono::Utc::now();
+        last_times.retain(|_, dt| now.signed_duration_since(*dt).num_seconds() < 86400);
         let key = auth.tenant_id.clone();
         if let Some(last_time) = last_times.get(&key) {
             let elapsed = chrono::Utc::now().signed_duration_since(*last_time);
@@ -235,7 +237,7 @@ pub async fn should_recall(
                     .await
                     .unwrap_or_default()
             } else {
-                let search_vec = query_vector.as_ref().unwrap();
+                let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
                 store
                     .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, Some(tags))
                     .await
@@ -266,7 +268,7 @@ pub async fn should_recall(
                 .await
                 .unwrap_or_default()
         } else {
-            let search_vec = query_vector.as_ref().unwrap();
+            let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
             store
                 .vector_search(search_vec, remaining + 5, effective_min_score, None, vis_ref, None)
                 .await
@@ -301,13 +303,12 @@ pub async fn should_recall(
                 .await
                 .unwrap_or_default()
         } else {
-            let search_vec = query_vector.as_ref().unwrap();
+            let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
             store
                 .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, None)
                 .await
                 .unwrap_or_default()
-        };
-        tracing::info!(query = %body.query_text, "should_recall_no_project_tags_fallback");
+        }
     }
 
     let results = all_results;
@@ -507,18 +508,21 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+static DENOISE_PATTERNS: LazyLock<(regex::Regex, regex::Regex, regex::Regex)> = LazyLock::new(|| {
+    (
+        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new("").unwrap()),
+        regex::Regex::new(r"```[\s\S]*?```").unwrap_or_else(|_| regex::Regex::new("").unwrap()),
+        regex::Regex::new(r"\s+").unwrap_or_else(|_| regex::Regex::new("").unwrap()),
+    )
+});
+
 fn denoise_for_recall(text: &str) -> String {
     let max_chars = 200;
     let mut cleaned = text.to_string();
 
-    let re_tags = regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new("").unwrap());
-    cleaned = re_tags.replace_all(&cleaned, "").to_string();
-
-    let re_code = regex::Regex::new(r"```[\s\S]*?```").unwrap_or_else(|_| regex::Regex::new("").unwrap());
-    cleaned = re_code.replace_all(&cleaned, "").to_string();
-
-    let re_ws = regex::Regex::new(r"\s+").unwrap_or_else(|_| regex::Regex::new("").unwrap());
-    cleaned = re_ws.replace_all(&cleaned.trim(), " ").to_string();
+    cleaned = DENOISE_PATTERNS.0.replace_all(&cleaned, "").to_string();
+    cleaned = DENOISE_PATTERNS.1.replace_all(&cleaned, "").to_string();
+    cleaned = DENOISE_PATTERNS.2.replace_all(&cleaned.trim(), " ").to_string();
 
     if cleaned.chars().count() > max_chars {
         let truncated: String = cleaned.chars().take(max_chars).collect();

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::error::OmemError;
 use crate::domain::space::{SharingEvent, Space};
+use crate::store::lancedb::escape_sql;
 
 const SPACES_TABLE: &str = "spaces";
 const SHARING_EVENTS_TABLE: &str = "sharing_events";
@@ -605,10 +606,6 @@ impl SpaceStore {
             timestamp: get_str("timestamp")?,
         })
     }
-}
-
-fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 #[cfg(test)]

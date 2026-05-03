@@ -8,6 +8,7 @@ use lancedb::Connection;
 
 use crate::domain::error::OmemError;
 use crate::domain::tenant::{Tenant, TenantConfig, TenantStatus};
+use crate::store::lancedb::escape_sql;
 
 const TENANT_TABLE: &str = "tenants";
 
@@ -138,10 +139,6 @@ impl TenantStore {
             created_at: get_str("created_at")?,
         })
     }
-}
-
-fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 #[cfg(test)]

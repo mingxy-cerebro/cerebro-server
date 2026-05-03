@@ -232,7 +232,7 @@ pub async fn create_import(
         let reconcile_sem = state.reconcile_semaphore.clone();
 
         tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.expect("semaphore");
+            let _permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
             let intelligence = IntelligenceTask::new(
                 bg_store,
                 bg_session_store,
@@ -245,6 +245,7 @@ pub async fn create_import(
                 bg_strategy,
             );
             intelligence.run().await;
+            Ok::<(), OmemError>(())
         });
     }
 
@@ -323,7 +324,7 @@ pub async fn trigger_intelligence(
     let reconcile_sem = state.reconcile_semaphore.clone();
 
     tokio::spawn(async move {
-        let _permit = sem.acquire_owned().await.expect("semaphore");
+        let _permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
         let intelligence = IntelligenceTask::new(
             store,
             session_store,
@@ -336,6 +337,7 @@ pub async fn trigger_intelligence(
             bg_strategy,
         );
         intelligence.run().await;
+        Ok::<(), OmemError>(())
     });
 
     Ok(Json(task))
@@ -348,7 +350,7 @@ pub async fn cross_reconcile(
     let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
 
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(None).await?;
     let mut relations_created = 0usize;
     let scanned = all_memories.len();
 

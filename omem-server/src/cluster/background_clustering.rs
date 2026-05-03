@@ -80,7 +80,7 @@ impl BackgroundClusterer {
                 errors: 0,
             });
         }
-        let _guard = lock.unwrap();
+        let _guard = lock.map_err(|e| OmemError::Internal(format!("clustering lock: {e}")))?;
 
         info!("Starting global K-Means clustering");
 
@@ -90,7 +90,7 @@ impl BackgroundClusterer {
         }));
 
         let vectors_with_ids = self.store.get_all_vectors().await?;
-        let memories = self.store.list_all_active().await?;
+        let memories = self.store.list_all_active(Some(5000)).await?;
 
         if vectors_with_ids.is_empty() || memories.is_empty() {
             self.emit("cluster.stage", serde_json::json!({

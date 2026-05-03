@@ -77,7 +77,7 @@ pub async fn trigger_clustering(
         ));
     }
 
-    let memories = store.list_all_active().await?;
+    let memories = store.list_all_active(Some(5000)).await?;
     let total = memories.len() as u64;
 
     let mut job = ClusteringJob::new(&auth.tenant_id, &space_id, total);
@@ -198,7 +198,7 @@ pub async fn get_clustering_stats(
         .get_store(&space_id)
         .await?;
 
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(Some(5000)).await?;
     let total_memories = all_memories.len() as u64;
     
     let memories_in_clusters = all_memories
@@ -252,7 +252,7 @@ pub async fn list_clusters(
 
     let space_id = format!("personal/{}", auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(Some(5000)).await?;
 
     let cluster_member_counts: std::collections::HashMap<&str, u32> = all_memories
         .iter()
@@ -289,7 +289,7 @@ pub async fn get_cluster(
 
     let space_id = format!("personal/{}", auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(Some(5000)).await?;
 
     let members: Vec<serde_json::Value> = all_memories
         .iter()
@@ -323,7 +323,7 @@ pub async fn delete_cluster(
 
     let space_id = format!("personal/{}", auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(None).await?;
 
     let mut unlinked = 0u32;
     for mem in &all_memories {
@@ -367,7 +367,7 @@ pub async fn batch_delete_clusters(
 ) -> Result<Json<serde_json::Value>, OmemError> {
     let space_id = format!("personal/{}", auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
-    let all_memories = store.list_all_active().await?;
+    let all_memories = store.list_all_active(None).await?;
 
     let mut unlinked = 0u32;
     for mem in &all_memories {

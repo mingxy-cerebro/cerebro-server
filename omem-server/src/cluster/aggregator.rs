@@ -66,7 +66,7 @@ impl ClusterAggregator {
             }
         }
 
-        cluster_summaries.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+        cluster_summaries.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(ClusteredResult {
             cluster_summaries,

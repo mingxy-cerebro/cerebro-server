@@ -1203,7 +1203,7 @@ pub async fn reembed_memories(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
-    let memories = store.list_all_active().await?;
+    let memories = store.list_all_active(None).await?;
     let total = memories.len();
 
     // Spawn background task for batched re-embedding
@@ -1324,10 +1324,14 @@ pub async fn session_ingest(
     // Fire-and-forget: process in background, return 202 immediately
     tokio::spawn(async move {
         // Acquire per-session lock inside background task
-        let lock_arc = state
-            .session_locks
-            .entry(session_key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+        let lock_arc = {
+            let mut entry = state
+                .session_locks
+                .entry(session_key.clone())
+                .or_insert_with(|| (Arc::new(tokio::sync::Mutex::new(())), std::time::Instant::now()));
+            entry.value_mut().1 = std::time::Instant::now();
+            entry.value().0.clone()
+        };
         let _session_guard = lock_arc.lock().await;
         let cluster_store = state.cluster_store.clone();
         let llm_for_cluster = Some(state.llm.clone());

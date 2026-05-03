@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 
@@ -134,6 +134,18 @@ impl FactExtractor {
     }
 }
 
+static QUALITY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(r"[0-9]{4}").unwrap(),
+        Regex::new(r"\d{1,2}[年日月周]").unwrap(),
+        Regex::new(r"\d+\.[0-9]+|[0-9]+%|[0-9]+[ξ元美元]").unwrap(),
+        Regex::new(r"因此|所以|结论是|决定是|方案是|由于|因为").unwrap(),
+        Regex::new(r"[。！？]\s*[^。！？]{30,}").unwrap(),
+        Regex::new(r"(?m)^\s*[-*#]\s+\S").unwrap(),
+        Regex::new(r"[A-Z][a-z]+[A-Z]|[A-Z]{2,}").unwrap(),
+    ]
+});
+
 fn calculate_quality_score(text: &str) -> f32 {
     let mut score: f32 = 0.5;
     let len = text.len();
@@ -148,38 +160,25 @@ fn calculate_quality_score(text: &str) -> f32 {
         score += 0.05;
     }
 
-    if Regex::new(r"[0-9]{4}").unwrap().is_match(text) {
+    if QUALITY_PATTERNS[0].is_match(text) {
         score += 0.1;
     }
-    if Regex::new(r"\d{1,2}[年日月周]").unwrap().is_match(text) {
+    if QUALITY_PATTERNS[1].is_match(text) {
         score += 0.05;
     }
-    if Regex::new(r"\d+\.[0-9]+|[0-9]+%|[0-9]+[ξ元美元]")
-        .unwrap()
-        .is_match(text)
-    {
+    if QUALITY_PATTERNS[2].is_match(text) {
         score += 0.05;
     }
-
-    if Regex::new(r"因此|所以|结论是|决定是|方案是|由于|因为")
-        .unwrap()
-        .is_match(text)
-    {
+    if QUALITY_PATTERNS[3].is_match(text) {
         score += 0.1;
     }
-    if Regex::new(r"[。！？]\s*[^。！？]{30,}")
-        .unwrap()
-        .is_match(text)
-    {
+    if QUALITY_PATTERNS[4].is_match(text) {
         score += 0.05;
     }
-    if Regex::new(r"(?m)^\s*[-*#]\s+\S").unwrap().is_match(text) {
+    if QUALITY_PATTERNS[5].is_match(text) {
         score += 0.05;
     }
-    if Regex::new(r"[A-Z][a-z]+[A-Z]|[A-Z]{2,}")
-        .unwrap()
-        .is_match(text)
-    {
+    if QUALITY_PATTERNS[6].is_match(text) {
         score += 0.05;
     }
 

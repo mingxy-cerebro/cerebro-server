@@ -140,6 +140,7 @@ async fn main() {
             )
             .with_event_bus(state.event_bus.clone())
             .with_scheduler_control(ctrl.clone())
+            .with_session_locks(state.session_locks.clone())
         );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(

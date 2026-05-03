@@ -173,7 +173,7 @@ impl ClusterAssigner {
             })
             .collect();
 
-        candidates.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
+        candidates.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
         Ok(candidates)
     }
 

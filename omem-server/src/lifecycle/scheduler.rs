@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde_json::json;
@@ -25,6 +25,7 @@ pub struct LifecycleScheduler {
     max_memories_per_store: usize,
     event_bus: Option<SharedEventBus>,
     scheduler_control: Option<SharedSchedulerControl>,
+    session_locks: Option<Arc<dashmap::DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>>,
 }
 
 impl LifecycleScheduler {
@@ -44,6 +45,7 @@ impl LifecycleScheduler {
             max_memories_per_store: 5000,
             event_bus: None,
             scheduler_control: None,
+            session_locks: None,
         }
     }
 
@@ -54,6 +56,14 @@ impl LifecycleScheduler {
 
     pub fn with_scheduler_control(mut self, ctrl: SharedSchedulerControl) -> Self {
         self.scheduler_control = Some(ctrl);
+        self
+    }
+
+    pub fn with_session_locks(
+        mut self,
+        locks: Arc<dashmap::DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>,
+    ) -> Self {
+        self.session_locks = Some(locks);
         self
     }
 
@@ -97,6 +107,14 @@ impl LifecycleScheduler {
                         if v > 100 {
                             info!(version = %v, "prune_daemon: high version count after prune");
                         }
+                    }
+                }
+                if let Some(locks) = &prune_self.session_locks {
+                    let before = locks.len();
+                    locks.retain(|_, (_, last_used)| last_used.elapsed() < Duration::from_secs(86400));
+                    let after = locks.len();
+                    if before != after {
+                        info!(pruned = before - after, "session_locks_pruned");
                     }
                 }
             }

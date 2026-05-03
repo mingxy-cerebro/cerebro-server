@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
@@ -26,7 +27,7 @@ pub struct AppState {
     pub reconcile_semaphore: Arc<Semaphore>,
     pub event_bus: SharedEventBus,
     pub scheduler_control: SharedSchedulerControl,
-    pub session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub session_locks: Arc<DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>,
     pub reranker: Option<Reranker>,
     /// Limits concurrent background ingest tasks (LLM extraction + reconciliation).
     /// Prevents OOM under burst load. Default: 10.

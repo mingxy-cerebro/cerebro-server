@@ -712,10 +712,13 @@ impl LanceStore {
         0.0
     }
 
-    pub async fn list_all_active(&self) -> Result<Vec<Memory>, OmemError> {
+    pub async fn list_all_active(&self, limit: Option<usize>) -> Result<Vec<Memory>, OmemError> {
         let table = self.open_table().await?;
-        let batches: Vec<RecordBatch> = table
-            .query()
+        let mut query = table.query();
+        if let Some(n) = limit {
+            query = query.limit(n);
+        }
+        let batches: Vec<RecordBatch> = query
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("list all query failed: {e}")))?
@@ -1642,7 +1645,8 @@ fn option_str(opt: &Option<String>) -> Option<&str> {
     opt.as_deref()
 }
 
-fn escape_sql(s: &str) -> String {
+/// SQL字符串转义（单引号）。LanceDB(DataFusion)标准SQL语义下 \ % _ 不需要转义。
+pub fn escape_sql(s: &str) -> String {
     s.replace('\'', "''")
 }
 

@@ -61,7 +61,7 @@ async fn collect_memories(
     match space_filter.as_deref() {
         Some(space_id) if space_id != "all" => {
             let store = state.store_manager.get_store(space_id).await?;
-            store.list_all_active().await
+            store.list_all_active(None).await
         }
         _ => {
             let spaces = state
@@ -76,7 +76,7 @@ async fn collect_memories(
                 .store_manager
                 .get_store(&personal_space_id(&auth.tenant_id))
                 .await?;
-            for mem in tenant_store.list_all_active().await? {
+            for mem in tenant_store.list_all_active(None).await? {
                 if seen_ids.insert(mem.id.clone()) {
                     all.push(mem);
                 }
@@ -87,7 +87,7 @@ async fn collect_memories(
                     continue;
                 }
                 let store = state.store_manager.get_store(&space.id).await?;
-                for mem in store.list_all_active().await? {
+                for mem in store.list_all_active(None).await? {
                     if seen_ids.insert(mem.id.clone()) {
                         all.push(mem);
                     }
@@ -529,7 +529,7 @@ pub async fn get_spaces_stats(
 
     for space in &spaces {
         let store = state.store_manager.get_store(&space.id).await?;
-        let memories = store.list_all_active().await?;
+        let memories = store.list_all_active(None).await?;
 
         let memory_count = memories.len();
         let agent_ids: HashSet<&str> = memories.iter().map(|m| m.owner_agent_id.as_str()).collect();

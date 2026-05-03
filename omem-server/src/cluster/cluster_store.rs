@@ -15,7 +15,7 @@ use tracing::info;
 use crate::domain::cluster::MemoryCluster;
 use crate::domain::error::OmemError;
 
-use crate::store::lancedb::VECTOR_DIM;
+use crate::store::lancedb::{escape_sql, VECTOR_DIM};
 
 const CLUSTER_TABLE_NAME: &str = "clusters";
 const JOB_TABLE_NAME: &str = "clustering_jobs";
@@ -157,7 +157,7 @@ impl ClusterStore {
         let lock = self.locks.entry(cluster_id.to_string()).or_insert_with(|| Mutex::new(()));
         let _guard = lock.lock().await;
 
-        let safe_id = Self::escape_sql(cluster_id);
+        let safe_id = escape_sql(cluster_id);
         let batches: Vec<RecordBatch> = self.table
             .query()
             .only_if(format!("id = '{}'", safe_id))
@@ -228,7 +228,7 @@ impl ClusterStore {
             .map_err(|e| OmemError::Storage(format!("cluster vector search failed: {e}")))?;
         
         if let Some(sid) = space_id {
-            let safe_sid = Self::escape_sql(sid);
+            let safe_sid = escape_sql(sid);
             query = query.only_if(format!("space_id = '{}'", safe_sid));
         }
         
@@ -371,7 +371,7 @@ impl ClusterStore {
         &self,
         cluster_id: &str,
     ) -> Result<Option<MemoryCluster>, OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
+        let safe_id = escape_sql(cluster_id);
         let batches: Vec<RecordBatch> = self.table
             .query()
             .only_if(format!("id = '{}'", safe_id))
@@ -390,17 +390,13 @@ impl ClusterStore {
         Ok(Some(Self::row_to_cluster(&batches[0], 0)?))
     }
 
-    fn escape_sql(input: &str) -> String {
-        input.replace("'", "''")
-    }
-
     pub async fn update_summary(
         &self,
         cluster_id: &str,
         summary: &str,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
-        let safe_summary = Self::escape_sql(summary);
+        let safe_id = escape_sql(cluster_id);
+        let safe_summary = escape_sql(summary);
         let now = chrono::Utc::now().to_rfc3339();
         self.table
             .update()
@@ -418,8 +414,8 @@ impl ClusterStore {
         cluster_id: &str,
         title: &str,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
-        let safe_title = Self::escape_sql(title);
+        let safe_id = escape_sql(cluster_id);
+        let safe_title = escape_sql(title);
         let now = chrono::Utc::now().to_rfc3339();
         self.table
             .update()
@@ -436,7 +432,7 @@ impl ClusterStore {
         &self,
         cluster_id: &str,
     ) -> Result<u32, OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
+        let safe_id = escape_sql(cluster_id);
         let now = chrono::Utc::now().to_rfc3339();
         let result = self.table
             .update()
@@ -482,7 +478,7 @@ impl ClusterStore {
         &self,
         cluster_id: &str,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
+        let safe_id = escape_sql(cluster_id);
         let now = chrono::Utc::now().to_rfc3339();
         self.table
             .update()
@@ -499,7 +495,7 @@ impl ClusterStore {
         &self,
         cluster_id: &str,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(cluster_id);
+        let safe_id = escape_sql(cluster_id);
         self.table
             .delete(&format!("id = '{}'", safe_id))
             .await
@@ -525,7 +521,7 @@ impl ClusterStore {
         &self,
         tenant_id: &str,
     ) -> Result<usize, OmemError> {
-        let safe_tid = Self::escape_sql(tenant_id);
+        let safe_tid = escape_sql(tenant_id);
         let batches: Vec<RecordBatch> = self.table
             .query()
             .only_if(format!("tenant_id = '{}'", safe_tid))
@@ -584,7 +580,7 @@ impl ClusterStore {
         let mut query = self.table.query();
 
         if let Some(sid) = space_id {
-            let safe_sid = Self::escape_sql(sid);
+            let safe_sid = escape_sql(sid);
             query = query.only_if(format!("space_id = '{}'", safe_sid));
         }
 
@@ -612,7 +608,7 @@ impl ClusterStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<MemoryCluster>, OmemError> {
-        let safe_tid = Self::escape_sql(tenant_id);
+        let safe_tid = escape_sql(tenant_id);
         let query = self.table.query()
             .only_if(format!("tenant_id = '{}'", safe_tid));
 
@@ -638,7 +634,7 @@ impl ClusterStore {
         &self,
         tenant_id: &str,
     ) -> Result<usize, OmemError> {
-        let safe_tid = Self::escape_sql(tenant_id);
+        let safe_tid = escape_sql(tenant_id);
         let batches: Vec<RecordBatch> = self.table.query()
             .only_if(format!("tenant_id = '{}'", safe_tid))
             .execute()
@@ -698,7 +694,7 @@ impl ClusterStore {
         &self,
         job_id: &str,
     ) -> Result<Option<crate::domain::cluster::ClusteringJob>, OmemError> {
-        let safe_id = Self::escape_sql(job_id);
+        let safe_id = escape_sql(job_id);
         let batches: Vec<RecordBatch> = self.job_table
             .query()
             .only_if(format!("id = '{}'", safe_id))
@@ -722,7 +718,7 @@ impl ClusterStore {
         tenant_id: &str,
         limit: usize,
     ) -> Result<Vec<crate::domain::cluster::ClusteringJob>, OmemError> {
-        let safe_tenant = Self::escape_sql(tenant_id);
+        let safe_tenant = escape_sql(tenant_id);
         let batches: Vec<RecordBatch> = self.job_table
             .query()
             .only_if(format!("tenant_id = '{}'", safe_tenant))
@@ -811,7 +807,7 @@ impl ClusterStore {
         &self,
         job: &crate::domain::cluster::ClusteringJob,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(&job.id);
+        let safe_id = escape_sql(&job.id);
         self.job_table
             .delete(&format!("id = '{}'", safe_id))
             .await
@@ -833,7 +829,7 @@ impl ClusterStore {
         &self,
         job_id: &str,
     ) -> Result<(), OmemError> {
-        let safe_id = Self::escape_sql(job_id);
+        let safe_id = escape_sql(job_id);
         self.job_table
             .delete(&format!("id = '{}'", safe_id))
             .await

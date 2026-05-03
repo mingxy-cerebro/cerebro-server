@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::error::OmemError;
+use crate::store::lancedb::escape_sql;
 
 const SESSION_TABLE: &str = "sessions";
 
@@ -369,10 +370,6 @@ fn compute_content_hash(session_id: &str, role: &str, content: &str) -> String {
     hasher.update(content.as_bytes());
     let result = hasher.finalize();
     result.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn escape_sql(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 #[cfg(test)]

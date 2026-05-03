@@ -746,7 +746,7 @@ pub async fn reshare_memory(
     }
 
     let old_copy = old_copy.ok_or_else(|| OmemError::NotFound(format!("memory {id}")))?;
-    let target_store = found_store.unwrap();
+    let target_store = found_store.ok_or_else(|| OmemError::Internal("store not found for space".into()))?;
 
     let provenance = old_copy
         .provenance
@@ -905,7 +905,7 @@ pub async fn share_all(
         .store_manager
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
-    let all_memories = source_store.list_all_active().await?;
+    let all_memories = source_store.list_all_active(None).await?;
 
     let filtered_ids: Vec<String> = all_memories
         .iter()
@@ -1072,7 +1072,7 @@ pub async fn share_all_to_user(
         .store_manager
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
-    let all_memories = source_store.list_all_active().await?;
+    let all_memories = source_store.list_all_active(None).await?;
     let filtered_ids: Vec<String> = all_memories
         .iter()
         .filter(|m| matches_share_filters(m, &body.filters))
@@ -1877,7 +1877,7 @@ mod tests {
         let agent_id = "agent-1";
         let user_id = "user-001";
 
-        let all = personal_store.list_all_active().await.expect("list");
+        let all = personal_store.list_all_active(None).await.expect("list");
         assert_eq!(all.len(), 2);
 
         let filters = Some(ShareAllFilters {
