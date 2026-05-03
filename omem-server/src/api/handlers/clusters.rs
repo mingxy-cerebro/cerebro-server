@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::api::server::AppState;
+use crate::api::server::{personal_space_id, AppState};
 use crate::domain::tenant::AuthInfo;
 use crate::cluster::background_clustering::BackgroundClusterer;
 use crate::domain::cluster::{ClusteringJob, ClusteringJobStatus, MemoryCluster};
@@ -47,7 +47,7 @@ pub async fn trigger_clustering(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<TriggerClusteringRequest>,
 ) -> Result<(StatusCode, Json<TriggerClusteringResponse>), OmemError> {
-    let space_id = body.space_id.unwrap_or_else(|| format!("personal/{}", auth.tenant_id));
+    let space_id = body.space_id.unwrap_or_else(|| personal_space_id(&auth.tenant_id));
     let batch_size = body.batch_size.unwrap_or(50);
 
     info!(
@@ -192,7 +192,7 @@ pub async fn get_clustering_stats(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<ClusteringStatsResponse>, OmemError> {
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state
         .store_manager
         .get_store(&space_id)
@@ -250,7 +250,7 @@ pub async fn list_clusters(
 
     let total = state.cluster_store.count_clusters_by_tenant(&auth.tenant_id).await?;
 
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
     let all_memories = store.list_all_active(Some(5000)).await?;
 
@@ -287,7 +287,7 @@ pub async fn get_cluster(
     let mut cluster = state.cluster_store.get_by_id(&cluster_id).await?
         .ok_or_else(|| OmemError::NotFound(format!("Cluster {} not found", cluster_id)))?;
 
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
     let all_memories = store.list_all_active(Some(5000)).await?;
 
@@ -321,7 +321,7 @@ pub async fn delete_cluster(
         return Err(OmemError::Unauthorized("not your cluster".to_string()));
     }
 
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
     let all_memories = store.list_all_active(None).await?;
 
@@ -365,7 +365,7 @@ pub async fn batch_delete_clusters(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<BatchDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
     let all_memories = store.list_all_active(None).await?;
 
@@ -391,7 +391,7 @@ pub async fn delete_all_clusters(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let space_id = format!("personal/{}", auth.tenant_id);
+    let space_id = personal_space_id(&auth.tenant_id);
     let store = state.store_manager.get_store(&space_id).await?;
 
     let unlinked = store.clear_all_cluster_ids().await?;

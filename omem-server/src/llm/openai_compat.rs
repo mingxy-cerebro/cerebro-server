@@ -9,6 +9,8 @@ use crate::llm::service::LlmService;
 const MAX_RETRIES: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(90);
+/// 最大允许的LLM/Embed响应体大小：10MB
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -227,21 +229,48 @@ impl LlmService for OpenAICompatLlm {
 
             // Retry on 5xx server errors
             if status.is_server_error() && attempt + 1 < MAX_RETRIES {
-                let body = resp.text().await.unwrap_or_default();
+                let bytes = resp.bytes().await.map_err(|e| {
+                    OmemError::Llm(format!("Failed to read error response: {e}"))
+                })?;
+                if bytes.len() > MAX_RESPONSE_BYTES {
+                    return Err(OmemError::Llm(format!(
+                        "Error response too large: {} bytes",
+                        bytes.len()
+                    )));
+                }
+                let body = String::from_utf8_lossy(&bytes).to_string();
                 tracing::warn!(status = %status, attempt, body = %body, "LLM server error, will retry");
                 last_err = Some(format!("server error {status}"));
                 continue;
             }
 
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let bytes = resp.bytes().await.map_err(|e| {
+                    OmemError::Llm(format!("Failed to read error response: {e}"))
+                })?;
+                if bytes.len() > MAX_RESPONSE_BYTES {
+                    return Err(OmemError::Llm(format!(
+                        "Error response too large: {} bytes",
+                        bytes.len()
+                    )));
+                }
+                let body = String::from_utf8_lossy(&bytes).to_string();
                 return Err(OmemError::Llm(format!("LLM API returned {status}: {body}")));
             }
 
-            let body: ChatResponse = resp
-                .json()
-                .await
-                .map_err(|e| OmemError::Llm(format!("failed to parse response: {e}")))?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                OmemError::Llm(format!("Failed to read response: {e}"))
+            })?;
+            if bytes.len() > MAX_RESPONSE_BYTES {
+                return Err(OmemError::Llm(format!(
+                    "Response too large: {} bytes",
+                    bytes.len()
+                )));
+            }
+            let body: ChatResponse =
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    OmemError::Llm(format!("Failed to parse response: {e}"))
+                })?;
 
             let content = body
                 .choices

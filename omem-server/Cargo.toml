@@ -55,6 +55,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 
 # Crypto
 sha2 = "0.10"
+argon2 = "0.5"
 hmac = "0.12"
 hex = "0.4"
 rand = "0.8"

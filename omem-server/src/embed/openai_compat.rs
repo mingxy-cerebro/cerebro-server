@@ -9,6 +9,8 @@ use crate::embed::service::EmbedService;
 const MAX_BATCH_SIZE: usize = 25;
 const MAX_RETRIES: u32 = 3;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// 最大允许的LLM/Embed响应体大小：10MB
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct EmbeddingRequest {
@@ -95,16 +97,34 @@ impl OpenAICompatEmbedder {
             }
 
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let bytes = resp.bytes().await.map_err(|e| {
+                    OmemError::Embedding(format!("Failed to read error response: {e}"))
+                })?;
+                if bytes.len() > MAX_RESPONSE_BYTES {
+                    return Err(OmemError::Embedding(format!(
+                        "Error response too large: {} bytes",
+                        bytes.len()
+                    )));
+                }
+                let body = String::from_utf8_lossy(&bytes).to_string();
                 return Err(OmemError::Embedding(format!(
                     "embedding API returned {status}: {body}"
                 )));
             }
 
-            let body: EmbeddingResponse = resp
-                .json()
-                .await
-                .map_err(|e| OmemError::Embedding(format!("failed to parse response: {e}")))?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                OmemError::Embedding(format!("Failed to read response: {e}"))
+            })?;
+            if bytes.len() > MAX_RESPONSE_BYTES {
+                return Err(OmemError::Embedding(format!(
+                    "Response too large: {} bytes",
+                    bytes.len()
+                )));
+            }
+            let body: EmbeddingResponse =
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    OmemError::Embedding(format!("Failed to parse response: {e}"))
+                })?;
 
             return Ok(body.data.into_iter().map(|d| d.embedding).collect());
         }

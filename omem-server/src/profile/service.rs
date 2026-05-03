@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,12 +20,23 @@ struct ProfileFilterResponse {
     facts: Vec<String>,
 }
 
-/// Cache TTL for profile responses (5 minutes)
-const PROFILE_CACHE_TTL_SECS: u64 = 300;
+/// Cache TTL for profile responses (30 minutes)
+const PROFILE_CACHE_TTL_SECS: u64 = 1800;
 
 struct CachedProfile {
     profile: UserProfile,
     cached_at: Instant,
+    refreshing: AtomicBool,
+}
+
+impl CachedProfile {
+    fn new(profile: UserProfile) -> Self {
+        Self {
+            profile,
+            cached_at: Instant::now(),
+            refreshing: AtomicBool::new(false),
+        }
+    }
 }
 
 pub struct ProfileResponse {
@@ -35,7 +47,7 @@ pub struct ProfileResponse {
 pub struct ProfileService {
     store: Arc<LanceStore>,
     llm: Option<Arc<dyn LlmService>>,
-    cache: RwLock<Option<CachedProfile>>,
+    cache: Arc<RwLock<Option<CachedProfile>>>,
 }
 
 impl ProfileService {
@@ -43,7 +55,7 @@ impl ProfileService {
         Self {
             store,
             llm: None,
-            cache: RwLock::new(None),
+            cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -56,101 +68,41 @@ impl ProfileService {
         if query.is_none() {
             let cache = self.cache.read().await;
             if let Some(ref cached) = *cache {
-                if cached.cached_at.elapsed().as_secs() < PROFILE_CACHE_TTL_SECS {
+                let age = cached.cached_at.elapsed().as_secs();
+                if age < PROFILE_CACHE_TTL_SECS {
                     return Ok(ProfileResponse {
                         profile: cached.profile.clone(),
                         search_results: None,
                     });
                 }
+                // stale-while-revalidate: return stale cache immediately, refresh in background
+                if !cached.refreshing.swap(true, Ordering::Relaxed) {
+                    let store = Arc::clone(&self.store);
+                    let llm = self.llm.clone();
+                    let cache = Arc::clone(&self.cache);
+                    tokio::spawn(async move {
+                        match build_profile(&store, llm.as_ref()).await {
+                            Ok(profile) => {
+                                let mut c = cache.write().await;
+                                *c = Some(CachedProfile::new(profile));
+                            }
+                            Err(e) => {
+                                tracing::warn!("Background profile refresh failed: {}", e);
+                                if let Some(ref cached) = *cache.read().await {
+                                    cached.refreshing.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    });
+                }
+                return Ok(ProfileResponse {
+                    profile: cached.profile.clone(),
+                    search_results: None,
+                });
             }
         }
 
-        let filter = ListFilter {
-            state: Some("active".to_string()),
-            sort: "created_at".to_string(),
-            order: "desc".to_string(),
-            ..Default::default()
-        };
-        let all_memories = self.store.list_filtered(&filter, 1000, 0).await?;
-
-        // Exclude private memories from profile generation
-        let all_memories: Vec<_> = all_memories
-            .into_iter()
-            .filter(|m| m.visibility != "private")
-            .collect();
-
-        let mut static_memories: Vec<_> = all_memories
-            .iter()
-            .filter(|m| m.category == Category::Profile || m.category == Category::Preferences)
-            .collect();
-        static_memories.sort_by(|a, b| {
-            b.importance
-                .partial_cmp(&a.importance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let static_facts: Vec<String> = static_memories
-            .iter()
-            .take(20)
-            .map(|m| sanitize_profile_content(&m.content))
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // LLM过滤：去除非画像内容
-        let static_facts = if !static_facts.is_empty() {
-            if let Some(ref llm) = self.llm {
-                let user_prompt = format!(
-                    "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
-                    static_facts
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| format!("{}. {}", i + 1, f))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                let filter_fut = crate::llm::complete_json::<ProfileFilterResponse>(
-                    &**llm,
-                    PROFILE_FILTER_SYSTEM_PROMPT,
-                    &user_prompt,
-                );
-                match tokio::time::timeout(std::time::Duration::from_secs(3), filter_fut).await {
-                    Ok(Ok(resp)) => resp.facts,
-                    Ok(Err(e)) => {
-                        tracing::warn!("Profile LLM filter failed, using raw facts: {}", e);
-                        static_facts
-                    }
-                    Err(_) => {
-                        tracing::warn!("Profile LLM filter timed out (3s), using raw facts");
-                        static_facts
-                    }
-                }
-            } else {
-                static_facts
-            }
-        } else {
-            static_facts
-        };
-
-        let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
-        let dynamic_context: Vec<String> = all_memories
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m.category,
-                    Category::Events | Category::Cases | Category::Patterns
-                )
-                    && parse_datetime(&m.created_at)
-                        .map(|dt| dt >= cutoff)
-                        .unwrap_or(false)
-            })
-            .take(10)
-            .map(|m| sanitize_profile_content(&m.content))
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let profile = UserProfile {
-            static_facts,
-            dynamic_context,
-        };
+        let profile = build_profile(&self.store, self.llm.as_ref()).await?;
 
         let search_results = match query {
             Some(q) => {
@@ -176,14 +128,103 @@ impl ProfileService {
 
         if query.is_none() {
             let mut cache = self.cache.write().await;
-            *cache = Some(CachedProfile {
-                profile: response.profile.clone(),
-                cached_at: Instant::now(),
-            });
+            *cache = Some(CachedProfile::new(response.profile.clone()));
         }
 
         Ok(response)
     }
+}
+
+async fn build_profile(
+    store: &Arc<LanceStore>,
+    llm: Option<&Arc<dyn LlmService>>,
+) -> Result<UserProfile, OmemError> {
+    let filter = ListFilter {
+        state: Some("active".to_string()),
+        sort: "created_at".to_string(),
+        order: "desc".to_string(),
+        ..Default::default()
+    };
+    let all_memories = store.list_filtered(&filter, 1000, 0).await?;
+
+    // Exclude private memories from profile generation
+    let all_memories: Vec<_> = all_memories
+        .into_iter()
+        .filter(|m| m.visibility != "private")
+        .collect();
+
+    let mut static_memories: Vec<_> = all_memories
+        .iter()
+        .filter(|m| m.category == Category::Profile || m.category == Category::Preferences)
+        .collect();
+    static_memories.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let static_facts: Vec<String> = static_memories
+        .iter()
+        .take(20)
+        .map(|m| sanitize_profile_content(&m.content))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // LLM过滤：去除非画像内容
+    let static_facts = if !static_facts.is_empty() {
+        if let Some(llm) = llm {
+            let user_prompt = format!(
+                "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
+                static_facts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| format!("{}. {}", i + 1, f))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let filter_fut = crate::llm::complete_json::<ProfileFilterResponse>(
+                &**llm,
+                PROFILE_FILTER_SYSTEM_PROMPT,
+                &user_prompt,
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(3), filter_fut).await {
+                Ok(Ok(resp)) => resp.facts,
+                Ok(Err(e)) => {
+                    tracing::warn!("Profile LLM filter failed, using raw facts: {}", e);
+                    static_facts
+                }
+                Err(_) => {
+                    tracing::warn!("Profile LLM filter timed out (3s), using raw facts");
+                    static_facts
+                }
+            }
+        } else {
+            static_facts
+        }
+    } else {
+        static_facts
+    };
+
+    let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
+    let dynamic_context: Vec<String> = all_memories
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.category,
+                Category::Events | Category::Cases | Category::Patterns
+            )
+                && parse_datetime(&m.created_at)
+                    .map(|dt| dt >= cutoff)
+                    .unwrap_or(false)
+        })
+        .take(10)
+        .map(|m| sanitize_profile_content(&m.content))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    Ok(UserProfile {
+        static_facts,
+        dynamic_context,
+    })
 }
 
 fn sanitize_profile_content(content: &str) -> String {
