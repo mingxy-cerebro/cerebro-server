@@ -208,6 +208,30 @@ pub fn strip_envelope_metadata(text: &str) -> String {
         .expect("valid regex: sender_info");
     let result = sender_info.replace_all(&result, "");
 
+    let compressed_section = Regex::new(r"(?ms)^\s*\[Compressed conversation section\].*?(?=^\s*\[|^\s*$|\z)")
+        .expect("valid regex: compressed_section");
+    let result = compressed_section.replace_all(&result, "");
+
+    let dcp_message_id = Regex::new(r"(?ms)<dcp-message-id\b.*?</dcp-message-id>")
+        .expect("valid regex: dcp_message_id");
+    let result = dcp_message_id.replace_all(&result, "");
+
+    let dcp_system_reminder = Regex::new(r"(?ms)<dcp-system-reminder\b.*?</dcp-system-reminder>")
+        .expect("valid regex: dcp_system_reminder");
+    let result = dcp_system_reminder.replace_all(&result, "");
+
+    let system_reminder = Regex::new(r"(?ms)^\s*\[system-reminder\].*?(?=^\s*\[|^\s*$|\z)")
+        .expect("valid regex: system_reminder");
+    let result = system_reminder.replace_all(&result, "");
+
+    let category_skill = Regex::new(r"(?ms)^\s*\[Category\+Skill Reminder\].*?(?=^\s*\[|^\s*$|\z)")
+        .expect("valid regex: category_skill");
+    let result = category_skill.replace_all(&result, "");
+
+    let html_comment = Regex::new(r"(?ms)<!--.*?-->")
+        .expect("valid regex: html_comment");
+    let result = html_comment.replace_all(&result, "");
+
     result.into_owned()
 }
 
@@ -304,5 +328,106 @@ mod tests {
         let input = "user: I like Rust\nassistant: Great choice!";
         let result = strip_envelope_metadata(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn strip_envelope_compressed_section_block() {
+        let input = "[Compressed conversation section]\nSome compressed content here\nMore lines\n\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("Compressed conversation section"));
+        assert!(!result.contains("Some compressed content"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_dcp_message_id_tag() {
+        let input = "<dcp-message-id>m0001</dcp-message-id>\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("dcp-message-id"));
+        assert!(!result.contains("m0001"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_dcp_system_reminder_tag() {
+        let input = "<dcp-system-reminder>some reminder</dcp-system-reminder>\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("dcp-system-reminder"));
+        assert!(!result.contains("some reminder"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_system_reminder_block() {
+        let input = "[system-reminder]\nThis is a system reminder\nWith multiple lines\n\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("system-reminder"));
+        assert!(!result.contains("This is a system reminder"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_category_skill_reminder_block() {
+        let input = "[Category+Skill Reminder]\nSome skill reminder content\nMore content\n\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("Category+Skill Reminder"));
+        assert!(!result.contains("skill reminder content"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_html_comment() {
+        let input = "<!-- this is a comment -->\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("this is a comment"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_multiline_comment() {
+        let input = "user: hello\n<!-- multi\nline comment\nblock -->\nassistant: hi";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("multi"));
+        assert!(!result.contains("line comment"));
+        assert!(result.contains("user: hello"));
+        assert!(result.contains("assistant: hi"));
+    }
+
+    #[test]
+    fn strip_envelope_dcp_message_id_multiline() {
+        let input = "<dcp-message-id>\nm0001\n</dcp-message-id>\nuser: hello";
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("dcp-message-id"));
+        assert!(!result.contains("m0001"));
+        assert!(result.contains("user: hello"));
+    }
+
+    #[test]
+    fn strip_envelope_all_artifacts_comprehensive() {
+        let input = r#"System: [2024-01-01T00:00:00Z] Channel #general
+[Compressed conversation section]
+Some compressed content
+<dcp-message-id>m0001</dcp-message-id>
+<dcp-system-reminder>reminder text</dcp-system-reminder>
+[system-reminder]
+System reminder content
+[Category+Skill Reminder]
+Skill reminder content
+<!-- html comment -->
+Conversation info (untrusted metadata):
+{"platform": "slack"}
+Sender (untrusted metadata):
+{"name": "John"}
+user: hello world"#;
+        let result = strip_envelope_metadata(input);
+        assert!(!result.contains("Channel #general"));
+        assert!(!result.contains("Compressed conversation section"));
+        assert!(!result.contains("dcp-message-id"));
+        assert!(!result.contains("dcp-system-reminder"));
+        assert!(!result.contains("system-reminder"));
+        assert!(!result.contains("Category+Skill Reminder"));
+        assert!(!result.contains("html comment"));
+        assert!(!result.contains("untrusted metadata"));
+        assert!(result.contains("user: hello world"));
     }
 }

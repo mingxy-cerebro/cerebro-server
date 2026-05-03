@@ -56,7 +56,7 @@ impl Reconciler {
             return Ok(Vec::new());
         }
 
-        let (existing, all_searches_failed) = self.gather_existing(facts).await;
+        let (existing, all_searches_failed) = self.gather_existing(facts, session_id.clone()).await;
 
         if existing.is_empty() && all_searches_failed {
             return Err(OmemError::Internal(
@@ -97,6 +97,23 @@ impl Reconciler {
         if existing.is_empty() {
             return self.create_all_facts(&facts, tenant_id, agent_id.clone(), session_id.clone()).await;
         }
+
+        let (fast_merged, facts) = if let Some(ref sid) = session_id {
+            self.fast_session_merge(&facts, &existing, sid, tenant_id).await?
+        } else {
+            (Vec::new(), facts)
+        };
+        if !fast_merged.is_empty() {
+            info!(
+                count = fast_merged.len(),
+                "facts merged by fast session merge path"
+            );
+            created_memories.extend(fast_merged);
+        }
+        if facts.is_empty() {
+            return Ok(created_memories);
+        }
+
         let mut remaining_facts: Vec<(usize, &ExtractedFact)> = Vec::new();
 
         for (idx, fact) in facts.iter().enumerate() {
@@ -232,6 +249,69 @@ impl Reconciler {
         }
 
         Ok(created_memories)
+    }
+
+    async fn fast_session_merge(
+        &self,
+        facts: &[ExtractedFact],
+        existing: &[Memory],
+        session_id: &str,
+        _tenant_id: &str,
+    ) -> Result<(Vec<Memory>, Vec<ExtractedFact>), OmemError> {
+        let session_memories: Vec<&Memory> = existing
+            .iter()
+            .filter(|m| m.session_id.as_deref() == Some(session_id))
+            .collect();
+
+        if session_memories.is_empty() {
+            return Ok((Vec::new(), facts.to_vec()));
+        }
+
+        let mut merged = Vec::new();
+        let mut remaining = Vec::new();
+
+        for fact in facts {
+            let mut best_match: Option<(f32, &Memory)> = None;
+            for mem in &session_memories {
+                let sim = jaccard_similarity(&fact.l0_abstract, &mem.l0_abstract);
+                if sim > 0.5 {
+                    match best_match {
+                        None => best_match = Some((sim, mem)),
+                        Some((best_sim, _)) if sim > best_sim => best_match = Some((sim, mem)),
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Some((_sim, existing_mem)) = best_match {
+                if existing_mem.memory_type.is_pinned() {
+                    remaining.push(fact.clone());
+                    continue;
+                }
+
+                let merged_content = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
+                let mut updated = (*existing_mem).clone();
+                updated.content = merged_content.to_string();
+                updated.l0_abstract = fact.l0_abstract.clone();
+                updated.l1_overview = fact.l1_overview.clone();
+                updated.l2_content = fact.l2_content.clone();
+                updated.tags = fact.tags.clone();
+                updated.confidence = fact.quality_score.clamp(0.1, 1.0);
+                let category: Category = fact.category.parse().unwrap_or(Category::Profile);
+                updated.importance = category_importance(&category, fact.quality_score);
+                updated.updated_at = chrono::Utc::now().to_rfc3339();
+
+                let embeddings = self.embed.embed(&[updated.l0_abstract.clone()]).await?;
+                let vector = embeddings.first().map(|v| v.as_slice());
+
+                self.store.update(&updated, vector).await?;
+                merged.push(updated);
+            } else {
+                remaining.push(fact.clone());
+            }
+        }
+
+        Ok((merged, remaining))
     }
 
     async fn preference_slot_guard(
@@ -456,10 +536,34 @@ impl Reconciler {
         }
     }
 
-    async fn gather_existing(&self, facts: &[ExtractedFact]) -> (Vec<Memory>, bool) {
+    async fn gather_existing(
+        &self,
+        facts: &[ExtractedFact],
+        session_id: Option<String>,
+    ) -> (Vec<Memory>, bool) {
         let mut seen_ids: HashMap<String, Memory> = HashMap::new();
         let mut any_search_succeeded = false;
         let mut total_count = 0;
+
+        if let Some(ref sid) = session_id {
+            match self.store.find_memories_by_session_id(sid, self.max_existing).await {
+                Ok(results) => {
+                    any_search_succeeded = true;
+                    for mem in results {
+                        if total_count >= self.max_existing {
+                            break;
+                        }
+                        if !seen_ids.contains_key(&mem.id) {
+                            seen_ids.insert(mem.id.clone(), mem);
+                            total_count += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "session_id search failed during gather");
+                }
+            }
+        }
 
         for fact in facts {
             if total_count >= self.max_existing {
@@ -1463,5 +1567,85 @@ mod tests {
             .expect("found");
         assert!(old.invalidated_at.is_none());
         assert!(old.superseded_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_fast_merge() {
+        let (store, _dir) = setup().await;
+        let embed = Arc::new(MockEmbed);
+
+        let mut existing = Memory::new(
+            "User likes coffee in the morning",
+            Category::Preferences,
+            MemoryType::Insight,
+            "t-001",
+        );
+        existing.l0_abstract = "User likes coffee in the morning".to_string();
+        existing.session_id = Some("s-001".to_string());
+        store
+            .create(&existing, Some(&vec![0.0; 1024]))
+            .await
+            .expect("create");
+
+        struct PanicLlm;
+        #[async_trait::async_trait]
+        impl LlmService for PanicLlm {
+            async fn complete_text(&self, _system: &str, _user: &str) -> Result<String, OmemError> {
+                panic!("LLM should not be called when fast session merge handles the fact");
+            }
+        }
+
+        let llm = Arc::new(PanicLlm);
+        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let facts = vec![make_fact("User likes morning coffee", "preferences")];
+
+        let result = reconciler
+            .reconcile(&facts, "t-001", None, Some("s-001".to_string()))
+            .await
+            .expect("reconcile");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, existing.id);
+        assert_eq!(result[0].l0_abstract, "User likes morning coffee");
+
+        let updated = store
+            .get_by_id(&existing.id)
+            .await
+            .expect("get")
+            .expect("found");
+        assert_eq!(updated.l0_abstract, "User likes morning coffee");
+    }
+
+    #[tokio::test]
+    async fn test_fast_session_merge_no_session_id() {
+        let (store, _dir) = setup().await;
+        let embed = Arc::new(MockEmbed);
+
+        let mut existing = Memory::new(
+            "User likes coffee in the morning",
+            Category::Preferences,
+            MemoryType::Insight,
+            "t-001",
+        );
+        existing.l0_abstract = "User likes coffee in the morning".to_string();
+        existing.session_id = Some("s-001".to_string());
+        store
+            .create(&existing, Some(&vec![0.0; 1024]))
+            .await
+            .expect("create");
+
+        let create_response = r#"{"decisions":[{"action":"CREATE","fact_index":0,"reason":"no session_id match"}]}"#;
+        let llm = Arc::new(MockLlm::new(create_response));
+        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let facts = vec![make_fact("User likes morning coffee", "preferences")];
+
+        let result = reconciler
+            .reconcile(&facts, "t-001", None, None)
+            .await
+            .expect("reconcile");
+
+        assert_eq!(result.len(), 1);
+        assert_ne!(result[0].id, existing.id);
+        assert_eq!(result[0].l0_abstract, "User likes morning coffee");
     }
 }

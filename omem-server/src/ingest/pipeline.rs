@@ -207,6 +207,11 @@ impl IngestPipeline {
 
             let mut admitted_facts = Vec::new();
             for fact in &clean_facts {
+                if is_compression_artifact(&fact.l0_abstract) {
+                    debug!(fact = %fact.l0_abstract, "filtered as compression artifact");
+                    continue;
+                }
+
                 let category = fact
                     .category
                     .parse::<Category>()
@@ -389,7 +394,15 @@ fn should_skip_content(content: &str) -> bool {
         .filter(|p| content_lower.contains(*p))
         .count();
 
-    match_count >= 3
+    match_count >= 1
+}
+
+fn is_compression_artifact(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("完成dcp压缩")
+        || (lower.contains("移除") && lower.contains("数据"))
+        || (lower.contains("新增") && lower.contains("摘要"))
+        || (lower.contains("compressed") && lower.contains("messages"))
 }
 
 fn select_messages(messages: &[IngestMessage]) -> Vec<IngestMessage> {
@@ -785,5 +798,43 @@ mod tests {
         assert!(detect_private_content("Card: 6222021234567890123"));
         assert!(detect_private_content("ID: 110101199001011234"));
         assert!(!detect_private_content("The number 12345"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_dcp_compress() {
+        assert!(is_compression_artifact("完成DCP压缩#10，移除-161.6K数据"));
+        assert!(is_compression_artifact("用户完成DCP压缩操作"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_remove_data() {
+        assert!(is_compression_artifact("移除大量无用数据"));
+        assert!(is_compression_artifact("本次操作移除了历史数据"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_add_summary() {
+        assert!(is_compression_artifact("新增多个摘要条目"));
+        assert!(is_compression_artifact("系统新增会话摘要"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_compressed_messages() {
+        assert!(is_compression_artifact("Compressed 15 messages into summary"));
+        assert!(is_compression_artifact("Successfully compressed all messages"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_not_artifact() {
+        assert!(!is_compression_artifact("User prefers dark mode"));
+        assert!(!is_compression_artifact("I like to compress files with gzip"));
+        assert!(!is_compression_artifact("新增用户偏好设置"));
+        assert!(!is_compression_artifact("移除旧密码"));
+    }
+
+    #[test]
+    fn test_is_compression_artifact_case_insensitive() {
+        assert!(is_compression_artifact("COMPRESSED MESSAGES"));
+        assert!(is_compression_artifact("完成DCP压缩"));
     }
 }

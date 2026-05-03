@@ -127,6 +127,11 @@ fn build_regex_patterns() -> Vec<Regex> {
         r"(?i)background_output",
         r"(?i)playwright_browser",
         r"(?i)Thinking自检",
+        // v1.8.0: DCP compression metadata patterns
+        r"(?i)完成DCP压缩#\d+",
+        r"(?i)移除-?[\d.]+K?数据",
+        r"(?i)新增\+?[\d.]+K?摘要",
+        r"(?i)compressed \d+ messages?",
     ];
 
     patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
