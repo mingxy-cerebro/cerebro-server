@@ -16,7 +16,7 @@ use crate::ingest::types::{BatchDedupResult, ExtractedFact, ReconcileResult};
 use crate::llm::{complete_json, LlmService};
 use crate::store::LanceStore;
 
-const DEFAULT_MAX_EXISTING: usize = 150;
+const DEFAULT_MAX_EXISTING: usize = 50;
 const DEFAULT_MAX_PER_FACT: usize = 20;
 const DEFAULT_MIN_SIMILARITY: f32 = 0.3;
 

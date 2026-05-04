@@ -15,6 +15,7 @@ use crate::store::{LanceStore, SpaceStore};
 
 const SMART_SPLIT_MAX_CHARS: usize = 80_000;
 const SMART_SPLIT_OVERLAP: usize = 2_000;
+const MAX_CHUNKS: usize = 5; // 限制最大chunk数，防止单次导入消耗过多LLM token
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContentHint {
@@ -236,7 +237,11 @@ impl IntelligenceTask {
     }
 
     async fn extract_atomic(&self, full_text: &str) -> Result<Vec<ExtractedFact>, OmemError> {
-        let chunks = smart_split(full_text, SMART_SPLIT_MAX_CHARS, SMART_SPLIT_OVERLAP);
+        let mut chunks = smart_split(full_text, SMART_SPLIT_MAX_CHARS, SMART_SPLIT_OVERLAP);
+        if chunks.len() > MAX_CHUNKS {
+            warn!("Truncating {} chunks to MAX_CHUNKS ({})", chunks.len(), MAX_CHUNKS);
+            chunks.truncate(MAX_CHUNKS);
+        }
         let mut all_facts = Vec::new();
 
         for (i, chunk) in chunks.iter().enumerate() {
