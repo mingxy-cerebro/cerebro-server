@@ -104,6 +104,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/vault/password", delete(handlers::delete_vault_password))
         .route("/v1/vault/status", get(handlers::get_vault_status))
         .route("/v1/should-recall", post(handlers::should_recall))
+        .route("/v1/session-recalls/groups", get(handlers::list_session_groups))
+        .route(
+            "/v1/session-recalls/session/{session_id}",
+            delete(handlers::delete_session_recalls_by_session),
+        )
         .route(
             "/v1/session-recalls",
             get(handlers::list_session_recalls).post(handlers::create_session_recall),

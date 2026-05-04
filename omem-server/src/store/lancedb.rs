@@ -65,6 +65,16 @@ pub struct SessionRecall {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionGroupRaw {
+    pub session_id: String,
+    pub count: usize,
+    pub auto_count: usize,
+    pub manual_count: usize,
+    pub last_injected_at: String,
+    pub latest_query: String,
+}
+
 pub struct LanceStore {
     db: Connection,
     table_name: String,
@@ -185,6 +195,7 @@ impl LanceStore {
         }
 
         self.ensure_scalar_indexes().await?;
+        self.ensure_session_recalls_indexes().await?;
 
         // One-time purge of previously soft-deleted data
         let table = self.open_table().await?;
@@ -230,6 +241,28 @@ impl LanceStore {
                     .execute()
                     .await
                     .map_err(|e| OmemError::Storage(format!("create {col} bitmap index failed: {e}")))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn ensure_session_recalls_indexes(&self) -> Result<(), OmemError> {
+        let table = self.open_session_recalls_table().await?;
+
+        let existing = table.list_indices().await
+            .map_err(|e| OmemError::Storage(format!("list session_recalls indices failed: {e}")))?;
+        let indexed_columns: std::collections::HashSet<String> = existing.iter()
+            .flat_map(|idx| idx.columns.clone())
+            .collect();
+
+        let btree_cols = ["tenant_id", "session_id", "created_at"];
+        for col in btree_cols {
+            if !indexed_columns.contains(col) {
+                table.create_index(&[col], Index::BTree(BTreeIndexBuilder::default()))
+                    .execute()
+                    .await
+                    .map_err(|e| OmemError::Storage(format!("create session_recalls {col} btree index failed: {e}")))?;
             }
         }
 
@@ -447,6 +480,89 @@ impl LanceStore {
             .delete(format!("id = '{}'", escape_sql(id)).as_str())
             .await
             .map_err(|e| OmemError::Storage(format!("failed to delete session_recall: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn list_session_groups(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<SessionGroupRaw>, OmemError> {
+        let table = self.open_session_recalls_table().await?;
+        let filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
+        // Only select lightweight columns needed for grouping — skip memories_json
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .select(Select::columns(&["session_id", "recall_type", "created_at", "query_text"]))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("list session groups query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut groups: std::collections::HashMap<String, SessionGroupRaw> = std::collections::HashMap::new();
+        for batch in &batches {
+            let session_ids = batch.column_by_name("session_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing session_id column".into()))?;
+            let recall_types = batch.column_by_name("recall_type")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing recall_type column".into()))?;
+            let created_ats = batch.column_by_name("created_at")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing created_at column".into()))?;
+            let query_texts = batch.column_by_name("query_text")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing query_text column".into()))?;
+
+            for i in 0..batch.num_rows() {
+                let sid = session_ids.value(i).to_string();
+                let rtype = recall_types.value(i).to_string();
+                let cat = created_ats.value(i).to_string();
+                let qt = query_texts.value(i).to_string();
+
+                let entry = groups.entry(sid.clone()).or_insert_with(|| SessionGroupRaw {
+                    session_id: sid,
+                    count: 0,
+                    auto_count: 0,
+                    manual_count: 0,
+                    last_injected_at: cat.clone(),
+                    latest_query: qt,
+                });
+                entry.count += 1;
+                if rtype == "auto" {
+                    entry.auto_count += 1;
+                } else if rtype == "manual" {
+                    entry.manual_count += 1;
+                }
+                if cat > entry.last_injected_at {
+                    entry.last_injected_at = cat;
+                    entry.latest_query = query_texts.value(i).to_string();
+                }
+            }
+        }
+
+        let mut result: Vec<SessionGroupRaw> = groups.into_values().collect();
+        result.sort_by(|a, b| b.last_injected_at.cmp(&a.last_injected_at));
+        Ok(result)
+    }
+
+    pub async fn delete_session_recalls_by_session(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> Result<(), OmemError> {
+        let table = self.open_session_recalls_table().await?;
+        let filter = format!(
+            "tenant_id = '{}' AND session_id = '{}'",
+            escape_sql(tenant_id),
+            escape_sql(session_id)
+        );
+        table
+            .delete(&filter)
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to delete session_recalls by session: {e}")))?;
         Ok(())
     }
 

@@ -29,7 +29,8 @@ pub use memory::{
 pub use merge::merge_memories;
 pub use profile::get_profile;
 pub use session_recalls::{
-    create_session_recall, delete_session_recall, get_session_recall, list_session_recalls, should_recall,
+    create_session_recall, delete_session_recall, delete_session_recalls_by_session,
+    get_session_recall, list_session_groups, list_session_recalls, should_recall,
 };
 pub use sharing::{
     batch_share, create_auto_share_rule, delete_auto_share_rule, list_auto_share_rules,

@@ -88,6 +88,32 @@ fn default_limit() -> usize {
     20
 }
 
+#[derive(Deserialize)]
+pub struct ListSessionGroupsQuery {
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Serialize)]
+pub struct SessionGroup {
+    pub session_id: String,
+    pub count: usize,
+    pub auto_count: usize,
+    pub manual_count: usize,
+    pub last_injected_at: String,
+    pub latest_query: String,
+}
+
+#[derive(Serialize)]
+pub struct ListSessionGroupsResponse {
+    pub groups: Vec<SessionGroup>,
+    pub total_count: usize,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 #[derive(Serialize)]
 pub struct ListSessionRecallsResponse {
     pub recalls: Vec<SessionRecall>,
@@ -496,6 +522,60 @@ pub async fn delete_session_recall(
     store.delete_session_recall(&id).await?;
 
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+pub async fn list_session_groups(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Query(params): Query<ListSessionGroupsQuery>,
+) -> Result<Json<ListSessionGroupsResponse>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+    let raw_groups = store
+        .list_session_groups(&auth.tenant_id)
+        .await?;
+
+    let total_count = raw_groups.len();
+    let groups: Vec<SessionGroup> = raw_groups
+        .into_iter()
+        .skip(params.offset)
+        .take(params.limit)
+        .map(|g| SessionGroup {
+            session_id: g.session_id,
+            count: g.count,
+            auto_count: g.auto_count,
+            manual_count: g.manual_count,
+            last_injected_at: g.last_injected_at,
+            latest_query: g.latest_query,
+        })
+        .collect();
+
+    Ok(Json(ListSessionGroupsResponse {
+        groups,
+        total_count,
+        limit: params.limit,
+        offset: params.offset,
+    }))
+}
+
+pub async fn delete_session_recalls_by_session(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    if session_id.trim().is_empty() {
+        return Err(OmemError::Validation("session_id cannot be empty".into()));
+    }
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    store.delete_session_recalls_by_session(&auth.tenant_id, &session_id).await?;
+
+    Ok(Json(serde_json::json!({"success": true})))
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
