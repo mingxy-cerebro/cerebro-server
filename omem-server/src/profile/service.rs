@@ -7,7 +7,7 @@ use dashmap::DashMap;
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
-use crate::domain::profile::UserProfile;
+use crate::domain::profile::{StaticFact, UserProfile};
 use crate::lifecycle::decay::parse_datetime;
 use crate::llm::LlmService;
 use crate::retrieve::SearchResult;
@@ -169,11 +169,16 @@ async fn build_profile(
             .partial_cmp(&a.importance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let static_facts: Vec<String> = static_memories
+    let static_facts: Vec<StaticFact> = static_memories
         .iter()
         .take(20)
-        .map(|m| sanitize_profile_content(&m.content))
-        .filter(|s| !s.is_empty())
+        .map(|m| StaticFact {
+            content: sanitize_profile_content(&m.content),
+            tags: m.tags.clone(),
+            visibility: m.visibility.clone(),
+            l2_content: Some(m.l2_content.clone()),
+        })
+        .filter(|s| !s.content.is_empty())
         .collect();
 
     let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
@@ -246,18 +251,22 @@ mod tests {
             "t-001".to_string(),
         );
 
-        let m1 = make_memory_with(
+        let mut m1 = make_memory_with(
             "t-001",
             "speaks mandarin",
             Category::Profile,
             &days_ago_str(30),
         );
-        let m2 = make_memory_with(
+        m1.tags = vec!["language".to_string()];
+        m1.visibility = "team".to_string();
+        let mut m2 = make_memory_with(
             "t-001",
             "prefers dark mode",
             Category::Preferences,
             &days_ago_str(15),
         );
+        m2.tags = vec!["ui".to_string()];
+        m2.visibility = "personal".to_string();
         let m3 = make_memory_with(
             "t-001",
             "meeting yesterday",
@@ -271,14 +280,16 @@ mod tests {
 
         let resp = svc.get_profile(None).await.expect("get_profile");
         assert_eq!(resp.profile.static_facts.len(), 2);
-        assert!(resp
-            .profile
-            .static_facts
-            .contains(&"speaks mandarin".to_string()));
-        assert!(resp
-            .profile
-            .static_facts
-            .contains(&"prefers dark mode".to_string()));
+        assert!(resp.profile.static_facts[0]
+            .content
+            .contains("speaks mandarin"));
+        assert!(resp.profile.static_facts[1]
+            .content
+            .contains("prefers dark mode"));
+        assert!(!resp.profile.static_facts[0].tags.is_empty());
+        assert!(!resp.profile.static_facts[0].visibility.is_empty());
+        assert!(!resp.profile.static_facts[1].tags.is_empty());
+        assert!(!resp.profile.static_facts[1].visibility.is_empty());
         assert!(resp.search_results.is_none());
     }
 
