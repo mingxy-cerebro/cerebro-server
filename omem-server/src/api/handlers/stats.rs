@@ -828,9 +828,17 @@ mod tests {
             embed: Arc::new(NoopEmbedder::new(1024)),
             llm: Arc::new(NoopLlm),
             recall_llm: Arc::new(NoopLlm),
-            cluster_store: Arc::new(crate::cluster::cluster_store::ClusterStore::new(
-                &store_manager.get_system_db().await.expect("system db"),
-            ).await.expect("cluster store")),
+            cluster_llm: Arc::new(NoopLlm),
+            cluster_store: Arc::new(
+                crate::cluster::cluster_store::ClusterStore::new(
+                    &lancedb::connect(store_dir.path().to_str().expect("path"))
+                        .execute()
+                        .await
+                        .expect("db connect"),
+                )
+                .await
+                .expect("cluster store"),
+            ),
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -838,6 +846,8 @@ mod tests {
             scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
             session_locks: Arc::new(dashmap::DashMap::new()),
             reranker: None,
+            ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+            profile_cache: Arc::new(dashmap::DashMap::new()),
         });
 
         (state, store_dir, space_dir, tenant_dir)

@@ -240,7 +240,7 @@ impl IntelligenceTask {
         let mut chunks = smart_split(full_text, SMART_SPLIT_MAX_CHARS, SMART_SPLIT_OVERLAP);
         if chunks.len() > MAX_CHUNKS {
             warn!("Truncating {} chunks to MAX_CHUNKS ({})", chunks.len(), MAX_CHUNKS);
-            chunks.truncate(MAX_CHUNKS);
+            chunks.drain(..chunks.len() - MAX_CHUNKS);
         }
         let mut all_facts = Vec::new();
 

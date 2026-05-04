@@ -3,34 +3,26 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use serde::Deserialize;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::domain::profile::UserProfile;
-use crate::ingest::prompts::PROFILE_FILTER_SYSTEM_PROMPT;
 use crate::lifecycle::decay::parse_datetime;
 use crate::llm::LlmService;
 use crate::retrieve::SearchResult;
 use crate::store::lancedb::{LanceStore, ListFilter};
 
-#[derive(Deserialize)]
-struct ProfileFilterResponse {
-    facts: Vec<String>,
-}
-
-/// Cache TTL for profile responses (30 minutes)
 const PROFILE_CACHE_TTL_SECS: u64 = 1800;
 
-struct CachedProfile {
-    profile: UserProfile,
-    cached_at: Instant,
-    refreshing: AtomicBool,
+pub struct CachedProfile {
+    pub profile: UserProfile,
+    pub cached_at: Instant,
+    pub refreshing: AtomicBool,
 }
 
 impl CachedProfile {
-    fn new(profile: UserProfile) -> Self {
+    pub fn new(profile: UserProfile) -> Self {
         Self {
             profile,
             cached_at: Instant::now(),
@@ -47,15 +39,21 @@ pub struct ProfileResponse {
 pub struct ProfileService {
     store: Arc<LanceStore>,
     llm: Option<Arc<dyn LlmService>>,
-    cache: Arc<RwLock<Option<CachedProfile>>>,
+    cache: Arc<DashMap<String, CachedProfile>>,
+    tenant_id: String,
 }
 
 impl ProfileService {
-    pub fn new(store: Arc<LanceStore>) -> Self {
+    pub fn new(
+        store: Arc<LanceStore>,
+        cache: Arc<DashMap<String, CachedProfile>>,
+        tenant_id: String,
+    ) -> Self {
         Self {
             store,
             llm: None,
-            cache: Arc::new(RwLock::new(None)),
+            cache,
+            tenant_id,
         }
     }
 
@@ -66,39 +64,49 @@ impl ProfileService {
 
     pub async fn get_profile(&self, query: Option<&str>) -> Result<ProfileResponse, OmemError> {
         if query.is_none() {
-            let cache = self.cache.read().await;
-            if let Some(ref cached) = *cache {
+            if let Some(cached) = self.cache.get(&self.tenant_id) {
                 let age = cached.cached_at.elapsed().as_secs();
-                if age < PROFILE_CACHE_TTL_SECS {
+                if age > 7200 {
+                    drop(cached);
+                    self.cache.remove(&self.tenant_id);
+                } else if age < PROFILE_CACHE_TTL_SECS {
+                    let profile = cached.profile.clone();
+                    drop(cached);
                     return Ok(ProfileResponse {
-                        profile: cached.profile.clone(),
+                        profile,
+                        search_results: None,
+                    });
+                } else {
+                    let profile = cached.profile.clone();
+                    let should_refresh = cached
+                        .refreshing
+                        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_ok();
+                    drop(cached);
+                    if should_refresh {
+                        let store = Arc::clone(&self.store);
+                        let llm = self.llm.clone();
+                        let cache = Arc::clone(&self.cache);
+                        let tenant_id = self.tenant_id.clone();
+                        tokio::spawn(async move {
+                            match build_profile(&store, llm.as_ref()).await {
+                                Ok(profile) => {
+                                    cache.insert(tenant_id, CachedProfile::new(profile));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Background profile refresh failed: {}", e);
+                                    if let Some(cached) = cache.get(&tenant_id) {
+                                        cached.refreshing.store(false, Ordering::Release);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    return Ok(ProfileResponse {
+                        profile,
                         search_results: None,
                     });
                 }
-                // stale-while-revalidate: return stale cache immediately, refresh in background
-                if !cached.refreshing.swap(true, Ordering::Relaxed) {
-                    let store = Arc::clone(&self.store);
-                    let llm = self.llm.clone();
-                    let cache = Arc::clone(&self.cache);
-                    tokio::spawn(async move {
-                        match build_profile(&store, llm.as_ref()).await {
-                            Ok(profile) => {
-                                let mut c = cache.write().await;
-                                *c = Some(CachedProfile::new(profile));
-                            }
-                            Err(e) => {
-                                tracing::warn!("Background profile refresh failed: {}", e);
-                                if let Some(ref cached) = *cache.read().await {
-                                    cached.refreshing.store(false, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    });
-                }
-                return Ok(ProfileResponse {
-                    profile: cached.profile.clone(),
-                    search_results: None,
-                });
             }
         }
 
@@ -127,8 +135,8 @@ impl ProfileService {
         };
 
         if query.is_none() {
-            let mut cache = self.cache.write().await;
-            *cache = Some(CachedProfile::new(response.profile.clone()));
+            self.cache
+                .insert(self.tenant_id.clone(), CachedProfile::new(response.profile.clone()));
         }
 
         Ok(response)
@@ -137,7 +145,7 @@ impl ProfileService {
 
 async fn build_profile(
     store: &Arc<LanceStore>,
-    llm: Option<&Arc<dyn LlmService>>,
+    _llm: Option<&Arc<dyn LlmService>>,
 ) -> Result<UserProfile, OmemError> {
     let filter = ListFilter {
         state: Some("active".to_string()),
@@ -147,7 +155,6 @@ async fn build_profile(
     };
     let all_memories = store.list_filtered(&filter, 1000, 0).await?;
 
-    // Exclude private memories from profile generation
     let all_memories: Vec<_> = all_memories
         .into_iter()
         .filter(|m| m.visibility != "private")
@@ -168,41 +175,6 @@ async fn build_profile(
         .map(|m| sanitize_profile_content(&m.content))
         .filter(|s| !s.is_empty())
         .collect();
-
-    // LLM过滤：去除非画像内容
-    let static_facts = if !static_facts.is_empty() {
-        if let Some(llm) = llm {
-            let user_prompt = format!(
-                "请从以下记忆条目中筛选出真正的用户画像信息：\n{}",
-                static_facts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| format!("{}. {}", i + 1, f))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            let filter_fut = crate::llm::complete_json::<ProfileFilterResponse>(
-                &**llm,
-                PROFILE_FILTER_SYSTEM_PROMPT,
-                &user_prompt,
-            );
-            match tokio::time::timeout(std::time::Duration::from_secs(3), filter_fut).await {
-                Ok(Ok(resp)) => resp.facts,
-                Ok(Err(e)) => {
-                    tracing::warn!("Profile LLM filter failed, using raw facts: {}", e);
-                    static_facts
-                }
-                Err(_) => {
-                    tracing::warn!("Profile LLM filter timed out (3s), using raw facts");
-                    static_facts
-                }
-            }
-        } else {
-            static_facts
-        }
-    } else {
-        static_facts
-    };
 
     let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
     let dynamic_context: Vec<String> = all_memories
@@ -268,7 +240,11 @@ mod tests {
     #[tokio::test]
     async fn test_static_facts_from_profile_category() {
         let (store, _dir) = setup().await;
-        let svc = ProfileService::new(Arc::clone(&store));
+        let svc = ProfileService::new(
+            Arc::clone(&store),
+            Arc::new(dashmap::DashMap::new()),
+            "t-001".to_string(),
+        );
 
         let m1 = make_memory_with(
             "t-001",
@@ -309,7 +285,11 @@ mod tests {
     #[tokio::test]
     async fn test_dynamic_from_recent_events() {
         let (store, _dir) = setup().await;
-        let svc = ProfileService::new(Arc::clone(&store));
+        let svc = ProfileService::new(
+            Arc::clone(&store),
+            Arc::new(dashmap::DashMap::new()),
+            "t-001".to_string(),
+        );
 
         let m1 = make_memory_with(
             "t-001",
@@ -342,7 +322,11 @@ mod tests {
     #[tokio::test]
     async fn test_old_events_excluded() {
         let (store, _dir) = setup().await;
-        let svc = ProfileService::new(Arc::clone(&store));
+        let svc = ProfileService::new(
+            Arc::clone(&store),
+            Arc::new(dashmap::DashMap::new()),
+            "t-001".to_string(),
+        );
 
         let old_event = make_memory_with(
             "t-001",
@@ -367,7 +351,11 @@ mod tests {
     #[tokio::test]
     async fn test_profile_with_search() {
         let (store, _dir) = setup().await;
-        let svc = ProfileService::new(Arc::clone(&store));
+        let svc = ProfileService::new(
+            Arc::clone(&store),
+            Arc::new(dashmap::DashMap::new()),
+            "t-001".to_string(),
+        );
 
         let m1 = make_memory_with(
             "t-001",

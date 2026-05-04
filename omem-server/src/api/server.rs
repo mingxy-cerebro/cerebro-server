@@ -10,6 +10,7 @@ use crate::cluster::cluster_store::ClusterStore;
 use crate::config::OmemConfig;
 use crate::embed::EmbedService;
 use crate::llm::LlmService;
+use crate::profile::service::CachedProfile;
 use crate::retrieve::reranker::Reranker;
 use crate::store::{SpaceStore, StoreManager, TenantStore};
 
@@ -32,6 +33,7 @@ pub struct AppState {
     /// Limits concurrent background ingest tasks (LLM extraction + reconciliation).
     /// Prevents OOM under burst load. Default: 10.
     pub ingest_semaphore: Arc<Semaphore>,
+    pub profile_cache: Arc<DashMap<String, CachedProfile>>,
 }
 
 /// Map tenant_id to their personal Space ID.

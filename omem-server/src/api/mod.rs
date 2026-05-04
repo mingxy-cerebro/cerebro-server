@@ -93,6 +93,7 @@ mod tests {
             session_locks: Arc::new(dashmap::DashMap::new()),
             reranker: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+            profile_cache: Arc::new(dashmap::DashMap::new()),
         });
 
         (build_router(state), dir)

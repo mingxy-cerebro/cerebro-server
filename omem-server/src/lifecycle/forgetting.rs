@@ -183,7 +183,7 @@ mod tests {
         let count = forgetter.cleanup_expired().await.expect("cleanup");
 
         assert_eq!(
-            count, 1,
+            count.len(), 1,
             "only the expired 'today' memory (5 days old) should be deleted"
         );
 
@@ -223,7 +223,7 @@ mod tests {
         let count = forgetter.archive_superseded(30).await.expect("archive");
 
         assert_eq!(
-            count, 1,
+            count.len(), 1,
             "only the old superseded memory should be archived"
         );
 
@@ -245,6 +245,6 @@ mod tests {
 
         let forgetter = AutoForgetter::new(store);
         let count = forgetter.cleanup_expired().await.expect("cleanup");
-        assert_eq!(count, 0);
+        assert_eq!(count.len(), 0);
     }
 }
