@@ -6,6 +6,26 @@ use crate::domain::relation::MemoryRelation;
 use crate::domain::space::Provenance;
 use crate::domain::types::{MemoryState, MemoryType, Tier};
 
+/// Lightweight digest of a memory for summary queries.
+/// Avoids loading full content and vectors.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MemoryDigest {
+    pub id: String,
+    pub title: String,
+    pub category: Category,
+    pub tags: Vec<String>,
+    pub content_preview: String,
+    pub updated_at: String,
+}
+
+/// Summary of session memories returned by fetch_session_* helpers.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SessionMemorySummary {
+    pub memories: Vec<MemoryDigest>,
+    pub merged_summary: String,
+    pub total_count: usize,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Memory {
     pub id: String,

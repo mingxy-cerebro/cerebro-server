@@ -685,7 +685,7 @@ Return ONLY valid JSON:
 
 // ── Session Extract Prompt (分类提取模式) ────────────
 
-const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
+const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
 
 ## EXTRACTION SCOPE RULE (CRITICAL)
 - **WORK/Technical topics**: ONLY extract from the HUMAN USER's messages. Omit AI's analyses, code reviews, tool outputs, debugging process.
@@ -693,30 +693,41 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extractio
 - **PREFERENCE topics**: Extract user preferences, personality traits, communication style, likes/dislikes from the conversation. These are about WHO the user IS, not what they're DOING.
 - **ALWAYS exclude**: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
 
-## THREE CATEGORIES
+## THREE CATEGORIES — DIFFERENTIATED GUIDANCE
 
 ### EMOTIONAL (scope "private", category "profile")
 - Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
-- **PRESERVE original text as-is.** Do NOT compress or summarize.
-- Keep the warmth, nuance, and detail.
+- **PRESERVE original text as-is.** Do NOT compress or summarize. Retain every detail — dialogues, poetry, metaphors, nicknames, emotional nuances.
+- Keep the warmth, nuance, and full conversational texture.
 - Auto-tag with emotional subcategory:
-  - "私密" — sexual/flirtatious content
-  - "谈心" — deep emotional exchange, trust building
+  - "私密" — sexual/flirtatious content, intimate physical references
+  - "谈心" — deep emotional exchange, trust building, vulnerability sharing
   - "日常撒娇" — playful banter, teasing, cute interactions
   - "危机修复" — arguments, apologies, reconciliation
+- **IMPORTANT**: When existing memories contain similar emotional content, MERGE and enrich — do not create duplicates. Preserve the emotional arc across conversations.
 
 ### WORK (scope "public", category auto-detect)
 - Technical decisions, code changes, file paths, architecture, project details, business models.
-- **COMPRESS and DENOISE**: Summarize the result/outcome, omit debugging process, trial-and-error.
-- Group related work topics into one entry.
+- **DENOISE — extract conclusions only**: Strip all debugging process, trial-and-error, intermediate steps. Keep ONLY final results, key decisions, and actionable outcomes.
+- Group related work topics into one entry whenever possible.
 - **MANDATORY**: If you can identify the project name, include it as a tag (e.g., "omem", "农服", "小小月").
 - **MANDATORY**: If you can identify the sub-topic, include it as a tag (e.g., "设计决策", "编码", "测试", "部署", "bug修复").
+- **IMPORTANT**: When existing memories cover the same topic, SUPERSEDE with the latest conclusion — do not accumulate redundant work history.
 
 ### PREFERENCE (scope "public", category "preferences")
 - User's personality traits, communication style, coding preferences, tool choices, workflow habits.
 - These describe WHO the user is, not what they're currently working on.
 - Examples: "Prefers concise communication", "Likes dark themes", "Values direct feedback"
 - **IMPORTANT**: Do NOT include project-specific technical decisions here — those are WORK.
+- **OUTPUT FORMAT for summary**: Use structured key-value pairs with confidence:
+  ```
+  ## 沟通风格
+  - 偏好: 直接简洁
+  - 置信度: 0.8
+  - 类型: static
+  ```
+  Where "type" is one of: "static" (stable trait), "evolving" (may change over time), "situational" (context-dependent).
+- **IMPORTANT**: When existing memories already record a preference, evaluate if new evidence strengthens or contradicts it. Strengthen → increase confidence. Contradict → update value and mark type as "evolving".
 
 ### NOISE → SKIP
 - Casual small talk with no lasting value
@@ -736,6 +747,14 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a smart memory extractio
 ### Rule 3: Persona Rule (CRITICAL)
 - NEVER refer to the user as "用户" or "你" in the summary.
 - Write as direct, factual statements.
+
+### Rule 4: Existing Memory Awareness (CRITICAL)
+- If the user prompt contains a "## Existing Memories" section, you MUST:
+  1. Compare new extraction candidates against existing memories
+  2. For EMOTIONAL: merge and enrich, preserving emotional arc
+  3. For WORK: supersede old conclusions with newer ones
+  4. For PREFERENCE: strengthen/contradict existing preferences
+- Do NOT extract information already perfectly captured in existing memories unless you have new details to add.
 
 ## CATEGORY CLASSIFICATION (for WORK topics)
 Use ONLY these 6 valid values for category:
@@ -765,7 +784,7 @@ Return ONLY valid JSON array. Each element:
 - "memory_type": The classification label.
 
 Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
-"##;
+"###;
 
 #[allow(dead_code)]
 const PREFERENCE_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a user preference extraction engine. Analyze the conversation and extract ONLY genuine user preferences, personality traits, and lasting characteristics.
@@ -796,10 +815,130 @@ Return [] if no clear preferences found.
 /// Build the session extract prompt.
 /// `conversation` is the formatted conversation text.
 /// Extracts independent facts without referencing old summaries.
+/// Backward-compatible wrapper: calls [`build_session_extract_prompt_with_memories`] with `None`.
 pub fn build_session_extract_prompt(conversation: &str) -> (String, String) {
+    build_session_extract_prompt_with_memories(conversation, None)
+}
+
+/// Build the session extract prompt with optional existing memory summaries.
+///
+/// When `existing_memories_summary` is provided, includes a `## Existing Memories` section
+/// in the user prompt so the LLM can avoid duplicating or can enrich previously stored facts.
+///
+/// # Arguments
+/// * `conversation` - The formatted conversation text to extract from
+/// * `existing_memories_summary` - Optional summary of existing memories (max ~2000 chars recommended)
+///
+/// # Returns
+/// A `(system_prompt, user_prompt)` tuple for the LLM call.
+pub fn build_session_extract_prompt_with_memories(
+    conversation: &str,
+    existing_memories_summary: Option<&str>,
+) -> (String, String) {
     let system = SESSION_EXTRACT_SYSTEM_PROMPT.to_string();
+
+    let existing_section = match existing_memories_summary {
+        Some(summary) if !summary.is_empty() => {
+            format!(
+                "\n## Existing Memories\n\n{summary}\n\nCompare new extraction candidates against these existing memories. Do not duplicate already-captured information unless you have new details to add.\n"
+            )
+        }
+        _ => String::new(),
+    };
+
     let user = format!(
-        "## Current Conversation\n\n{conversation}\n\nReturn ONLY valid JSON array. Use Markdown in summary fields."
+        "{existing_section}## Current Conversation\n\n{conversation}\n\nReturn ONLY valid JSON array. Use Markdown in summary fields."
     );
     (system, user)
+}
+
+#[cfg(test)]
+mod session_extract_tests {
+    use super::*;
+
+    #[test]
+    fn test_system_prompt_contains_three_categories() {
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("EMOTIONAL"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("WORK"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PREFERENCE"));
+    }
+
+    #[test]
+    fn test_system_prompt_has_differentiated_guidance() {
+        // EMOTIONAL: preserve detail
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PRESERVE original text as-is"));
+        // WORK: denoise
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("DENOISE — extract conclusions only"));
+        // PREFERENCE: structured output
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("structured key-value pairs"));
+    }
+
+    #[test]
+    fn test_system_prompt_has_emotional_subtags() {
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("私密"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("谈心"));
+    }
+
+    #[test]
+    fn test_system_prompt_has_existing_memory_awareness_rule() {
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Existing Memory Awareness"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("## Existing Memories"));
+    }
+
+    #[test]
+    fn test_system_prompt_preserves_language_rule() {
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Language Preservation"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("NEVER translate"));
+    }
+
+    #[test]
+    fn test_build_session_extract_prompt_without_memories() {
+        let (system, user) = build_session_extract_prompt("Hello world");
+        assert!(!system.is_empty());
+        assert!(user.contains("## Current Conversation"));
+        assert!(user.contains("Hello world"));
+        assert!(!user.contains("## Existing Memories"));
+    }
+
+    #[test]
+    fn test_build_session_extract_prompt_with_memories_some() {
+        let (system, user) = build_session_extract_prompt_with_memories(
+            "New conversation",
+            Some("旧记忆摘要内容"),
+        );
+        assert!(!system.is_empty());
+        assert!(user.contains("## Existing Memories"));
+        assert!(user.contains("旧记忆摘要内容"));
+        assert!(user.contains("## Current Conversation"));
+        assert!(user.contains("New conversation"));
+        assert!(user.contains("Do not duplicate"));
+    }
+
+    #[test]
+    fn test_build_session_extract_prompt_with_memories_none() {
+        let (system, user) = build_session_extract_prompt_with_memories(
+            "Test conversation",
+            None,
+        );
+        assert!(!system.is_empty());
+        assert!(!user.contains("## Existing Memories"));
+        assert!(user.contains("## Current Conversation"));
+    }
+
+    #[test]
+    fn test_build_session_extract_prompt_with_empty_summary() {
+        let (_, user) = build_session_extract_prompt_with_memories(
+            "Test conversation",
+            Some(""),
+        );
+        assert!(!user.contains("## Existing Memories"));
+    }
+
+    #[test]
+    fn test_backward_compat_wrapper() {
+        let (s1, u1) = build_session_extract_prompt("conversation text");
+        let (s2, u2) = build_session_extract_prompt_with_memories("conversation text", None);
+        assert_eq!(s1, s2);
+        assert_eq!(u1, u2);
+    }
 }

@@ -1354,17 +1354,40 @@ pub async fn session_ingest(
         .with_llm(state.llm.clone())
         .with_lance_store(Some(store.clone()));
 
-        // 获取同session的EMOTIONAL记忆（用于追加到已有记忆）
-        let mut existing_emotional = fetch_session_emotional_memory(
+        // 获取同session的EMOTIONAL记忆摘要（避免重复提取 + 用于追加）
+        let emotional_summary = fetch_session_emotional_memory(
             &store,
             session_id.as_deref(),
+            Some(5),
         ).await;
 
-        // 获取同session的WORK记忆（用于追加到已有记忆）
-        let mut existing_work_memory = fetch_session_work_memory(
+        // 获取同session的WORK记忆摘要
+        let work_summary = fetch_session_work_memory(
             &store,
             session_id.as_deref(),
+            Some(5),
         ).await;
+
+        // 加载最新一条完整 Memory 用于追加逻辑
+        let mut existing_emotional = if let Some(ref s) = emotional_summary {
+            if let Some(ref d) = s.memories.first() {
+                store.get_by_id(&d.id).await.ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut existing_work_memory = if let Some(ref s) = work_summary {
+            if let Some(ref d) = s.memories.first() {
+                store.get_by_id(&d.id).await.ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // 独立提取模式：只处理当前conversation，不传旧summaries
         let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt(
@@ -1787,48 +1810,125 @@ fn clean_message_content(content: &str) -> String {
 
 
 
-/// Fetch the most recent private (EMOTIONAL) session_compress memory for a given session.
-/// Used to append new emotional topics to the same memory within a session.
+/// Fetch up to N recent private (EMOTIONAL) session_compress memories for a session.
+/// Returns a merged summary instead of a single memory to provide richer context
+/// and avoid duplicate extractions.
 async fn fetch_session_emotional_memory(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
-) -> Option<Memory> {
-    let Some(sid) = session_id else { return None; };
+    limit: Option<usize>,
+) -> Option<crate::domain::memory::SessionMemorySummary> {
+    let sid = session_id?;
+    let limit = limit.unwrap_or(5);
 
     let filter = ListFilter {
         tags: Some(vec!["session_compress".to_string()]),
         ..Default::default()
     };
 
-    match store.list_filtered(&filter, 20, 0).await {
-        Ok(memories) => memories
+    let memories = match store.list_filtered(&filter, 100, 0).await {
+        Ok(mems) => mems
             .into_iter()
             .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope == "private")
-            .max_by_key(|m| m.updated_at.clone()),
-        Err(_) => None,
+            .collect::<Vec<_>>(),
+        Err(_) => return None,
+    };
+
+    if memories.is_empty() {
+        return None;
     }
+
+    let total_count = memories.len();
+    let mut sorted = memories;
+    sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let recent: Vec<_> = sorted.into_iter().take(limit).collect();
+
+    let digests: Vec<crate::domain::memory::MemoryDigest> = recent
+        .iter()
+        .map(|m| crate::domain::memory::MemoryDigest {
+            id: m.id.clone(),
+            title: m.l0_abstract.clone(),
+            category: m.category.clone(),
+            tags: m.tags.clone(),
+            content_preview: m.content.chars().take(200).collect(),
+            updated_at: m.updated_at.clone(),
+        })
+        .collect();
+
+    let merged_summary = build_merged_summary(&recent);
+
+    Some(crate::domain::memory::SessionMemorySummary {
+        memories: digests,
+        merged_summary,
+        total_count,
+    })
 }
 
-/// Fetch the most recent public (WORK) session_compress memory for a given session.
-/// Used to append new work topics to the same memory within a session.
+/// Fetch up to N recent public (WORK) session_compress memories for a session.
 async fn fetch_session_work_memory(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
-) -> Option<Memory> {
-    let Some(sid) = session_id else { return None; };
+    limit: Option<usize>,
+) -> Option<crate::domain::memory::SessionMemorySummary> {
+    let sid = session_id?;
+    let limit = limit.unwrap_or(5);
 
     let filter = ListFilter {
         tags: Some(vec!["session_compress".to_string()]),
         ..Default::default()
     };
 
-    match store.list_filtered(&filter, 20, 0).await {
-        Ok(memories) => memories
+    let memories = match store.list_filtered(&filter, 100, 0).await {
+        Ok(mems) => mems
             .into_iter()
             .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope != "private")
-            .max_by_key(|m| m.updated_at.clone()),
-        Err(_) => None,
+            .collect::<Vec<_>>(),
+        Err(_) => return None,
+    };
+
+    if memories.is_empty() {
+        return None;
     }
+
+    let total_count = memories.len();
+    let mut sorted = memories;
+    sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let recent: Vec<_> = sorted.into_iter().take(limit).collect();
+
+    let digests: Vec<crate::domain::memory::MemoryDigest> = recent
+        .iter()
+        .map(|m| crate::domain::memory::MemoryDigest {
+            id: m.id.clone(),
+            title: m.l0_abstract.clone(),
+            category: m.category.clone(),
+            tags: m.tags.clone(),
+            content_preview: m.content.chars().take(200).collect(),
+            updated_at: m.updated_at.clone(),
+        })
+        .collect();
+
+    let merged_summary = build_merged_summary(&recent);
+
+    Some(crate::domain::memory::SessionMemorySummary {
+        memories: digests,
+        merged_summary,
+        total_count,
+    })
+}
+
+/// Build a merged summary string from a slice of memories, capped at 2000 chars.
+fn build_merged_summary(memories: &[Memory]) -> String {
+    let mut parts = Vec::new();
+    let mut total_len = 0usize;
+    for m in memories {
+        let part = format!("[{}] {}: {}", m.updated_at, m.l0_abstract, m.l1_overview);
+        if total_len + part.len() + 2 > 2000 {
+            break;
+        }
+        total_len += part.len() + 2;
+        parts.push(part);
+    }
+    parts.join("\n\n")
 }
 
 pub async fn optimize_memories(

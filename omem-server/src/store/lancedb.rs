@@ -952,6 +952,122 @@ impl LanceStore {
         Ok(memories)
     }
 
+    /// OOM-safe: list memories for a session with a hard limit at the DB level.
+    /// Defaults to 20. Sorted by updated_at desc in Rust (LanceDB lacks ORDER BY).
+    pub async fn list_memories_by_session(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<Memory>, OmemError> {
+        let table = self.table.clone();
+        let filter = format!("session_id = '{}'", escape_sql(session_id));
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .limit(limit.unwrap_or(20))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("list_memories_by_session query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut memories = tokio::task::spawn_blocking(move || {
+            Self::batch_to_memories(&batches)
+        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
+
+        memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(memories)
+    }
+
+    /// OOM-safe summary query: returns only lightweight fields (no vector, no full content).
+    /// Content is truncated to 200 chars in-application. Sorted by updated_at desc.
+    pub async fn get_memory_summary(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::domain::memory::MemoryDigest>, OmemError> {
+        use crate::domain::memory::MemoryDigest;
+        use crate::domain::category::Category;
+
+        let table = self.table.clone();
+        let filter = format!("session_id = '{}'", escape_sql(session_id));
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .select(Select::columns(&[
+                "id", "l0_abstract", "category", "tags", "content", "updated_at",
+            ]))
+            .limit(100)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("get_memory_summary query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut digests = Vec::new();
+        for batch in &batches {
+            let id_col = batch
+                .column_by_name("id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing id column".to_string()))?;
+            let title_col = batch
+                .column_by_name("l0_abstract")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing l0_abstract column".to_string()))?;
+            let cat_col = batch
+                .column_by_name("category")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing category column".to_string()))?;
+            let tags_col = batch
+                .column_by_name("tags")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing tags column".to_string()))?;
+            let content_col = batch
+                .column_by_name("content")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing content column".to_string()))?;
+            let updated_col = batch
+                .column_by_name("updated_at")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| OmemError::Storage("missing updated_at column".to_string()))?;
+
+            for row in 0..batch.num_rows() {
+                let content = content_col.value(row);
+                let preview: String = content.chars().take(200).collect();
+                let category: Category = cat_col
+                    .value(row)
+                    .parse()
+                    .map_err(|e: String| OmemError::Storage(e))?;
+                let tags_json = tags_col.value(row);
+                let tags: Vec<String> = serde_json::from_str(tags_json)
+                    .map_err(|e| OmemError::Storage(format!("failed to parse tags: {e}")))?;
+                digests.push(MemoryDigest {
+                    id: id_col.value(row).to_string(),
+                    title: title_col.value(row).to_string(),
+                    category,
+                    tags,
+                    content_preview: preview,
+                    updated_at: updated_col.value(row).to_string(),
+                });
+            }
+        }
+
+        digests.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(digests)
+    }
+
+    /// OOM-safe count: uses LanceDB count_rows() without loading rows into memory.
+    pub async fn count_memories_by_session(&self, session_id: &str) -> Result<usize, OmemError> {
+        let table = self.table.clone();
+        let filter = format!("session_id = '{}'", escape_sql(session_id));
+        let count = table
+            .count_rows(Some(filter))
+            .await
+            .map_err(|e| OmemError::Storage(format!("count_memories_by_session failed: {e}")))?;
+        Ok(count)
+    }
+
     pub async fn create(&self, memory: &Memory, vector: Option<&[f32]>) -> Result<(), OmemError> {
         let batch = Self::memory_to_batch(memory, vector)?;
         let table = self.table.clone();
