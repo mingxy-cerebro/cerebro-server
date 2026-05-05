@@ -1463,6 +1463,14 @@ pub async fn session_ingest(
                 }
             });
 
+            // 一致性保障：category=preferences 时强制 memory_type=PREFERENCE
+            // 防止 LLM 返回不一致的 memory_type（如 "WORK"）导致偏好内容绕过 profile 注入
+            let memory_type = if topic.category.as_deref() == Some("preferences") {
+                "PREFERENCE"
+            } else {
+                memory_type
+            };
+
             let category: Category = topic.category.as_deref().and_then(|c| {
                 let normalized = match c.to_lowercase().as_str() {
                     "experience" | "experiences" | "activity" | "activities" => "events",
