@@ -1389,9 +1389,27 @@ pub async fn session_ingest(
             None
         };
 
-        // 独立提取模式：只处理当前conversation，不传旧summaries
-        let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt(
+        // 构建合并摘要传给LLM，避免重复提取
+        let mut combined_summary_parts = Vec::new();
+        if let Some(ref es) = emotional_summary {
+            if !es.merged_summary.is_empty() {
+                combined_summary_parts.push(format!("[EMOTIONAL memories]\n{}", es.merged_summary));
+            }
+        }
+        if let Some(ref ws) = work_summary {
+            if !ws.merged_summary.is_empty() {
+                combined_summary_parts.push(format!("[WORK memories]\n{}", ws.merged_summary));
+            }
+        }
+        let combined_summary = if combined_summary_parts.is_empty() {
+            None
+        } else {
+            Some(combined_summary_parts.join("\n\n"))
+        };
+
+        let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt_with_memories(
             &conversation,
+            combined_summary.as_deref(),
         );
 
         let topics: Vec<SessionTopicSummary> = match crate::llm::complete_json(
@@ -1495,13 +1513,13 @@ pub async fn session_ingest(
                 memory.visibility = "private".to_string();
             }
 
-            // EMOTIONAL类追加逻辑：同session的private记忆追加到已有记忆
             if topic.scope == "private" {
                 if let Some(existing) = existing_emotional.clone() {
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
                     let new_content = format!(
-                        "{}\n\n---\n\n## {}\n{}",
+                        "{}\n\n## {}\n{}",
                         existing.content,
-                        topic.topic,
+                        today,
                         topic.summary
                     );
 
@@ -1538,13 +1556,13 @@ pub async fn session_ingest(
                 }
             }
 
-            // WORK类追加逻辑：同session的WORK记忆追加到已有记忆
             if memory_type == "WORK" {
                 if let Some(existing_work) = existing_work_memory.clone() {
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
                     let new_content = format!(
-                        "{}\n\n---\n\n## {}\n{}",
+                        "{}\n\n## {}\n{}",
                         existing_work.content,
-                        topic.topic,
+                        today,
                         topic.summary
                     );
 
@@ -1579,6 +1597,15 @@ pub async fn session_ingest(
                     }
                     tracing::info!("session_ingest: WORK memory exceeded limit, creating new");
                 }
+            }
+
+            // PREFERENCE分类：不创建独立记忆条目，留空由T6实现profile注入
+            if memory_type == "PREFERENCE" {
+                tracing::info!(
+                    topic = %topic.topic,
+                    "session_ingest: PREFERENCE extracted, skipping memory creation (profile injection in T6)"
+                );
+                continue;
             }
 
             let vector = vectors.get(i).cloned();
