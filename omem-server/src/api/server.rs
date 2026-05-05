@@ -14,6 +14,8 @@ use crate::profile::service::CachedProfile;
 use crate::retrieve::reranker::Reranker;
 use crate::store::{SpaceStore, StoreManager, TenantStore};
 
+pub type SessionLockMap = DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>;
+
 pub struct AppState {
     pub store_manager: Arc<StoreManager>,
     pub tenant_store: Arc<TenantStore>,
@@ -28,7 +30,7 @@ pub struct AppState {
     pub reconcile_semaphore: Arc<Semaphore>,
     pub event_bus: SharedEventBus,
     pub scheduler_control: SharedSchedulerControl,
-    pub session_locks: Arc<DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>,
+    pub session_locks: Arc<SessionLockMap>,
     pub reranker: Option<Reranker>,
     /// Limits concurrent background ingest tasks (LLM extraction + reconciliation).
     /// Prevents OOM under burst load. Default: 10.

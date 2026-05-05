@@ -91,22 +91,22 @@ pub fn kmeans(data: &[Vec<f32>], max_k: usize, max_iterations: usize) -> KMeansR
         }
 
         let dim = points[0].len();
-        for j in 0..k {
+        for (j, centroid) in centroids.iter_mut().enumerate().take(k) {
             let mut new_centroid = vec![0.0f32; dim];
             let mut count = 0usize;
             for (i, point) in points.iter().enumerate() {
                 if labels[i] == j {
-                    for d in 0..dim {
-                        new_centroid[d] += point[d];
+                    for (d, val) in new_centroid.iter_mut().enumerate().take(dim) {
+                        *val += point[d];
                     }
                     count += 1;
                 }
             }
             if count > 0 {
-                for d in 0..dim {
-                    new_centroid[d] /= count as f32;
+                for val in new_centroid.iter_mut().take(dim) {
+                    *val /= count as f32;
                 }
-                centroids[j] = normalize(&new_centroid);
+                *centroid = normalize(&new_centroid);
             }
         }
     }
@@ -132,7 +132,7 @@ fn normalize(v: &[f32]) -> Vec<f32> {
 
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     let dot = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>();
-    (1.0 - dot).max(0.0).min(2.0)
+    (1.0 - dot).clamp(0.0, 2.0)
 }
 
 fn kmeans_plus_plus(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {

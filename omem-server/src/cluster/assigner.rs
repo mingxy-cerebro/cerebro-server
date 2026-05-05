@@ -151,7 +151,7 @@ impl ClusterAssigner {
         &self,
         memory: &Memory,
     ) -> Result<Vec<ClusterCandidate>, OmemError> {
-        let embedding = self.embed.embed(&[memory.content.clone()]).await?;
+        let embedding = self.embed.embed(std::slice::from_ref(&memory.content)).await?;
         let vector = embedding.first().ok_or_else(|| {
             OmemError::Storage("failed to generate embedding".to_string())
         })?;

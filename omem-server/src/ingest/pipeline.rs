@@ -38,6 +38,7 @@ pub struct IngestPipeline {
 }
 
 impl IngestPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         store: Arc<LanceStore>,
         session_store: Arc<SessionStore>,
@@ -301,7 +302,7 @@ impl IngestPipeline {
                                         }
                                     }
                                     crate::cluster::assigner::AssignAction::CreateNew => {
-                                        match embed.embed(&[mem.content.clone()]).await {
+                                        match embed.embed(std::slice::from_ref(&mem.content)).await {
                                             Ok(vectors) => {
                                                 if let Some(vector) = vectors.first() {
                                                     match cluster_manager.create_cluster(mem, vector, mem.tags.clone()).await {

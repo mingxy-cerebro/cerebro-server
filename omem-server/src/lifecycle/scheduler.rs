@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::json;
@@ -7,6 +7,7 @@ use tracing::{info, warn, debug};
 
 use crate::api::event_bus::{ServerEvent, SharedEventBus};
 use crate::api::scheduler_control::SharedSchedulerControl;
+use crate::api::server::SessionLockMap;
 use crate::cluster::background_clustering::BackgroundClusterer;
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::manager::ClusterManager;
@@ -26,7 +27,7 @@ pub struct LifecycleScheduler {
     max_memories_per_store: usize,
     event_bus: Option<SharedEventBus>,
     scheduler_control: Option<SharedSchedulerControl>,
-    session_locks: Option<Arc<dashmap::DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>>,
+    session_locks: Option<Arc<SessionLockMap>>,
 }
 
 impl LifecycleScheduler {
@@ -62,7 +63,7 @@ impl LifecycleScheduler {
 
     pub fn with_session_locks(
         mut self,
-        locks: Arc<dashmap::DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>>,
+        locks: Arc<SessionLockMap>,
     ) -> Self {
         self.session_locks = Some(locks);
         self

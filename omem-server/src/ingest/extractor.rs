@@ -182,7 +182,7 @@ fn calculate_quality_score(text: &str) -> f32 {
         score += 0.05;
     }
 
-    score.min(1.0).max(0.1)
+    score.clamp(0.1, 1.0)
 }
 
 fn normalize_category(raw: &str) -> String {

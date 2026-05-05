@@ -39,13 +39,6 @@ fn hash_password(password: &str, salt: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-#[deprecated(since = "0.4.0", note = "Argon2 PHC format includes salt")]
-fn generate_salt() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let salt: [u8; 16] = rng.gen();
-    hex::encode(salt)
-}
 
 fn hash_password_argon2(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut rand::rngs::OsRng);

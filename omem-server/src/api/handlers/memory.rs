@@ -1371,7 +1371,7 @@ pub async fn session_ingest(
 
         // 加载最新一条完整 Memory 用于追加逻辑
         let mut existing_emotional = if let Some(ref s) = emotional_summary {
-            if let Some(ref d) = s.memories.first() {
+            if let Some(d) = s.memories.first() {
                 store.get_by_id(&d.id).await.ok().flatten()
             } else {
                 None
@@ -1381,7 +1381,7 @@ pub async fn session_ingest(
         };
 
         let mut existing_work_memory = if let Some(ref s) = work_summary {
-            if let Some(ref d) = s.memories.first() {
+            if let Some(d) = s.memories.first() {
                 store.get_by_id(&d.id).await.ok().flatten()
             } else {
                 None
@@ -1675,7 +1675,7 @@ pub async fn session_ingest(
                 }
 
                 // 每10个preference清理一次低置信度facts
-                if preference_count % 10 == 0 {
+                if preference_count.is_multiple_of(10) {
                     if let Err(e) = profile_svc.cleanup_low_confidence_facts(0.3).await {
                         tracing::warn!(error = %e, "session_ingest: profile cleanup failed");
                     }
@@ -1853,7 +1853,7 @@ fn clean_message_content(content: &str) -> String {
     for pattern in xml_patterns {
         while let Some(start) = cleaned.find(pattern) {
             let tag_name_end = cleaned[start..]
-                .find(|c: char| c == ' ' || c == '>')
+                .find(|c: char| [' ', '>'].contains(&c))
                 .map(|i| start + i)
                 .unwrap_or(cleaned.len());
             let tag_name = &cleaned[start..tag_name_end];

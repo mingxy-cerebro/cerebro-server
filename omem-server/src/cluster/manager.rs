@@ -15,6 +15,38 @@ struct ClusterSummaryResponse {
     summary: String,
 }
 
+/// 基于 anchor memory 的内容推断集群级别的额外标签。
+/// 已有的标签会保留，只追加推断出的新标签。
+fn infer_cluster_tags(content: &str, existing_tags: &[String]) -> Vec<String> {
+    let mut tags: Vec<String> = existing_tags.to_vec();
+    let content_lower = content.to_lowercase();
+
+    let private_keywords = [
+        "私密", "亲密", "性爱", "撒娇", "谈心", "信任", "互动",
+        "奖励", "关心", "喜欢", "爱", "想念", "晚安", "早安",
+        "拥抱", "亲吻", "暧昧", "调情", "宠溺",
+    ];
+    if private_keywords.iter().any(|k| content_lower.contains(k)) {
+        if !tags.iter().any(|t| t == "谈心" || t == "private") {
+            tags.push("谈心".to_string());
+        }
+    }
+
+    let work_keywords = [
+        "项目", "技术", "代码", "开发", "bug", "修复", "部署",
+        "api", "rust", "typescript", "架构", "测试", "重构",
+        "database", "server", "frontend", "backend", "docker",
+        "git", "commit", "pr", "merge", "review",
+    ];
+    if work_keywords.iter().any(|k| content_lower.contains(k)) {
+        if !tags.iter().any(|t| t == "work" || t == "工作") {
+            tags.push("work".to_string());
+        }
+    }
+
+    tags
+}
+
 pub struct ClusterManager {
     cluster_store: Arc<ClusterStore>,
     llm: Option<Arc<dyn LlmService>>,
@@ -115,7 +147,8 @@ impl ClusterManager {
             memory.category.clone(),
             memory.id.clone(),
         );
-        cluster.tags = tags;
+        let enriched_tags = infer_cluster_tags(&memory.content, &tags);
+        cluster.tags = enriched_tags;
 
         self.cluster_store.create(&cluster, anchor_vector).await?;
 

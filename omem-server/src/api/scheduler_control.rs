@@ -11,6 +11,12 @@ pub struct SchedulerControl {
     pub clustering_notify: Notify,
 }
 
+impl Default for SchedulerControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SchedulerControl {
     pub fn new() -> Self {
         Self {

@@ -52,7 +52,7 @@ pub use vault::{
 pub use clusters::{
     batch_delete_clusters, delete_all_clusters, delete_cluster, delete_clustering_job,
     get_clustering_job, get_clustering_stats, get_cluster, list_clustering_jobs, list_clusters,
-    trigger_clustering,
+    recalculate_cluster_counts, trigger_clustering,
 };
 pub use events::sse_events;
 pub use scheduler::{

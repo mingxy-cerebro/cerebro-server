@@ -127,6 +127,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/clusters/jobs", get(handlers::list_clustering_jobs))
         .route("/v1/clusters/jobs/{id}", get(handlers::get_clustering_job).delete(handlers::delete_clustering_job))
         .route("/v1/clusters/stats", get(handlers::get_clustering_stats))
+        .route("/v1/clusters/recalculate", post(handlers::recalculate_cluster_counts))
         .route("/v1/memories/re-embed", post(handlers::reembed_memories))
         .route("/v1/memories/optimize", post(handlers::optimize_memories))
         .route("/v1/clusters/{id}", get(handlers::get_cluster).delete(handlers::delete_cluster))

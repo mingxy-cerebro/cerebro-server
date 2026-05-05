@@ -345,6 +345,7 @@ impl Reconciler {
         Ok(false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_supersede(
         &self,
         fact: &ExtractedFact,
@@ -422,6 +423,7 @@ impl Reconciler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_contextualize(
         &self,
         fact: &ExtractedFact,
@@ -455,6 +457,7 @@ impl Reconciler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_contradict(
         &self,
         fact: &ExtractedFact,

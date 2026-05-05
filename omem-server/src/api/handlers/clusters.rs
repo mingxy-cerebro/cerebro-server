@@ -403,3 +403,32 @@ pub async fn delete_all_clusters(
         "unlinked_memories": unlinked,
     })))
 }
+
+#[derive(Debug, Serialize)]
+pub struct RecalculateCountsResponse {
+    pub updated_count: usize,
+}
+
+pub async fn recalculate_cluster_counts(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<(StatusCode, Json<RecalculateCountsResponse>), OmemError> {
+    let space_id = personal_space_id(&auth.tenant_id);
+    let store = state.store_manager.get_store(&space_id).await?;
+
+    let updated = state
+        .cluster_store
+        .recalculate_cluster_counts(&store, &auth.tenant_id)
+        .await?;
+
+    info!(
+        tenant_id = %auth.tenant_id,
+        updated_count = updated,
+        "cluster counts recalculated"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(RecalculateCountsResponse { updated_count: updated }),
+    ))
+}

@@ -12,7 +12,8 @@ use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
 use crate::store::lancedb::SessionRecall;
 
-static LAST_RECALL_TIME: LazyLock<Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>> =
+type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
+static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"你是一个记忆召回助手。用户有一个个人知识库，保存了过往笔记、项目经验、技术方案、偏好设置、私密记录等记忆。你的任务是判断用户当前的问题是否需要从知识库中检索相关记忆来辅助回答。
@@ -223,7 +224,7 @@ pub async fn should_recall(
         .await?;
 
     let mut min_score = body.similarity_threshold.unwrap_or(0.4);
-    if min_score < 0.0 || min_score > 1.0 {
+    if !(0.0..=1.0).contains(&min_score) {
         min_score = 0.4;
     }
 
@@ -232,7 +233,7 @@ pub async fn should_recall(
         max_results = 5;
     }
 
-    let is_zero_vector = query_vector.as_ref().map_or(true, |v| v.iter().all(|&x| x == 0.0));
+    let is_zero_vector = query_vector.as_ref().is_none_or(|v| v.iter().all(|&x| x == 0.0));
 
     let effective_min_score = if llm_yes { min_score } else { min_score * 0.5 };
 
@@ -322,7 +323,7 @@ pub async fn should_recall(
     }
 
     // Fallback: if no project_tags provided, do a normal global search
-    if project_tags_slice.is_none() || project_tags_slice.map_or(true, |t| t.is_empty()) {
+    if project_tags_slice.is_none() || project_tags_slice.is_none_or(|t| t.is_empty()) {
         all_results = if is_zero_vector {
             store
                 .fts_search(&body.query_text, max_results, None, vis_ref, None)
@@ -392,7 +393,7 @@ pub async fn should_recall(
         memories: Some(memories),
         confidence: Some(confidence),
         similarity_score,
-        clustered: clustered,
+        clustered,
     }))
 }
 
@@ -602,7 +603,7 @@ fn denoise_for_recall(text: &str) -> String {
 
     cleaned = DENOISE_PATTERNS.0.replace_all(&cleaned, "").to_string();
     cleaned = DENOISE_PATTERNS.1.replace_all(&cleaned, "").to_string();
-    cleaned = DENOISE_PATTERNS.2.replace_all(&cleaned.trim(), " ").to_string();
+    cleaned = DENOISE_PATTERNS.2.replace_all(cleaned.trim(), " ").to_string();
 
     if cleaned.chars().count() > max_chars {
         let truncated: String = cleaned.chars().take(max_chars).collect();

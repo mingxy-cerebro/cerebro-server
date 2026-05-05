@@ -20,6 +20,12 @@ pub struct EventBus {
     sender: broadcast::Sender<ServerEvent>,
 }
 
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventBus {
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(CHANNEL_CAPACITY);

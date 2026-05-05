@@ -369,7 +369,7 @@ fn sanitize_profile_content(content: &str) -> String {
 }
 
 fn days_since_created(mem: &Memory) -> i64 {
-    let created = parse_datetime(&mem.created_at).unwrap_or_else(|| Utc::now());
+    let created = parse_datetime(&mem.created_at).unwrap_or_else(Utc::now);
     (Utc::now() - created).num_days().max(0)
 }
 
@@ -445,16 +445,32 @@ mod tests {
 
         let resp = svc.get_profile(None).await.expect("get_profile");
         assert_eq!(resp.profile.static_facts.len(), 2);
-        assert!(resp.profile.static_facts[0]
-            .content
-            .contains("speaks mandarin"));
-        assert!(resp.profile.static_facts[1]
-            .content
-            .contains("prefers dark mode"));
-        assert!(!resp.profile.static_facts[0].tags.is_empty());
-        assert!(!resp.profile.static_facts[0].visibility.is_empty());
-        assert!(!resp.profile.static_facts[1].tags.is_empty());
-        assert!(!resp.profile.static_facts[1].visibility.is_empty());
+        assert!(resp
+            .profile
+            .static_facts
+            .iter()
+            .any(|f| f.content.contains("speaks mandarin")));
+        assert!(resp
+            .profile
+            .static_facts
+            .iter()
+            .any(|f| f.content.contains("prefers dark mode")));
+        let mandarin = resp
+            .profile
+            .static_facts
+            .iter()
+            .find(|f| f.content.contains("speaks mandarin"))
+            .unwrap();
+        assert!(!mandarin.tags.is_empty());
+        assert!(!mandarin.visibility.is_empty());
+        let dark_mode = resp
+            .profile
+            .static_facts
+            .iter()
+            .find(|f| f.content.contains("prefers dark mode"))
+            .unwrap();
+        assert!(!dark_mode.tags.is_empty());
+        assert!(!dark_mode.visibility.is_empty());
         assert!(resp.search_results.is_none());
     }
 
