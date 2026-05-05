@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::api::event_bus::{EventBus, ServerEvent};
 use crate::api::scheduler_control::SharedSchedulerControl;
+use crate::cluster::assigner::{AssignAction, ClusterAssigner};
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::kmeans;
 use crate::cluster::manager::ClusterManager;
 use crate::domain::error::OmemError;
+use crate::domain::memory::Memory;
 use crate::store::lancedb::LanceStore;
 
 pub struct BackgroundClusterer {
@@ -69,7 +71,6 @@ impl BackgroundClusterer {
     }
 
     pub async fn cluster_global_kmeans(&self) -> Result<ClusterStats, OmemError> {
-        // 互斥锁：防止scheduler和手动触发并发跑K-Means
         let lock = self.clustering_lock.try_lock();
         if lock.is_err() {
             info!("K-Means clustering already running, skipping duplicate");
@@ -179,7 +180,6 @@ impl BackgroundClusterer {
             stats.created_new_clusters += 1;
             created_cluster_ids.push(cluster.id.clone());
 
-            // Set anchor memory's cluster_id (critical: anchor was skipped before)
             if let Err(e) = self.store.update_memory_cluster_id(anchor_id, Some(&cluster.id), true).await {
                 warn!(memory_id = %anchor_id, cluster_id = %cluster.id, error = %e, "Failed to set anchor cluster_id");
                 stats.errors += 1;
@@ -271,6 +271,210 @@ impl BackgroundClusterer {
         }));
 
         Ok(stats)
+    }
+
+    /// Incremental clustering: processes only memories with cluster_id == None.
+    /// Non-destructive — existing clusters are never deleted or rebuilt.
+    pub async fn run_incremental_clustering(
+        store: Arc<LanceStore>,
+        cluster_store: Arc<ClusterStore>,
+        embed: Arc<dyn crate::embed::EmbedService>,
+        llm: Option<Arc<dyn crate::llm::LlmService>>,
+        batch_size: Option<usize>,
+        tenant_id: &str,
+    ) -> Result<ClusterStats, OmemError> {
+        let limit = batch_size.unwrap_or(50).min(50);
+
+        info!(batch_size = limit, tenant_id, "Starting incremental clustering");
+
+        let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), llm.clone()));
+
+        let mut assigner = ClusterAssigner::new(cluster_store, embed);
+        if let Some(llm_svc) = llm {
+            assigner = assigner.with_llm(llm_svc);
+        }
+        let assigner = assigner.with_lance_store(Some(store.clone()));
+
+        let mut stats = ClusterStats {
+            processed: 0,
+            assigned_to_existing: 0,
+            created_new_clusters: 0,
+            errors: 0,
+        };
+
+        let mut offset = 0usize;
+        let fetch_size = limit * 3;
+
+        loop {
+            let memories = match store.list(fetch_size, offset).await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, offset, "incremental_clustering: failed to list memories");
+                    break;
+                }
+            };
+
+            if memories.is_empty() {
+                break;
+            }
+
+            let unassigned: Vec<Memory> = memories
+                .into_iter()
+                .filter(|m| m.cluster_id.is_none() && m.state == crate::domain::types::MemoryState::Active)
+                .collect();
+
+            if unassigned.is_empty() {
+                offset += fetch_size;
+                continue;
+            }
+
+            let mut session_groups: HashMap<String, Vec<Memory>> = HashMap::new();
+            let mut no_session: Vec<Memory> = Vec::new();
+
+            for mem in unassigned {
+                match &mem.session_id {
+                    Some(sid) if !sid.is_empty() => {
+                        session_groups.entry(sid.clone()).or_default().push(mem);
+                    }
+                    _ => {
+                        no_session.push(mem);
+                    }
+                }
+            }
+
+            for (session_id, group) in &session_groups {
+                if stats.processed >= limit {
+                    break;
+                }
+                debug!(session_id = %session_id, count = group.len(), "incremental: session group");
+                for memory in group {
+                    if stats.processed >= limit {
+                        break;
+                    }
+                    Self::process_single_memory(
+                        &assigner,
+                        &cluster_manager,
+                        &store,
+                        memory,
+                        &mut stats,
+                    ).await;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            for memory in &no_session {
+                if stats.processed >= limit {
+                    break;
+                }
+                Self::process_single_memory(
+                    &assigner,
+                    &cluster_manager,
+                    &store,
+                    memory,
+                    &mut stats,
+                ).await;
+                tokio::task::yield_now().await;
+            }
+
+            drop(session_groups);
+            drop(no_session);
+
+            if stats.processed >= limit {
+                break;
+            }
+
+            offset += fetch_size;
+        }
+
+        info!(
+            processed = stats.processed,
+            assigned_to_existing = stats.assigned_to_existing,
+            created_new_clusters = stats.created_new_clusters,
+            errors = stats.errors,
+            tenant_id,
+            "Incremental clustering completed"
+        );
+
+        Ok(stats)
+    }
+
+    async fn process_single_memory(
+        assigner: &ClusterAssigner,
+        cluster_manager: &ClusterManager,
+        store: &Arc<LanceStore>,
+        memory: &Memory,
+        stats: &mut ClusterStats,
+    ) {
+        match assigner.assign(memory).await {
+            Ok(result) => {
+                match result.action {
+                    AssignAction::AutoAssign | AssignAction::LlmJudge => {
+                        if let Some(ref cluster_id) = result.cluster_id {
+                            match cluster_manager.assign_to_cluster(
+                                &memory.id,
+                                cluster_id,
+                                (*store).clone(),
+                            ).await {
+                                Ok(()) => {
+                                    debug!(memory_id = %memory.id, cluster_id, confidence = result.confidence, "incremental: assigned");
+                                    stats.assigned_to_existing += 1;
+                                    stats.processed += 1;
+                                }
+                                Err(e) => {
+                                    warn!(memory_id = %memory.id, error = %e, "incremental: assign failed");
+                                    stats.errors += 1;
+                                }
+                            }
+                        } else {
+                            Self::create_new_cluster_for(cluster_manager, store, memory, stats).await;
+                        }
+                    }
+                    AssignAction::CreateNew => {
+                        Self::create_new_cluster_for(cluster_manager, store, memory, stats).await;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(memory_id = %memory.id, error = %e, "incremental: assigner failed");
+                stats.errors += 1;
+            }
+        }
+    }
+
+    async fn create_new_cluster_for(
+        cluster_manager: &ClusterManager,
+        store: &Arc<LanceStore>,
+        memory: &Memory,
+        stats: &mut ClusterStats,
+    ) {
+        match store.get_vector_by_id(&memory.id).await {
+            Ok(Some(vector)) => {
+                match cluster_manager.create_cluster(memory, &vector, memory.tags.clone()).await {
+                    Ok(cluster) => {
+                        if let Err(e) = store.update_memory_cluster_id(&memory.id, Some(&cluster.id), true).await {
+                            warn!(memory_id = %memory.id, cluster_id = %cluster.id, error = %e, "incremental: failed to set anchor cluster_id");
+                            stats.errors += 1;
+                        } else {
+                            debug!(memory_id = %memory.id, cluster_id = %cluster.id, "incremental: created new cluster");
+                            stats.created_new_clusters += 1;
+                            stats.processed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(memory_id = %memory.id, error = %e, "incremental: create_cluster failed");
+                        stats.errors += 1;
+                    }
+                }
+            }
+            Ok(None) => {
+                warn!(memory_id = %memory.id, "incremental: no vector found for memory");
+                stats.errors += 1;
+            }
+            Err(e) => {
+                warn!(memory_id = %memory.id, error = %e, "incremental: get_vector failed");
+                stats.errors += 1;
+            }
+        }
     }
 }
 

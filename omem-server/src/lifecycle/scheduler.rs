@@ -3,10 +3,11 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::api::event_bus::{ServerEvent, SharedEventBus};
 use crate::api::scheduler_control::SharedSchedulerControl;
+use crate::cluster::background_clustering::BackgroundClusterer;
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::manager::ClusterManager;
 use crate::domain::memory::Memory;
@@ -198,6 +199,9 @@ impl LifecycleScheduler {
 
             self.emit("lifecycle.stage", "system", json!({"phase": "orphan_cleanup", "store_index": i}));
             self.cleanup_orphan_clusters(store, &removed).await;
+
+            self.emit("lifecycle.stage", "system", json!({"phase": "incremental_clustering", "store_index": i}));
+            self.run_incremental_clustering(store).await;
         }
 
         for store in &stores {
@@ -330,6 +334,50 @@ impl LifecycleScheduler {
 
         if demoted_count > 0 {
             info!(demoted = demoted_count, "scheduler_tier_evaluation_complete");
+        }
+    }
+
+    async fn run_incremental_clustering(&self, store: &Arc<crate::store::LanceStore>) {
+        let embed = match &self.embed {
+            Some(e) => e.clone(),
+            None => {
+                debug!("incremental_clustering: no embed service, skipping");
+                return;
+            }
+        };
+
+        let tenant_id = match store.list(1, 0).await {
+            Ok(memories) => memories.first().map(|m| m.tenant_id.clone()).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        if tenant_id.is_empty() {
+            debug!("incremental_clustering: no memories in store, skipping");
+            return;
+        }
+
+        match BackgroundClusterer::run_incremental_clustering(
+            store.clone(),
+            self.cluster_store.clone(),
+            embed,
+            self.llm.clone(),
+            Some(50),
+            &tenant_id,
+        ).await {
+            Ok(stats) => {
+                if stats.processed > 0 {
+                    info!(
+                        processed = stats.processed,
+                        assigned = stats.assigned_to_existing,
+                        created = stats.created_new_clusters,
+                        errors = stats.errors,
+                        tenant_id,
+                        "scheduler_incremental_clustering_done"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, tenant_id, "scheduler_incremental_clustering_failed");
+            }
         }
     }
 }
