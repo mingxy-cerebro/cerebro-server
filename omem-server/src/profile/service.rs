@@ -160,18 +160,21 @@ impl ProfileService {
             let time_bonus = (days_old as f32 / 365.0).min(0.3) * 0.1;
 
             // 矛盾检测：新value含否定词而旧content不含（或反过来），判定为矛盾
-            let negation_indicators = ["不", "别", "没", "non-", "not ", "don't", "doesn't"];
+            let negation_indicators = ["不", "别", "没有", "不会", "不要", "non-", "not", "don't", "doesn't"];
             let has_new_negation = negation_indicators.iter().any(|neg| value.contains(neg));
             let has_old_negation = negation_indicators.iter().any(|neg| mem.content.contains(neg));
             let is_contradictory = has_new_negation != has_old_negation;
 
             if is_contradictory {
+                let old_content = mem.content.clone();
                 mem.content = value.to_string();
-                mem.confidence = (confidence * 0.8).max(0.1);
+                // 用新旧confidence中较低的来降级，避免高分旧fact被新低分值拉太低
+                mem.confidence = (confidence.min(mem.confidence) * 0.8).max(0.1);
                 tracing::info!(
                     key = %key,
-                    old_content = %mem.content,
+                    old_content = %old_content,
                     new_value = %value,
+                    new_confidence = mem.confidence,
                     "upsert_static_fact: contradictory fact detected, downgrading confidence"
                 );
             } else {

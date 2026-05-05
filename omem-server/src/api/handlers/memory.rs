@@ -1623,9 +1623,9 @@ pub async fn session_ingest(
 
                 // 场景性关键词：包含这些词时说明是特定场景的反馈，不是永久偏好
                 let situational_keywords = [
-                    "这次", "刚才", "不应该", "纠正", "别", "下次", "这次对话",
-                    "你说", "你是", "受影响", "中毒", "被影响",
-                    "this time", "just now", "should not", "correct", "don't",
+                    "这次", "刚才", "不应该", "纠正", "下次", "这次对话",
+                    "受影响", "中毒", "被影响", "别这样", "别再",
+                    "this time", "just now", "should not", "don't do that",
                 ];
                 let is_situational = situational_keywords
                     .iter()
