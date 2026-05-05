@@ -18,6 +18,7 @@ use crate::ingest::IngestPipeline;
 use crate::lifecycle::tier::TierManager;
 use crate::retrieve::pipeline::SearchRequest;
 use crate::retrieve::RetrievalPipeline;
+use crate::profile::service::ProfileService;
 use crate::store::lancedb::ListFilter;
 use crate::store::StoreManager;
 
@@ -1442,6 +1443,13 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
+        let mut preference_count = 0usize;
+
+        let profile_svc = ProfileService::new(
+            store.clone(),
+            state.profile_cache.clone(),
+            tenant_id.clone(),
+        );
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
@@ -1599,12 +1607,56 @@ pub async fn session_ingest(
                 }
             }
 
-            // PREFERENCE分类：不创建独立记忆条目，留空由T6实现profile注入
+            // PREFERENCE分类：注入到用户Profile而非创建独立记忆条目
             if memory_type == "PREFERENCE" {
-                tracing::info!(
-                    topic = %topic.topic,
-                    "session_ingest: PREFERENCE extracted, skipping memory creation (profile injection in T6)"
-                );
+                preference_count += 1;
+                let key = &topic.topic;
+                let value = &topic.summary;
+
+                // 静态关键词：性格、价值观、偏好、习惯等长期稳定特质
+                let is_static = [
+                    "性格", "价值观", "偏好", "喜欢", "讨厌", "习惯", "风格", "原则",
+                    "personality", "value", "prefer", "like", "dislike", "habit", "style",
+                ]
+                .iter()
+                .any(|kw| key.contains(kw) || value.contains(kw));
+
+                let confidence = 0.7f32;
+
+                let result = if is_static {
+                    profile_svc
+                        .upsert_static_fact(key, value, confidence)
+                        .await
+                } else {
+                    profile_svc
+                        .upsert_dynamic_fact(key, value, confidence)
+                        .await
+                };
+
+                match result {
+                    Ok(()) => {
+                        tracing::info!(
+                            topic = %topic.topic,
+                            is_static = is_static,
+                            "session_ingest: PREFERENCE injected into user profile"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            topic = %topic.topic,
+                            "session_ingest: failed to inject PREFERENCE into profile"
+                        );
+                    }
+                }
+
+                // 每10个preference清理一次低置信度facts
+                if preference_count % 10 == 0 {
+                    if let Err(e) = profile_svc.cleanup_low_confidence_facts(0.3).await {
+                        tracing::warn!(error = %e, "session_ingest: profile cleanup failed");
+                    }
+                }
+
                 continue;
             }
 
