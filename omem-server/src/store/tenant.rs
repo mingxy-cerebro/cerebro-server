@@ -4,6 +4,7 @@ use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::Table;
 use lancedb::Connection;
 
 use crate::domain::error::OmemError;
@@ -14,6 +15,7 @@ const TENANT_TABLE: &str = "tenants";
 
 pub struct TenantStore {
     db: Connection,
+    table: Table,
 }
 
 impl TenantStore {
@@ -22,12 +24,21 @@ impl TenantStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("tenant store connect failed: {e}")))?;
-        Ok(Self { db })
+        Self::ensure_table(&db).await?;
+        let table = db
+            .open_table(TENANT_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open tenants table: {e}")))?;
+        Ok(Self { db, table })
     }
 
     pub async fn init_table(&self) -> Result<(), OmemError> {
-        let existing = self
-            .db
+        Self::ensure_table(&self.db).await
+    }
+
+    async fn ensure_table(db: &Connection) -> Result<(), OmemError> {
+        let existing = db
             .table_names()
             .execute()
             .await
@@ -37,8 +48,7 @@ impl TenantStore {
             return Ok(());
         }
 
-        self.db
-            .create_empty_table(TENANT_TABLE, Self::schema())
+        db.create_empty_table(TENANT_TABLE, Self::schema())
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to create tenants table: {e}")))?;
@@ -54,14 +64,6 @@ impl TenantStore {
             Field::new("config", DataType::Utf8, false),
             Field::new("created_at", DataType::Utf8, false),
         ]))
-    }
-
-    async fn open_table(&self) -> Result<lancedb::table::Table, OmemError> {
-        self.db
-            .open_table(TENANT_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open tenants table: {e}")))
     }
 
     pub async fn create(&self, tenant: &Tenant) -> Result<(), OmemError> {
@@ -81,9 +83,9 @@ impl TenantStore {
         )
         .map_err(|e| OmemError::Storage(format!("failed to build tenant batch: {e}")))?;
 
-        let table = self.open_table().await?;
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
-        table
+        self.table
+            .clone()
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
             .execute()
             .await
@@ -93,8 +95,8 @@ impl TenantStore {
     }
 
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Tenant>, OmemError> {
-        let table = self.open_table().await?;
-        let batches: Vec<RecordBatch> = table
+        let batches: Vec<RecordBatch> = self.table
+            .clone()
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
             .limit(1)

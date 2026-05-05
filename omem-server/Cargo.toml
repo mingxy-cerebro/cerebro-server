@@ -8,15 +8,16 @@ name = "omem-server"
 path = "src/main.rs"
 
 [features]
-default = ["bedrock"]
+default = ["bedrock", "jemalloc"]
 bedrock = ["dep:aws-sdk-bedrockruntime", "dep:aws-config"]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 # HTTP framework
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -80,6 +81,9 @@ axum-extra = { version = "0.10", features = ["multipart"] }
 tempfile = "3"
 
 dashmap = "6"
+
+# Memory allocator (optional - reduces fragmentation in long-running processes)
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

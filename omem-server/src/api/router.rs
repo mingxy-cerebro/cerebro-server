@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
+use axum::http::StatusCode;
 
 use crate::api::handlers;
 use crate::api::middleware::{auth_middleware, logging_middleware};
@@ -133,11 +136,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/scheduler/lifecycle/resume", post(handlers::resume_lifecycle))
         .route("/v1/scheduler/clustering/pause", post(handlers::pause_clustering))
         .route("/v1/scheduler/clustering/resume", post(handlers::resume_clustering))
-        .route("/v1/events", get(handlers::sse_events))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)));
 
     let public_routes = Router::new()
         .route("/health", get(health))
@@ -146,7 +149,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/connectors/github/webhook",
             post(handlers::github_webhook),
-        );
+        )
+        .route("/v1/events", get(handlers::sse_events));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

@@ -4,6 +4,7 @@ use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::Table;
 use lancedb::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,10 @@ pub struct ImportTaskRecord {
 
 pub struct SpaceStore {
     spaces_db: Connection,
+    spaces_table: Table,
+    events_table: Table,
+    import_tasks_table: Table,
+    vault_passwords_table: Table,
 }
 
 fn default_strategy() -> String {
@@ -65,28 +70,56 @@ impl SpaceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("space store connect failed: {e}")))?;
-        Ok(Self { spaces_db })
+        Self::init_tables_for_db(&spaces_db).await?;
+        let spaces_table = spaces_db
+            .open_table(SPACES_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open spaces table: {e}")))?;
+        let events_table = spaces_db
+            .open_table(SHARING_EVENTS_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open sharing_events table: {e}")))?;
+        let import_tasks_table = spaces_db
+            .open_table(IMPORT_TASKS_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open import_tasks table: {e}")))?;
+        let vault_passwords_table = spaces_db
+            .open_table(VAULT_PASSWORDS_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open vault_passwords table: {e}")))?;
+        Ok(Self {
+            spaces_db,
+            spaces_table,
+            events_table,
+            import_tasks_table,
+            vault_passwords_table,
+        })
     }
 
     pub async fn init_tables(&self) -> Result<(), OmemError> {
-        let existing = self
-            .spaces_db
+        Self::init_tables_for_db(&self.spaces_db).await
+    }
+
+    async fn init_tables_for_db(db: &Connection) -> Result<(), OmemError> {
+        let existing = db
             .table_names()
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to list tables: {e}")))?;
 
         if !existing.contains(&SPACES_TABLE.to_string()) {
-            self.spaces_db
-                .create_empty_table(SPACES_TABLE, Self::spaces_schema())
+            db.create_empty_table(SPACES_TABLE, Self::spaces_schema())
                 .execute()
                 .await
                 .map_err(|e| OmemError::Storage(format!("failed to create spaces table: {e}")))?;
         }
 
         if !existing.contains(&SHARING_EVENTS_TABLE.to_string()) {
-            self.spaces_db
-                .create_empty_table(SHARING_EVENTS_TABLE, Self::events_schema())
+            db.create_empty_table(SHARING_EVENTS_TABLE, Self::events_schema())
                 .execute()
                 .await
                 .map_err(|e| {
@@ -95,8 +128,7 @@ impl SpaceStore {
         }
 
         if !existing.contains(&IMPORT_TASKS_TABLE.to_string()) {
-            self.spaces_db
-                .create_empty_table(IMPORT_TASKS_TABLE, Self::import_tasks_schema())
+            db.create_empty_table(IMPORT_TASKS_TABLE, Self::import_tasks_schema())
                 .execute()
                 .await
                 .map_err(|e| {
@@ -105,8 +137,7 @@ impl SpaceStore {
         }
 
         if !existing.contains(&VAULT_PASSWORDS_TABLE.to_string()) {
-            self.spaces_db
-                .create_empty_table(VAULT_PASSWORDS_TABLE, Self::vault_passwords_schema())
+            db.create_empty_table(VAULT_PASSWORDS_TABLE, Self::vault_passwords_schema())
                 .execute()
                 .await
                 .map_err(|e| {
@@ -160,38 +191,6 @@ impl SpaceStore {
         ]))
     }
 
-    async fn open_spaces_table(&self) -> Result<lancedb::table::Table, OmemError> {
-        self.spaces_db
-            .open_table(SPACES_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open spaces table: {e}")))
-    }
-
-    async fn open_events_table(&self) -> Result<lancedb::table::Table, OmemError> {
-        self.spaces_db
-            .open_table(SHARING_EVENTS_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open sharing_events table: {e}")))
-    }
-
-    async fn open_import_tasks_table(&self) -> Result<lancedb::table::Table, OmemError> {
-        self.spaces_db
-            .open_table(IMPORT_TASKS_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open import_tasks table: {e}")))
-    }
-
-    async fn open_vault_passwords_table(&self) -> Result<lancedb::table::Table, OmemError> {
-        self.spaces_db
-            .open_table(VAULT_PASSWORDS_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open vault_passwords table: {e}")))
-    }
-
     pub async fn set_vault_password(
         &self,
         space_id: &str,
@@ -212,7 +211,7 @@ impl SpaceStore {
         )
         .map_err(|e| OmemError::Storage(format!("failed to build vault password batch: {e}")))?;
 
-        let table = self.open_vault_passwords_table().await?;
+        let table = self.vault_passwords_table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::vault_passwords_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -227,7 +226,7 @@ impl SpaceStore {
         &self,
         space_id: &str,
     ) -> Result<Option<(String, String)>, OmemError> {
-        let table = self.open_vault_passwords_table().await?;
+        let table = self.vault_passwords_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("space_id = '{}'", escape_sql(space_id)))
@@ -258,7 +257,7 @@ impl SpaceStore {
     }
 
     pub async fn delete_vault_password(&self, space_id: &str) -> Result<(), OmemError> {
-        let table = self.open_vault_passwords_table().await?;
+        let table = self.vault_passwords_table.clone();
         table
             .delete(format!("space_id = '{}'", escape_sql(space_id)).as_str())
             .await
@@ -285,7 +284,7 @@ impl SpaceStore {
         )
         .map_err(|e| OmemError::Storage(format!("failed to build space batch: {e}")))?;
 
-        let table = self.open_spaces_table().await?;
+        let table = self.spaces_table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::spaces_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -297,7 +296,7 @@ impl SpaceStore {
     }
 
     pub async fn get_space(&self, id: &str) -> Result<Option<Space>, OmemError> {
-        let table = self.open_spaces_table().await?;
+        let table = self.spaces_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
@@ -318,7 +317,7 @@ impl SpaceStore {
     }
 
     pub async fn list_spaces_for_user(&self, user_id: &str) -> Result<Vec<Space>, OmemError> {
-        let table = self.open_spaces_table().await?;
+        let table = self.spaces_table.clone();
         // Query ALL spaces — we filter in Rust to catch both owner and member matches.
         // The `data` column contains serialized Space JSON including members array,
         // which cannot be efficiently queried via SQL in LanceDB.
@@ -344,7 +343,7 @@ impl SpaceStore {
     }
 
     pub async fn update_space(&self, space: &Space) -> Result<(), OmemError> {
-        let table = self.open_spaces_table().await?;
+        let table = self.spaces_table.clone();
         table
             .delete(&format!("id = '{}'", escape_sql(&space.id)))
             .await
@@ -354,7 +353,7 @@ impl SpaceStore {
     }
 
     pub async fn delete_space(&self, id: &str) -> Result<(), OmemError> {
-        let table = self.open_spaces_table().await?;
+        let table = self.spaces_table.clone();
         table
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
@@ -379,7 +378,7 @@ impl SpaceStore {
         )
         .map_err(|e| OmemError::Storage(format!("failed to build event batch: {e}")))?;
 
-        let table = self.open_events_table().await?;
+        let table = self.events_table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::events_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -395,7 +394,7 @@ impl SpaceStore {
         space_id: &str,
         limit: usize,
     ) -> Result<Vec<SharingEvent>, OmemError> {
-        let table = self.open_events_table().await?;
+        let table = self.events_table.clone();
         let filter = format!(
             "from_space = '{}' OR to_space = '{}'",
             escape_sql(space_id),
@@ -437,7 +436,7 @@ impl SpaceStore {
         )
         .map_err(|e| OmemError::Storage(format!("failed to build import task batch: {e}")))?;
 
-        let table = self.open_import_tasks_table().await?;
+        let table = self.import_tasks_table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::import_tasks_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -449,7 +448,7 @@ impl SpaceStore {
     }
 
     pub async fn get_import_task(&self, id: &str) -> Result<Option<ImportTaskRecord>, OmemError> {
-        let table = self.open_import_tasks_table().await?;
+        let table = self.import_tasks_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
@@ -470,7 +469,7 @@ impl SpaceStore {
     }
 
     pub async fn update_import_task(&self, task: &ImportTaskRecord) -> Result<(), OmemError> {
-        let table = self.open_import_tasks_table().await?;
+        let table = self.import_tasks_table.clone();
         table
             .delete(&format!("id = '{}'", escape_sql(&task.id)))
             .await
@@ -486,7 +485,7 @@ impl SpaceStore {
         space_id: &str,
         limit: usize,
     ) -> Result<Vec<ImportTaskRecord>, OmemError> {
-        let table = self.open_import_tasks_table().await?;
+        let table = self.import_tasks_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("space_id = '{}'", escape_sql(space_id)))
@@ -511,7 +510,7 @@ impl SpaceStore {
         &self,
         limit: usize,
     ) -> Result<Vec<ImportTaskRecord>, OmemError> {
-        let table = self.open_import_tasks_table().await?;
+        let table = self.import_tasks_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .limit(limit)
@@ -558,7 +557,7 @@ impl SpaceStore {
     }
 
     pub async fn list_all_events(&self, limit: usize) -> Result<Vec<SharingEvent>, OmemError> {
-        let table = self.open_events_table().await?;
+        let table = self.events_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .limit(limit)

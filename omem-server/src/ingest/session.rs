@@ -50,6 +50,7 @@ impl SessionMessage {
 
 pub struct SessionStore {
     db: Connection,
+    table: Table,
 }
 
 impl SessionStore {
@@ -57,11 +58,17 @@ impl SessionStore {
         let db = lancedb::connect(uri).execute().await.map_err(|e| {
             OmemError::Storage(format!("failed to connect to LanceDB for sessions: {e}"))
         })?;
-        Ok(Self { db })
+        Self::ensure_table(&db).await?;
+        let table = db
+            .open_table(SESSION_TABLE)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open sessions table: {e}")))?;
+        Ok(Self { db, table })
     }
 
     pub async fn optimize(&self) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         table
             .optimize(OptimizeAction::Compact {
                 options: CompactionOptions::default(),
@@ -84,8 +91,11 @@ impl SessionStore {
     }
 
     pub async fn init_table(&self) -> Result<(), OmemError> {
-        let existing = self
-            .db
+        Self::ensure_table(&self.db).await
+    }
+
+    async fn ensure_table(db: &Connection) -> Result<(), OmemError> {
+        let existing = db
             .table_names()
             .execute()
             .await
@@ -95,8 +105,7 @@ impl SessionStore {
             return Ok(());
         }
 
-        self.db
-            .create_empty_table(SESSION_TABLE, Self::schema())
+        db.create_empty_table(SESSION_TABLE, Self::schema())
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to create sessions table: {e}")))?;
@@ -115,14 +124,6 @@ impl SessionStore {
             Field::new("tags", DataType::Utf8, false),
             Field::new("created_at", DataType::Utf8, false),
         ]))
-    }
-
-    async fn open_table(&self) -> Result<Table, OmemError> {
-        self.db
-            .open_table(SESSION_TABLE)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open sessions table: {e}")))
     }
 
     /// Stores session messages, skipping any whose content_hash already exists.
@@ -145,7 +146,7 @@ impl SessionStore {
         }
 
         let batch = Self::messages_to_batch(&new_messages)?;
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -157,7 +158,7 @@ impl SessionStore {
     }
 
     pub async fn count_by_session(&self, session_id: &str) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("session_id = '{}'", escape_sql(session_id)))
@@ -182,7 +183,7 @@ impl SessionStore {
             .collect();
         let filter = format!("content_hash IN ({})", quoted.join(", "));
 
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(filter)
@@ -215,7 +216,7 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("session_id = '{}'", escape_sql(session_id)))
@@ -230,7 +231,7 @@ impl SessionStore {
     }
 
     pub async fn delete_by_session_id(&self, session_id: &str) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let filter = format!("session_id = '{}'", escape_sql(session_id));
 
         let batches: Vec<RecordBatch> = table
@@ -254,7 +255,7 @@ impl SessionStore {
     }
 
     pub async fn delete_all(&self) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let count = table
             .count_rows(None)
             .await

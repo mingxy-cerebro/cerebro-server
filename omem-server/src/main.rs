@@ -10,6 +10,10 @@ use omem_server::lifecycle::scheduler::LifecycleScheduler;
 use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn init_tracing(config: &OmemConfig) {
     let filter =
         EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new(&config.log_level));

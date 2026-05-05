@@ -138,11 +138,17 @@ impl IngestPipeline {
         let bg_task_id = task_id.clone();
         let ingest_sem = self.ingest_semaphore.clone();
 
+        let permit = match ingest_sem {
+            Some(sem) => Some(
+                sem.acquire_owned()
+                    .await
+                    .map_err(|e| OmemError::Internal(format!("ingest semaphore closed: {e}")))?,
+            ),
+            None => None,
+        };
+
         tokio::spawn(async move {
-            let _permit = match ingest_sem {
-                Some(sem) => Some(sem.acquire_owned().await.expect("ingest semaphore")),
-                None => None,
-            };
+            let _permit = permit;
 
             info!(task_id = %bg_task_id, message_count = selected.len(), "slow path: starting extraction");
 

@@ -5,6 +5,7 @@ use axum::Json;
 use axum_extra::extract::Multipart;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::api::server::{personal_space_id, AppState};
@@ -231,8 +232,10 @@ pub async fn create_import(
         let sem = state.import_semaphore.clone();
         let reconcile_sem = state.reconcile_semaphore.clone();
 
+        let permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
+
         tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
+            let _permit = permit;
             let intelligence = IntelligenceTask::new(
                 bg_store,
                 bg_session_store,
@@ -323,8 +326,10 @@ pub async fn trigger_intelligence(
     let sem = state.import_semaphore.clone();
     let reconcile_sem = state.reconcile_semaphore.clone();
 
+    let permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
+
     tokio::spawn(async move {
-        let _permit = sem.acquire_owned().await.map_err(|e| OmemError::Internal(format!("semaphore: {e}")))?;
+        let _permit = permit;
         let intelligence = IntelligenceTask::new(
             store,
             session_store,
@@ -347,63 +352,99 @@ pub async fn cross_reconcile(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let space_id = personal_space_id(&auth.tenant_id);
-    let store = state.store_manager.get_store(&space_id).await?;
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let bg_store = state.store_manager.get_store(&personal_space_id(&auth.tenant_id)).await?;
+    let bg_embed = state.embed.clone();
+    let bg_task_id = task_id.clone();
 
-    let all_memories = store.list_all_active(None).await?;
-    let mut relations_created = 0usize;
-    let scanned = all_memories.len();
+    tokio::spawn(async move {
+        info!(task_id = %bg_task_id, "cross-reconcile: starting background task");
 
-    for memory in &all_memories {
-        let text = if memory.l0_abstract.is_empty() {
-            &memory.content
-        } else {
-            &memory.l0_abstract
+        let all_memories = match bg_store.list_all_active(None).await {
+            Ok(m) => m,
+            Err(e) => {
+                error!(task_id = %bg_task_id, error = %e, "cross-reconcile: failed to list memories");
+                return;
+            }
         };
-        if text.is_empty() {
-            continue;
-        }
+        let mut relations_created = 0usize;
+        let scanned = all_memories.len();
 
-        let texts = vec![text.clone()];
-        let embeddings = state.embed.embed(&texts).await?;
-        let query_vec = match embeddings.first() {
-            Some(v) => v,
-            None => continue,
-        };
-
-        // limit=6 to account for self appearing in results
-        let similar = store.vector_search(query_vec, 6, 0.85, None, None, None).await?;
-
-        for (candidate, score) in &similar {
-            if candidate.id == memory.id {
+        for memory in &all_memories {
+            let text = if memory.l0_abstract.is_empty() {
+                &memory.content
+            } else {
+                &memory.l0_abstract
+            };
+            if text.is_empty() {
                 continue;
             }
 
-            // Re-fetch to see relations added in prior iterations of this loop
-            let mut src = store
-                .get_by_id(&memory.id)
-                .await?
-                .ok_or_else(|| OmemError::NotFound(memory.id.clone()))?;
+            let texts = vec![text.clone()];
+            let embeddings = match bg_embed.embed(&texts).await {
+                Ok(e) => e,
+                Err(e) => {
+                    error!(task_id = %bg_task_id, error = %e, "cross-reconcile: embed failed");
+                    continue;
+                }
+            };
+            let query_vec = match embeddings.first() {
+                Some(v) => v,
+                None => continue,
+            };
 
-            if src.relations.iter().any(|r| r.target_id == candidate.id) {
-                continue;
+            let similar = match bg_store.vector_search(query_vec, 6, 0.85, None, None, None).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(task_id = %bg_task_id, error = %e, "cross-reconcile: vector search failed");
+                    continue;
+                }
+            };
+
+            for (candidate, score) in &similar {
+                if candidate.id == memory.id {
+                    continue;
+                }
+
+                let mut src = match bg_store.get_by_id(&memory.id).await {
+                    Ok(Some(m)) => m,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        error!(task_id = %bg_task_id, error = %e, "cross-reconcile: get_by_id failed");
+                        continue;
+                    }
+                };
+
+                if src.relations.iter().any(|r| r.target_id == candidate.id) {
+                    continue;
+                }
+
+                src.relations.push(MemoryRelation {
+                    relation_type: RelationType::Supports,
+                    target_id: candidate.id.clone(),
+                    context_label: Some(format!("similarity:{:.2}", score)),
+                });
+                src.updated_at = chrono::Utc::now().to_rfc3339();
+                if let Err(e) = bg_store.update(&src, None).await {
+                    error!(task_id = %bg_task_id, error = %e, "cross-reconcile: update failed");
+                    continue;
+                }
+
+                relations_created += 1;
             }
-
-            src.relations.push(MemoryRelation {
-                relation_type: RelationType::Supports,
-                target_id: candidate.id.clone(),
-                context_label: Some(format!("similarity:{:.2}", score)),
-            });
-            src.updated_at = chrono::Utc::now().to_rfc3339();
-            store.update(&src, None).await?;
-
-            relations_created += 1;
         }
-    }
+
+        info!(
+            task_id = %bg_task_id,
+            relations_created,
+            memories_scanned = scanned,
+            "cross-reconcile: completed"
+        );
+    });
 
     Ok(Json(serde_json::json!({
-        "relations_created": relations_created,
-        "memories_scanned": scanned,
+        "task_id": task_id,
+        "status": "started",
     })))
 }
 

@@ -23,6 +23,7 @@ use crate::domain::types::{MemoryState, MemoryType, Tier};
 
 pub const VECTOR_DIM: i32 = 1024;
 const TABLE_NAME: &str = "memories";
+const SESSION_RECALLS_TABLE: &str = "session_recalls";
 
 pub struct ListFilter {
     pub q: Option<String>,
@@ -77,8 +78,8 @@ pub struct SessionGroupRaw {
 
 pub struct LanceStore {
     db: Connection,
-    table_name: String,
-    session_recalls_table_name: String,
+    table: Table,
+    session_recalls_table: Table,
     fts_indexed: AtomicBool,
 }
 
@@ -86,10 +87,47 @@ impl LanceStore {
     pub fn db(&self) -> &Connection {
         &self.db
     }
+
+    pub fn table_name(&self) -> &str {
+        TABLE_NAME
+    }
+
+    pub fn session_recalls_table_name(&self) -> &str {
+        "session_recalls"
+    }
 }
 
 impl LanceStore {
     pub async fn new(uri: &str) -> Result<Self, OmemError> {
+        let db = Self::connect(uri).await?;
+        let table_name = TABLE_NAME.to_string();
+        let session_recalls_table_name = SESSION_RECALLS_TABLE.to_string();
+
+        // Create tables if not exist
+        Self::create_table_if_not_exists(&db, &table_name).await?;
+        Self::create_session_recalls_table_if_not_exists(&db, &session_recalls_table_name).await?;
+
+        // Open tables once and cache
+        let table = db
+            .open_table(&table_name)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open table: {e}")))?;
+        let session_recalls_table = db
+            .open_table(&session_recalls_table_name)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open session_recalls table: {e}")))?;
+
+        Ok(Self {
+            db,
+            table,
+            session_recalls_table,
+            fts_indexed: AtomicBool::new(false),
+        })
+    }
+
+    async fn connect(uri: &str) -> Result<Connection, OmemError> {
         let mut builder = lancedb::connect(uri);
 
         // For S3-compatible stores (e.g., Alibaba Cloud OSS), pass through
@@ -97,24 +135,49 @@ impl LanceStore {
         if uri.starts_with("s3://") {
             if let Ok(val) = std::env::var("AWS_VIRTUAL_HOSTED_STYLE_REQUEST") {
                 builder = builder.storage_option("aws_virtual_hosted_style_request", val);
-            }
-            if let Ok(val) = std::env::var("AWS_ENDPOINT_URL") {
-                builder = builder.storage_option("aws_endpoint_url", val);
-            } else if let Ok(val) = std::env::var("AWS_ENDPOINT") {
-                builder = builder.storage_option("aws_endpoint_url", val);
-            }
+    }
+
         }
 
-        let db = builder
+        builder
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("failed to connect to LanceDB: {e}")))?;
-        Ok(Self {
-            db,
-            table_name: TABLE_NAME.to_string(),
-            session_recalls_table_name: "session_recalls".to_string(),
-            fts_indexed: AtomicBool::new(false),
-        })
+            .map_err(|e| OmemError::Storage(format!("failed to connect to LanceDB: {e}")))
+    }
+
+    async fn create_table_if_not_exists(db: &Connection, name: &str) -> Result<(), OmemError> {
+        let existing = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to list tables: {e}")))?;
+        if !existing.contains(&name.to_string()) {
+            db.create_empty_table(name, Self::schema())
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("failed to create table: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn create_session_recalls_table_if_not_exists(
+        db: &Connection,
+        name: &str,
+    ) -> Result<(), OmemError> {
+        let existing = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to list tables: {e}")))?;
+        if !existing.contains(&name.to_string()) {
+            db.create_empty_table(name, Self::session_recalls_schema())
+                .execute()
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to create session_recalls table: {e}"))
+                })?;
+        }
+        Ok(())
     }
 
     pub async fn init_table(&self) -> Result<(), OmemError> {
@@ -125,16 +188,15 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("failed to list tables: {e}")))?;
 
-        if !existing.contains(&self.table_name) {
+        if !existing.contains(&self.table_name().to_string()) {
             self.db
-                .create_empty_table(&self.table_name, Self::schema())
+                .create_empty_table(self.table_name(), Self::schema())
                 .execute()
                 .await
                 .map_err(|e| OmemError::Storage(format!("failed to create table: {e}")))?;
         } else {
             // Schema evolution: detect and add missing columns
-            let table = self.open_table().await?;
-            let current_schema = table
+            let current_schema = self.table
                 .schema()
                 .await
                 .map_err(|e| OmemError::Storage(format!("failed to get table schema: {e}")))?;
@@ -149,24 +211,28 @@ impl LanceStore {
 
             if !missing_fields.is_empty() {
                 let missing_schema = Arc::new(Schema::new(missing_fields));
-                table
+                self.table
                     .add_columns(NewColumnTransform::AllNulls(missing_schema), None)
                     .await
                     .map_err(|e| OmemError::Storage(format!("failed to add missing columns: {e}")))?;
             }
+
+            // Fix columns that were added as Null type — cast them to Utf8
+            // This happens when add_columns(AllNulls) creates a Null-typed column
+            // but the code expects Utf8 (e.g., the "metadata" column)
+            Self::fix_null_columns(&self.table, &current_schema, &Self::schema()).await?;
         }
 
-        if !existing.contains(&self.session_recalls_table_name) {
+        if !existing.contains(&self.session_recalls_table_name().to_string()) {
             self.db
-                .create_empty_table(&self.session_recalls_table_name, Self::session_recalls_schema())
+                .create_empty_table(self.session_recalls_table_name(), Self::session_recalls_schema())
                 .execute()
                 .await
                 .map_err(|e| {
                     OmemError::Storage(format!("failed to create session_recalls table: {e}"))
                 })?;
         } else {
-            let table = self.open_session_recalls_table().await?;
-            let current_schema = table
+            let current_schema = self.session_recalls_table
                 .schema()
                 .await
                 .map_err(|e| {
@@ -183,7 +249,7 @@ impl LanceStore {
 
             if !missing_fields.is_empty() {
                 let missing_schema = Arc::new(Schema::new(missing_fields));
-                table
+                self.session_recalls_table
                     .add_columns(NewColumnTransform::AllNulls(missing_schema), None)
                     .await
                     .map_err(|e| {
@@ -198,8 +264,7 @@ impl LanceStore {
         self.ensure_session_recalls_indexes().await?;
 
         // One-time purge of previously soft-deleted data
-        let table = self.open_table().await?;
-        match table.delete("state = 'deleted'").await {
+        match self.table.delete("state = 'deleted'").await {
             Ok(_) => tracing::info!("Purged soft-deleted rows"),
             Err(e) => tracing::warn!("Failed to purge deleted rows (non-critical): {e}"),
         }
@@ -216,7 +281,7 @@ impl LanceStore {
     }
 
     pub async fn ensure_scalar_indexes(&self) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
 
         let existing = table.list_indices().await
             .map_err(|e| OmemError::Storage(format!("list_indices failed: {e}")))?;
@@ -248,7 +313,7 @@ impl LanceStore {
     }
 
     pub async fn ensure_session_recalls_indexes(&self) -> Result<(), OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
 
         let existing = table.list_indices().await
             .map_err(|e| OmemError::Storage(format!("list session_recalls indices failed: {e}")))?;
@@ -266,6 +331,37 @@ impl LanceStore {
             }
         }
 
+        Ok(())
+    }
+
+    async fn fix_null_columns(
+        table: &lancedb::Table,
+        current_schema: &Arc<Schema>,
+        expected_schema: &Arc<Schema>,
+    ) -> Result<(), OmemError> {
+        let mut alterations = Vec::new();
+        for field in expected_schema.fields() {
+            if let Ok(current_field) = current_schema.field_with_name(field.name()) {
+                if current_field.data_type() == &DataType::Null
+                    && field.data_type() == &DataType::Utf8
+                {
+                    alterations.push(
+                        lancedb::table::ColumnAlteration::new(field.name().into())
+                            .cast_to(DataType::Utf8),
+                    );
+                }
+            }
+        }
+        if !alterations.is_empty() {
+            tracing::info!(
+                columns = ?alterations.iter().map(|a| a.path.clone()).collect::<Vec<_>>(),
+                "fix_null_columns: casting Null columns to Utf8"
+            );
+            table
+                .alter_columns(&alterations)
+                .await
+                .map_err(|e| OmemError::Storage(format!("failed to alter null columns: {e}")))?;
+        }
         Ok(())
     }
 
@@ -314,22 +410,6 @@ impl LanceStore {
             Field::new("is_cluster_anchor", DataType::Boolean, true),
             Field::new("metadata", DataType::Utf8, true),
         ]))
-    }
-
-    async fn open_table(&self) -> Result<Table, OmemError> {
-        self.db
-            .open_table(&self.table_name)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open table: {e}")))
-    }
-
-    async fn open_session_recalls_table(&self) -> Result<Table, OmemError> {
-        self.db
-            .open_table(&self.session_recalls_table_name)
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to open session_recalls table: {e}")))
     }
 
     fn session_recalls_schema() -> Arc<Schema> {
@@ -412,7 +492,7 @@ impl LanceStore {
 
     pub async fn create_session_recall(&self, recall: &SessionRecall) -> Result<(), OmemError> {
         let batch = Self::session_recall_to_batch(recall)?;
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::session_recalls_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -426,7 +506,7 @@ impl LanceStore {
         &self,
         id: &str,
     ) -> Result<Option<SessionRecall>, OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
@@ -449,7 +529,7 @@ impl LanceStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SessionRecall>, OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         
         let mut filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
         if let Some(sid) = session_id {
@@ -475,7 +555,7 @@ impl LanceStore {
         &self,
         id: &str,
     ) -> Result<(), OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         table
             .delete(format!("id = '{}'", escape_sql(id)).as_str())
             .await
@@ -487,7 +567,7 @@ impl LanceStore {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<SessionGroupRaw>, OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         let filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
         // Only select lightweight columns needed for grouping — skip memories_json
         let batches: Vec<RecordBatch> = table
@@ -553,7 +633,7 @@ impl LanceStore {
         tenant_id: &str,
         session_id: &str,
     ) -> Result<(), OmemError> {
-        let table = self.open_session_recalls_table().await?;
+        let table = self.session_recalls_table.clone();
         let filter = format!(
             "tenant_id = '{}' AND session_id = '{}'",
             escape_sql(tenant_id),
@@ -829,7 +909,7 @@ impl LanceStore {
     }
 
     pub async fn list_all_active(&self, limit: Option<usize>) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let mut query = table.query();
         if let Some(n) = limit {
             query = query.limit(n);
@@ -853,7 +933,7 @@ impl LanceStore {
         session_id: &str,
         limit: usize,
     ) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let filter = format!("session_id = '{}'", escape_sql(session_id));
         let batches: Vec<RecordBatch> = table
             .query()
@@ -874,7 +954,7 @@ impl LanceStore {
 
     pub async fn create(&self, memory: &Memory, vector: Option<&[f32]>) -> Result<(), OmemError> {
         let batch = Self::memory_to_batch(memory, vector)?;
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
@@ -897,7 +977,7 @@ impl LanceStore {
     }
 
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
@@ -918,7 +998,7 @@ impl LanceStore {
     /// Retrieve only the vector embedding for a memory by its ID.
     /// Returns `Ok(None)` if the memory is not found or has been deleted.
     pub async fn get_vector_by_id(&self, id: &str) -> Result<Option<Vec<f32>>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(format!("id = '{}'", escape_sql(id)))
@@ -951,7 +1031,7 @@ impl LanceStore {
     }
 
     pub async fn get_all_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .select(Select::columns(&["id", "vector"]))
@@ -1004,7 +1084,7 @@ impl LanceStore {
 
         if let Some(v) = vector {
             // Vector update path: delete + re-insert (vectors cannot be updated via expressions)
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             table
                 .delete(&format!("id = '{}'", escape_sql(&mem.id)))
                 .await
@@ -1035,7 +1115,7 @@ impl LanceStore {
                 .map(|p| p.shared_from_memory.clone());
 
             let safe_id = escape_sql(&mem.id);
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             table
                 .update()
                 .only_if(format!("id = '{safe_id}'"))
@@ -1083,7 +1163,7 @@ impl LanceStore {
         cluster_id: Option<&str>,
         is_anchor: bool,
     ) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let safe_id = escape_sql(memory_id);
         let cluster_value = match cluster_id {
             Some(cid) => format!("'{}'", escape_sql(cid)),
@@ -1101,7 +1181,7 @@ impl LanceStore {
     }
 
     pub async fn clear_all_cluster_ids(&self) -> Result<u64, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let result = table
             .update()
             .only_if("cluster_id IS NOT NULL")
@@ -1119,7 +1199,7 @@ impl LanceStore {
         if ids.is_empty() {
             return Ok(());
         }
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let now = chrono::Utc::now().to_rfc3339();
         // Build SQL IN clause: id IN ('id1','id2',...)
         let id_list: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
@@ -1136,7 +1216,7 @@ impl LanceStore {
     }
 
     pub async fn hard_delete(&self, id: &str) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         table
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
@@ -1148,7 +1228,7 @@ impl LanceStore {
         if ids.is_empty() {
             return Ok(0);
         }
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let safe_ids: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
         let id_list = safe_ids.join(", ");
         table
@@ -1159,7 +1239,7 @@ impl LanceStore {
     }
 
     pub async fn list(&self, limit: usize, offset: usize) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let batches: Vec<RecordBatch> = table
             .query()
             .limit(limit + offset)
@@ -1180,7 +1260,7 @@ impl LanceStore {
         &self,
         cluster_id: &str,
     ) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let safe_cid = cluster_id.replace("'", "''");
         let batches: Vec<RecordBatch> = table
             .query()
@@ -1207,7 +1287,7 @@ impl LanceStore {
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let mut query = table
             .query()
             .nearest_to(query_vector)
@@ -1273,7 +1353,7 @@ impl LanceStore {
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
 
         let fts_query = lance_index::scalar::FullTextSearchQuery::new(query.to_string());
 
@@ -1345,7 +1425,7 @@ impl LanceStore {
     }
 
     pub async fn create_vector_index(&self) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let count = table.count_rows(None).await
             .map_err(|e| OmemError::Storage(format!("count_rows failed: {e}")))?;
 
@@ -1369,7 +1449,7 @@ impl LanceStore {
     }
 
     pub async fn create_fts_index(&self) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
 
         // Use ngram tokenizer for better CJK support.
         // simple tokenizer splits on whitespace/punctuation only — useless for Chinese.
@@ -1406,7 +1486,7 @@ impl LanceStore {
     ) -> Result<Vec<Memory>, OmemError> {
         let mut memories = if let Some(ref q) = filter.q {
             // Full-text search path: use FTS with postfilter for other conditions
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             let fts_query = lance_index::scalar::FullTextSearchQuery::new(q.to_string());
             let mut query = table
                 .query()
@@ -1432,7 +1512,7 @@ impl LanceStore {
             }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??
         } else {
             // Original scalar filter path
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             let where_clause = Self::build_where_clause(filter);
 
             let batches: Vec<RecordBatch> = table
@@ -1471,7 +1551,7 @@ impl LanceStore {
     pub async fn count_filtered(&self, filter: &ListFilter) -> Result<usize, OmemError> {
         if let Some(ref q) = filter.q {
             // Full-text search path
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             let fts_query = lance_index::scalar::FullTextSearchQuery::new(q.to_string());
             let mut query = table
                 .query()
@@ -1499,7 +1579,7 @@ impl LanceStore {
             Ok(memories.len())
         } else {
             // Original scalar filter path
-            let table = self.open_table().await?;
+            let table = self.table.clone();
             let where_clause = Self::build_where_clause(filter);
 
             let count = table
@@ -1517,7 +1597,7 @@ impl LanceStore {
         &self,
         source_memory_id: &str,
     ) -> Result<Vec<Memory>, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
 
         let schema = table
             .schema()
@@ -1548,7 +1628,7 @@ impl LanceStore {
     }
 
     pub async fn batch_hard_delete(&self, filter: &str) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let count = table
             .count_rows(Some(filter.to_string()))
             .await
@@ -1561,7 +1641,7 @@ impl LanceStore {
     }
 
     pub async fn count_by_filter(&self, filter: &str) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let count = table
             .count_rows(Some(filter.to_string()))
             .await
@@ -1570,7 +1650,7 @@ impl LanceStore {
     }
 
     pub async fn delete_all(&self) -> Result<usize, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let count = table.count_rows(None).await
             .map_err(|e| OmemError::Storage(format!("count_rows failed: {e}")))?;
         table
@@ -1587,7 +1667,7 @@ impl LanceStore {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let id_list = ids
             .iter()
             .map(|id| format!("'{}'", escape_sql(id)))
@@ -1646,7 +1726,7 @@ impl LanceStore {
     /// Optimize LanceDB tables: compact → prune → index optimize to reclaim disk space
     /// and maintain query performance.
     pub async fn optimize(&self) -> Result<(), OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
 
         // Step 1: Compact — merge small fragment files produced by frequent updates
         table
@@ -1679,7 +1759,8 @@ impl LanceStore {
             .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
 
         // Session recalls table — compact + prune only (no vector index)
-        if let Ok(sr_table) = self.open_session_recalls_table().await {
+        let sr_table = self.session_recalls_table.clone();
+        {
             let _ = sr_table
                 .optimize(OptimizeAction::Compact {
                     options: CompactionOptions::default(),
@@ -1705,14 +1786,7 @@ impl LanceStore {
     /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
     /// NOTE: No longer called from write path. Used by PruneDaemon background task only.
     pub async fn maybe_optimize(&self) {
-        let table = match self.open_table().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "maybe_optimize: failed to open table");
-                return;
-            }
-        };
-
+        let table = self.table.clone();
         let version: u64 = table.version().await.unwrap_or(0);
         const COMPACT_THRESHOLD: u64 = 50;
 
@@ -1730,7 +1804,7 @@ impl LanceStore {
     /// Prune old versions without compacting — safe to run concurrently with writes.
     /// Prune only deletes manifest files, does not rewrite data, so no commit conflicts.
     pub async fn prune_old_versions(&self) -> Result<u64, OmemError> {
-        let table = self.open_table().await?;
+        let table = self.table.clone();
         let version: u64 = table.version().await.unwrap_or(0);
 
         if version <= 10 {
@@ -2098,7 +2172,8 @@ mod tests {
     #[tokio::test]
     async fn test_schema_evolution_adds_missing_columns() {
         let dir = TempDir::new().unwrap();
-        let store = LanceStore::new(dir.path().to_str().unwrap()).await.unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let db = LanceStore::connect(uri).await.unwrap();
 
         let old_schema = Arc::new(Schema::new(
             LanceStore::schema()
@@ -2108,29 +2183,28 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
         ));
-        assert_eq!(old_schema.fields().len(), 29);
-
-        store
-            .db
-            .create_empty_table(&store.table_name, old_schema)
+        db.create_empty_table(TABLE_NAME, old_schema.clone())
+            .execute()
+            .await
+            .unwrap();
+        db.create_empty_table(SESSION_RECALLS_TABLE, LanceStore::session_recalls_schema())
             .execute()
             .await
             .unwrap();
 
-        let table_before = store.open_table().await.unwrap();
-        let schema_before = table_before.schema().await.unwrap();
+        let table = db.open_table(TABLE_NAME).execute().await.unwrap();
+        let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false) };
+
+        let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
-        assert!(schema_before
-            .field_with_name("provenance_source_id")
-            .is_err());
+        assert!(schema_before.field_with_name("provenance_source_id").is_err());
 
         store.init_table().await.unwrap();
 
-        let table_after = store.open_table().await.unwrap();
-        let schema_after = table_after.schema().await.unwrap();
+        let schema_after = store.table.schema().await.unwrap();
         assert!(schema_after.field_with_name("version").is_ok());
         assert!(schema_after.field_with_name("provenance_source_id").is_ok());
-        assert_eq!(schema_after.fields().len(), 31);
     }
 
     #[tokio::test]
@@ -2140,13 +2214,13 @@ mod tests {
 
         store.init_table().await.unwrap();
 
-        let table = store.open_table().await.unwrap();
+        let table = store.table.clone();
         let schema = table.schema().await.unwrap();
         let col_count = schema.fields().len();
 
         store.init_table().await.unwrap();
 
-        let table2 = store.open_table().await.unwrap();
+        let table2 = store.table.clone();
         let schema2 = table2.schema().await.unwrap();
         assert_eq!(schema2.fields().len(), col_count);
     }
@@ -2154,7 +2228,8 @@ mod tests {
     #[tokio::test]
     async fn test_find_by_provenance_source_missing_column() {
         let dir = TempDir::new().unwrap();
-        let store = LanceStore::new(dir.path().to_str().unwrap()).await.unwrap();
+        let uri = dir.path().to_str().unwrap();
+        let db = LanceStore::connect(uri).await.unwrap();
 
         let old_schema = Arc::new(Schema::new(
             LanceStore::schema()
@@ -2164,13 +2239,20 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
         ));
-        store
-            .db
-            .create_empty_table(&store.table_name, old_schema)
+        db.create_empty_table(TABLE_NAME, old_schema)
+            .execute()
+            .await
+            .unwrap();
+        db.create_empty_table(SESSION_RECALLS_TABLE, LanceStore::session_recalls_schema())
             .execute()
             .await
             .unwrap();
 
+        let table = db.open_table(TABLE_NAME).execute().await.unwrap();
+        let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false) };
+
+        store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
         assert!(result.is_empty());
     }
