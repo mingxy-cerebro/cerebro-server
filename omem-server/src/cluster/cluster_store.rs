@@ -433,21 +433,7 @@ impl ClusterStore {
         cluster_id: &str,
     ) -> Result<u32, OmemError> {
         let safe_id = escape_sql(cluster_id);
-        let now = chrono::Utc::now().to_rfc3339();
-        let result = self.table
-            .update()
-            .only_if(format!("id = '{safe_id}'"))
-            .column("member_count", "member_count + 1")
-            .column("updated_at", format!("'{now}'"))
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("increment_member_count failed: {e}")))?;
 
-        if result.rows_updated == 0 {
-            return Err(OmemError::NotFound(format!("cluster {} not found", cluster_id)));
-        }
-
-        // Read back the new count
         let batches: Vec<RecordBatch> = self.table
             .query()
             .only_if(format!("id = '{safe_id}'"))
@@ -455,23 +441,24 @@ impl ClusterStore {
             .limit(1)
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("query after increment failed: {e}")))?
+            .map_err(|e| OmemError::Storage(format!("increment read failed: {e}")))?
             .try_collect()
             .await
-            .map_err(|e| OmemError::Storage(format!("collect after increment failed: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("increment collect failed: {e}")))?;
 
         if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Err(OmemError::NotFound(format!("cluster {} not found after update", cluster_id)));
+            return Err(OmemError::NotFound(format!("cluster {} not found", cluster_id)));
         }
 
-        let count_col = batches[0]
+        let current: u32 = batches[0]
             .column_by_name("member_count")
-            .ok_or_else(|| OmemError::Storage("missing member_count column".to_string()))?;
-        let arr = count_col
-            .as_any()
-            .downcast_ref::<arrow::array::UInt32Array>()
-            .ok_or_else(|| OmemError::Storage("member_count is not UInt32".to_string()))?;
-        Ok(arr.value(0))
+            .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
+            .map(|arr| arr.value(0))
+            .unwrap_or(0);
+
+        let new_count = current.saturating_add(1);
+        self.set_member_count(cluster_id, new_count).await?;
+        Ok(new_count)
     }
 
     pub async fn decrement_member_count(
@@ -479,16 +466,90 @@ impl ClusterStore {
         cluster_id: &str,
     ) -> Result<(), OmemError> {
         let safe_id = escape_sql(cluster_id);
+
+        let batches: Vec<RecordBatch> = self.table
+            .query()
+            .only_if(format!("id = '{safe_id}'"))
+            .select(lancedb::query::Select::columns(&["member_count"]))
+            .limit(1)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("decrement read failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("decrement collect failed: {e}")))?;
+
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Ok(());
+        }
+
+        let current: u32 = batches[0]
+            .column_by_name("member_count")
+            .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())
+            .map(|arr| arr.value(0))
+            .unwrap_or(0);
+
+        let new_count = current.saturating_sub(1);
+        self.set_member_count(cluster_id, new_count).await?;
+        Ok(())
+    }
+
+    pub async fn set_member_count(
+        &self,
+        cluster_id: &str,
+        count: u32,
+    ) -> Result<(), OmemError> {
+        let safe_id = escape_sql(cluster_id);
         let now = chrono::Utc::now().to_rfc3339();
+        let count_str = count.to_string();
         self.table
             .update()
             .only_if(format!("id = '{safe_id}'"))
-            .column("member_count", "CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END")
+            .column("member_count", count_str)
             .column("updated_at", format!("'{now}'"))
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("decrement_member_count failed: {e}")))?;
+            .map_err(|e| {
+                OmemError::Storage(format!("set_member_count failed: {e}"))
+            })?;
         Ok(())
+    }
+
+    pub async fn recalculate_cluster_counts(
+        &self,
+        lance_store: &crate::store::lancedb::LanceStore,
+        tenant_id: &str,
+    ) -> Result<usize, OmemError> {
+        let clusters = self.list_clusters_by_tenant(tenant_id, 1000, 0).await?;
+        if clusters.is_empty() {
+            return Ok(0);
+        }
+
+        let memories = lance_store.list_all_active(Some(10000)).await?;
+
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for m in &memories {
+            if let Some(ref cid) = m.cluster_id {
+                *counts.entry(cid.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut updated = 0usize;
+        for cluster in &clusters {
+            let actual = counts.get(&cluster.id).copied().unwrap_or(0);
+            if actual != cluster.member_count {
+                self.set_member_count(&cluster.id, actual).await?;
+                updated += 1;
+                info!(
+                    cluster_id = %cluster.id,
+                    old = cluster.member_count,
+                    new = actual,
+                    "recalculated cluster member_count"
+                );
+            }
+        }
+
+        Ok(updated)
     }
 
     pub async fn delete_cluster(

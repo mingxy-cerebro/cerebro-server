@@ -179,6 +179,12 @@ impl BackgroundClusterer {
             stats.created_new_clusters += 1;
             created_cluster_ids.push(cluster.id.clone());
 
+            // Set anchor memory's cluster_id (critical: anchor was skipped before)
+            if let Err(e) = self.store.update_memory_cluster_id(anchor_id, Some(&cluster.id), true).await {
+                warn!(memory_id = %anchor_id, cluster_id = %cluster.id, error = %e, "Failed to set anchor cluster_id");
+                stats.errors += 1;
+            }
+
             let anchor_preview: String = anchor_memory.content.chars().take(40).collect();
             self.emit("cluster.memory_progress", serde_json::json!({
                 "memory_id": anchor_id,
