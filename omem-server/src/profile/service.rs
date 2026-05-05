@@ -158,12 +158,29 @@ impl ProfileService {
         if let Some(mut mem) = existing {
             let days_old = days_since_created(&mem);
             let time_bonus = (days_old as f32 / 365.0).min(0.3) * 0.1;
-            let merged_confidence = (confidence.max(mem.confidence) + time_bonus).min(1.0);
 
-            if mem.content != value {
-                mem.content = format!("{}; {}", mem.content, value);
+            // 矛盾检测：新value含否定词而旧content不含（或反过来），判定为矛盾
+            let negation_indicators = ["不", "别", "没", "non-", "not ", "don't", "doesn't"];
+            let has_new_negation = negation_indicators.iter().any(|neg| value.contains(neg));
+            let has_old_negation = negation_indicators.iter().any(|neg| mem.content.contains(neg));
+            let is_contradictory = has_new_negation != has_old_negation;
+
+            if is_contradictory {
+                mem.content = value.to_string();
+                mem.confidence = (confidence * 0.8).max(0.1);
+                tracing::info!(
+                    key = %key,
+                    old_content = %mem.content,
+                    new_value = %value,
+                    "upsert_static_fact: contradictory fact detected, downgrading confidence"
+                );
+            } else {
+                let merged_confidence = (confidence.max(mem.confidence) + time_bonus).min(1.0);
+                if mem.content != value {
+                    mem.content = format!("{}; {}", mem.content, value);
+                }
+                mem.confidence = merged_confidence;
             }
-            mem.confidence = merged_confidence;
             mem.updated_at = Utc::now().to_rfc3339();
             self.store.update(&mem, None).await?;
         } else {

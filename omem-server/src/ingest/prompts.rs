@@ -727,6 +727,11 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extracti
   - 类型: static
   ```
   Where "type" is one of: "static" (stable trait), "evolving" (may change over time), "situational" (context-dependent).
+- **SCENARIO vs TRAIT DISTINCTION**: Carefully distinguish between:
+  - **Scenario feedback**: User correcting the AI's behavior in a specific moment (e.g., "这次你回答得不对", "刚才是受XX影响", "下次别这样"). These are CONTEXT-SPECIFIC and should be marked as type "situational" with lower confidence (0.5).
+  - **Permanent preference**: User stating a lasting trait or habit (e.g., "我喜欢用Rust", "我习惯晚上写代码"). These are STABLE and should be marked as type "static".
+  - **Evolving preference**: User's preference that may change over time or depends on context. Mark as type "evolving".
+  When in doubt, prefer "situational" over "static". It is better to miss a permanent preference than to incorrectly solidify a scenario-specific correction as a permanent trait.
 - **IMPORTANT**: When existing memories already record a preference, evaluate if new evidence strengthens or contradicts it. Strengthen → increase confidence. Contradict → update value and mark type as "evolving".
 
 ### NOISE → SKIP

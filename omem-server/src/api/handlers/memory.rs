@@ -1621,17 +1621,33 @@ pub async fn session_ingest(
                 let key = &topic.topic;
                 let value = &topic.summary;
 
+                // 场景性关键词：包含这些词时说明是特定场景的反馈，不是永久偏好
+                let situational_keywords = [
+                    "这次", "刚才", "不应该", "纠正", "别", "下次", "这次对话",
+                    "你说", "你是", "受影响", "中毒", "被影响",
+                    "this time", "just now", "should not", "correct", "don't",
+                ];
+                let is_situational = situational_keywords
+                    .iter()
+                    .any(|kw| key.contains(kw) || value.contains(kw));
+
                 // 静态关键词：性格、价值观、偏好、习惯等长期稳定特质
-                let is_static = [
+                let static_keywords = [
                     "性格", "价值观", "偏好", "喜欢", "讨厌", "习惯", "风格", "原则",
                     "personality", "value", "prefer", "like", "dislike", "habit", "style",
-                ]
-                .iter()
-                .any(|kw| key.contains(kw) || value.contains(kw));
+                ];
+                let is_static = !is_situational
+                    && static_keywords.iter().any(|kw| key.contains(kw) || value.contains(kw));
 
-                let confidence = 0.7f32;
+                // 场景性反馈低置信度，静态/动态偏好正常置信度
+                let confidence = if is_situational { 0.5f32 } else { 0.7f32 };
 
-                let result = if is_static {
+                let result = if is_situational {
+                    // 场景性反馈也走dynamic通道，避免被当作永久偏好固化
+                    profile_svc
+                        .upsert_dynamic_fact(key, value, confidence)
+                        .await
+                } else if is_static {
                     profile_svc
                         .upsert_static_fact(key, value, confidence)
                         .await
