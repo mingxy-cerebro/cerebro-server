@@ -1340,15 +1340,21 @@ impl LanceStore {
             return Ok(());
         }
 
-        let mut groups: std::collections::HashMap<Option<String>, Vec<(String, bool)>> = std::collections::HashMap::new();
+        // Step 1: Group by cluster_id, set cluster_id for all members
+        let mut groups: std::collections::HashMap<Option<String>, Vec<String>> = std::collections::HashMap::new();
+        let mut anchors_to_set: Vec<(String, String)> = Vec::new(); // (memory_id, cluster_id)
         for (memory_id, cluster_id, is_anchor) in assignments {
-            groups.entry(cluster_id.clone()).or_default().push((memory_id.clone(), *is_anchor));
+            groups.entry(cluster_id.clone()).or_default().push(memory_id.clone());
+            if *is_anchor {
+                if let Some(cid) = cluster_id {
+                    anchors_to_set.push((memory_id.clone(), cid.clone()));
+                }
+            }
         }
 
-        for (cluster_id, members) in groups {
-            let table = self.table.clone();
-            let id_list: Vec<String> = members.iter()
-                .map(|(id, _)| format!("'{}'", escape_sql(id)))
+        for (cluster_id, member_ids) in groups {
+            let id_list: Vec<String> = member_ids.iter()
+                .map(|id| format!("'{}'", escape_sql(id)))
                 .collect();
             let filter = format!("id IN ({})", id_list.join(","));
 
@@ -1357,25 +1363,28 @@ impl LanceStore {
                 None => "null".to_string(),
             };
 
-            let anchors: Vec<String> = members.iter()
-                .filter(|(_, is_anchor)| *is_anchor)
-                .map(|(id, _)| format!("'{}'", escape_sql(id)))
-                .collect();
-            let is_anchor_expr = if anchors.is_empty() {
-                "false".to_string()
-            } else {
-                format!("CASE WHEN id IN ({}) THEN true ELSE false END", anchors.join(","))
-            };
-
-            table
+            self.table.clone()
                 .update()
                 .only_if(filter)
                 .column("cluster_id", cluster_value)
-                .column("is_cluster_anchor", is_anchor_expr)
+                .column("is_cluster_anchor", "false")
                 .execute()
                 .await
-                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids failed: {e}")))?;
+                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids set cluster_id failed: {e}")))?;
         }
+
+        // Step 2: Set is_cluster_anchor=true for anchors individually
+        // LanceDB does not support CASE WHEN expressions
+        for (anchor_id, _cluster_id) in anchors_to_set {
+            self.table.clone()
+                .update()
+                .only_if(format!("id = '{}'", escape_sql(&anchor_id)))
+                .column("is_cluster_anchor", "true")
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids set anchor failed: {e}")))?;
+        }
+
         Ok(())
     }
 

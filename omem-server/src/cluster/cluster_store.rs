@@ -568,23 +568,15 @@ impl ClusterStore {
         if counts.is_empty() {
             return Ok(());
         }
-        let cases: Vec<String> = counts.iter()
-            .map(|(id, count)| format!("WHEN id = '{}' THEN {}", escape_sql(id), count))
-            .collect();
-        let case_expr = format!("CASE {} END", cases.join(" "));
         let now = chrono::Utc::now().to_rfc3339();
-
-        let ids: Vec<String> = counts.iter()
-            .map(|(id, _)| format!("'{}'", escape_sql(id)))
-            .collect();
-        let filter = format!("id IN ({})", ids.join(","));
-
-        self.table.update()
-            .only_if(filter)
-            .column("member_count", case_expr)
-            .column("updated_at", format!("'{now}'"))
-            .execute().await
-            .map_err(|e| OmemError::Storage(format!("batch_set_member_counts failed: {e}")))?;
+        for (cluster_id, count) in counts {
+            self.table.update()
+                .only_if(format!("id = '{}'", escape_sql(cluster_id)))
+                .column("member_count", count.to_string())
+                .column("updated_at", format!("'{now}'"))
+                .execute().await
+                .map_err(|e| OmemError::Storage(format!("batch_set_member_counts failed for {cluster_id}: {e}")))?;
+        }
         Ok(())
     }
 
