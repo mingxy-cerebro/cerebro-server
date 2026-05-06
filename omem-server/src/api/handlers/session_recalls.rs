@@ -135,12 +135,16 @@ pub async fn should_recall(
         ));
     }
 
-    // Per-tenant rate limiting
+    // Per-session rate limiting
     {
         let mut last_times = LAST_RECALL_TIME.lock().await;
         let now = chrono::Utc::now();
         last_times.retain(|_, dt| now.signed_duration_since(*dt).num_seconds() < 86400);
-        let key = auth.tenant_id.clone();
+        let key = if body.session_id.is_empty() {
+            auth.tenant_id.clone()
+        } else {
+            format!("{}:{}", auth.tenant_id, body.session_id)
+        };
         if let Some(last_time) = last_times.get(&key) {
             let elapsed = chrono::Utc::now().signed_duration_since(*last_time);
             let min_interval = state.config.should_recall_min_interval_secs as i64;
