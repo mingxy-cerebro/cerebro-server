@@ -702,7 +702,7 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extracti
 
 ### EMOTIONAL (scope "private", category "profile")
 - Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
-- **PRESERVE original text as-is.** Do NOT compress or summarize. Retain every detail — dialogues, poetry, metaphors, nicknames, emotional nuances.
+Preserve emotional tone and key details. Compress into concise form (aim for ≤500 chars). Focus on feelings, key moments, and relationship significance.
 - Keep the warmth, nuance, and full conversational texture.
 - Auto-tag with emotional subcategory:
   - "私密" — sexual/flirtatious content, intimate physical references
@@ -792,8 +792,8 @@ Return ONLY valid JSON array. Each element:
 }
 
 - "topic": Short title (1 sentence).
-- "summary": Full content. Use Markdown.
-- "tags": Relevant tags + ALWAYS "session_compress".
+- "summary": Concise content in Markdown. EMOTIONAL: ≤500 chars. WORK: ≤300 chars. PREFERENCE: ≤200 chars. Extract KEY CONCLUSIONS ONLY, not full conversation history.
+- "tags": Maximum 3 relevant tags (excluding "session_compress"). Focus on the MOST important keywords only.
 - "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
 - "category": For EMOTIONAL always "profile", for WORK use 6 categories above, for PREFERENCE always "preferences".
 - "memory_type": The classification label.

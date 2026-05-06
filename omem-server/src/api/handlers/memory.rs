@@ -1486,33 +1486,41 @@ pub async fn session_ingest(
                 }
             });
 
+            let summary = if topic.summary.chars().count() > 800 {
+                let truncated: String = topic.summary.chars().take(797).collect();
+                format!("{}...", truncated)
+            } else {
+                topic.summary.clone()
+            };
             let l1_overview = {
-                let s = &topic.summary;
+                let s = &summary;
                 if s.chars().count() <= 150 { s.clone() } else {
                     let truncated: String = s.chars().take(147).collect();
                     format!("{}...", truncated)
                 }
             };
             let l2_content = {
-                let s = &topic.summary;
+                let s = &summary;
                 if s.chars().count() <= 500 { s.clone() } else {
                     let truncated: String = s.chars().take(497).collect();
                     format!("{}...", truncated)
                 }
             };
-            let tags = if topic.tags.is_empty() {
-                vec!["session_compress".to_string()]
-            } else {
+            let tags = {
                 let mut t = topic.tags.clone();
-                t.push("session_compress".to_string());
-                if memory_type == "PREFERENCE" {
+                if !t.contains(&"session_compress".to_string()) {
+                    t.push("session_compress".to_string());
+                }
+                if memory_type == "PREFERENCE" && !t.contains(&"preference_extract".to_string()) {
                     t.push("preference_extract".to_string());
                 }
+                t.dedup();
+                t.truncate(5);
                 t
             };
 
             let mut memory = Memory::new(
-                &topic.summary,
+                &summary,
                 category,
                 MemoryType::Pinned,
                 &tenant_id,
@@ -1531,12 +1539,13 @@ pub async fn session_ingest(
 
             if topic.scope == "private" {
                 if let Some(existing) = existing_emotional.clone() {
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let today = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
                     let new_content = format!(
-                        "{}\n\n## {}\n{}",
+                        "{}\n\n## {} {}\n{}",
                         existing.content,
                         today,
-                        topic.summary
+                        topic.topic,
+                        summary
                     );
 
                     if new_content.chars().count() <= 3000 {
@@ -1574,12 +1583,13 @@ pub async fn session_ingest(
 
             if memory_type == "WORK" {
                 if let Some(existing_work) = existing_work_memory.clone() {
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let today = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
                     let new_content = format!(
-                        "{}\n\n## {}\n{}",
+                        "{}\n\n## {} {}\n{}",
                         existing_work.content,
                         today,
-                        topic.summary
+                        topic.topic,
+                        summary
                     );
 
                     if new_content.chars().count() <= 3000 {
