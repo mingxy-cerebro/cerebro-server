@@ -201,7 +201,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         newIds,
         "auto",
         query_text,
-        shouldRecallRes?.similarity_score,
+        shouldRecallRes?.memories?.[0]?.score,
         shouldRecallRes?.confidence,
       );
 
