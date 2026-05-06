@@ -66,10 +66,15 @@ impl FactExtractor {
             .filter(|f| {
                 !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
             })
-            .map(|mut f| {
-                f.category = normalize_category(&f.category);
-                f.quality_score = calculate_quality_score(&f.l0_abstract);
-                f
+            .filter_map(|mut f| {
+                match normalize_category(&f.category) {
+                    Some(cat) => {
+                        f.category = cat;
+                        f.quality_score = calculate_quality_score(&f.l0_abstract);
+                        Some(f)
+                    }
+                    None => None,
+                }
             })
             .take(self.max_facts)
             .collect();
@@ -96,10 +101,15 @@ impl FactExtractor {
             .filter(|f| {
                 !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
             })
-            .map(|mut f| {
-                f.category = normalize_category(&f.category);
-                f.quality_score = calculate_quality_score(&f.l0_abstract);
-                f
+            .filter_map(|mut f| {
+                match normalize_category(&f.category) {
+                    Some(cat) => {
+                        f.category = cat;
+                        f.quality_score = calculate_quality_score(&f.l0_abstract);
+                        Some(f)
+                    }
+                    None => None,
+                }
             })
             .take(self.max_facts)
             .collect();
@@ -185,12 +195,12 @@ fn calculate_quality_score(text: &str) -> f32 {
     score.clamp(0.1, 1.0)
 }
 
-fn normalize_category(raw: &str) -> String {
+fn normalize_category(raw: &str) -> Option<String> {
     let lower = raw.trim().to_lowercase();
     if VALID_CATEGORIES.contains(&lower.as_str()) {
-        lower
+        Some(lower)
     } else {
-        "profile".to_string()
+        None
     }
 }
 

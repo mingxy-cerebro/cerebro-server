@@ -138,6 +138,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 2. **events** and **cases** categories: only CREATE or SKIP. Never MERGE, SUPERSEDE, SUPPORT, CONTEXTUALIZE, or CONTRADICT.
 3. **preferences** and **entities** categories: support all 7 operations including SUPERSEDE and CONTRADICT.
 4. **preferences**, **entities**, **patterns** categories: support MERGE.
+5. **profile** category: same topic but with new details or different perspective → MERGE into the best matching existing memory. Do not CREATE a new profile fact for a topic already covered.
 
 ## General Rules
 
@@ -149,9 +150,9 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 6. For CONTEXTUALIZE: `match_index` is required. Include `context_label`.
 7. For CONTRADICT: `match_index` is required.
 8. For CREATE and SKIP: `match_index` is optional (null).
-9. Same meaning, different wording → SKIP (not MERGE).
+9. Same meaning, different wording → MERGE into the matching existing memory.
 10. Age is a tiebreaker: when a new fact conflicts with an old memory on the same topic, the older memory is more likely outdated → prefer SUPERSEDE.
-11. When in doubt, prefer CREATE over SKIP (avoid losing information).
+11. When in doubt: for "profile" category, prefer MERGE or SKIP over CREATE (avoid profile duplication). For other categories, prefer CREATE over SKIP.
 12. When two new facts are marked as 'Potential Duplicates', evaluate whether they convey the same core information. If yes, one should SKIP. If they capture different aspects or nuances, both may CREATE.
 
 ## Output Format
@@ -336,7 +337,7 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are an information extraction engine. Yo
 ## Categories
 Classify each fact into exactly one category:
 
-- **profile**: Biographical or identity information about the user. Decision: "Can this be phrased as 'User is...'?"
+- **profile**: Stable, repeated characteristics or identity of the user. Must be enduring (not temporary states). Decision: "Has this trait been demonstrated across multiple interactions?" Valid: "User is a backend engineer", "User has a daughter named Mengmeng". NOT profile: temporary mood, one-time action, AI interaction style (those are events or patterns).
 - **preferences**: Likes, dislikes, tool choices, style preferences. Decision: "Can this be phrased as 'User prefers/likes...'?"
 - **entities**: Persistent nouns (projects, tools, people, orgs) and their states. Decision: "Does this describe a persistent noun's state?"
 - **events**: Things that happened — milestones, incidents, decisions made. Decision: "Does this describe something that happened?"
@@ -360,6 +361,10 @@ Do NOT extract:
 - AI assistant's internal operation logs (search results, tool outputs, compression logs)
 - Meta-information about the conversation (message counts, session IDs, system reminders)
 - Development/build/test output (cargo build, npm test, git operations)
+- Temporary emotional states or moods (not stable personality traits)
+- One-time situational behaviors (not repeated patterns)
+- AI interaction feedback (e.g., "user prefers shorter responses") — these are preferences, not profile
+- Observations about the current conversation (meta-commentary)
 
 ## Quality Gate (CRITICAL)
 Before extracting each fact, evaluate:
@@ -733,6 +738,11 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extracti
   - **Evolving preference**: User's preference that may change over time or depends on context. Mark as type "evolving".
   When in doubt, prefer "situational" over "static". It is better to miss a permanent preference than to incorrectly solidify a scenario-specific correction as a permanent trait.
 - **IMPORTANT**: When existing memories already record a preference, evaluate if new evidence strengthens or contradicts it. Strengthen → increase confidence. Contradict → update value and mark type as "evolving".
+- **NEGATIVE EXAMPLES (do NOT extract as PREFERENCE)**:
+  - "User said I was wrong this time" → situational feedback, not a stable preference
+  - "User seemed frustrated today" → temporary emotional state, not a trait
+  - "User asked me to format code differently once" → one-time instruction, not a lasting preference
+  - "User likes the response style in this conversation" → meta-commentary, not cross-session preference
 
 ### NOISE → SKIP
 - Casual small talk with no lasting value
@@ -763,7 +773,7 @@ const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extracti
 
 ## CATEGORY CLASSIFICATION (for WORK topics)
 Use ONLY these 6 valid values for category:
-- **profile**: Biographical/identity information
+- **profile**: Stable, repeated characteristics or identity of the user. Must be enduring traits (not temporary states, moods, or one-time actions). Valid: "User is a backend engineer", "User has a daughter named Mengmeng". NOT profile: "User seems tired today", "User asked a question about X".
 - **preferences**: Likes, dislikes, tool choices, style preferences
 - **entities**: Persistent nouns (projects, tools, people, orgs)
 - **events**: Things that happened — milestones, incidents, decisions

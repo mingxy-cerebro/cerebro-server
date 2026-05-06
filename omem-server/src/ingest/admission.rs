@@ -277,7 +277,7 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
 
 fn category_prior(cat: &Category) -> f32 {
     match cat {
-        Category::Profile => 0.95,
+        Category::Profile => 0.75,
         Category::Preferences => 0.90,
         Category::Entities => 0.75,
         Category::Events => 0.45,
