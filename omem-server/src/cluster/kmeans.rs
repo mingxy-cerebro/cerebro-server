@@ -205,7 +205,7 @@ fn enforce_min_cluster_size(points: &[Vec<f32>], labels: &[usize], k: usize) -> 
         counts[l] += 1;
     }
 
-    let min_size = ((n / (k * 4)).max(2)).min(n);
+    let min_size = ((n / (k * 6)).max(2)).min(n);
 
     let tiny: Vec<usize> = (0..k).filter(|&j| counts[j] > 0 && counts[j] < min_size).collect();
     if tiny.is_empty() {

@@ -1539,7 +1539,7 @@ pub async fn session_ingest(
 
             if topic.scope == "private" {
                 if let Some(existing) = existing_emotional.clone() {
-                    let today = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+                    let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                     let new_content = format!(
                         "{}\n\n## {} {}\n{}",
                         existing.content,
@@ -1583,7 +1583,7 @@ pub async fn session_ingest(
 
             if memory_type == "WORK" {
                 if let Some(existing_work) = existing_work_memory.clone() {
-                    let today = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+                    let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                     let new_content = format!(
                         "{}\n\n## {} {}\n{}",
                         existing_work.content,
