@@ -339,29 +339,65 @@ impl LanceStore {
         current_schema: &Arc<Schema>,
         expected_schema: &Arc<Schema>,
     ) -> Result<(), OmemError> {
-        let mut alterations = Vec::new();
+        let mut to_drop = Vec::new();
+        let mut sql_expressions = Vec::new();
+
         for field in expected_schema.fields() {
             if let Ok(current_field) = current_schema.field_with_name(field.name()) {
                 if current_field.data_type() == &DataType::Null
                     && field.data_type() == &DataType::Utf8
                 {
-                    alterations.push(
+                    let alterations = vec![
                         lancedb::table::ColumnAlteration::new(field.name().into())
                             .cast_to(DataType::Utf8),
-                    );
+                    ];
+                    match table.alter_columns(&alterations).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                column = field.name(),
+                                "fix_null_columns: cast Null to Utf8 succeeded"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                column = field.name(),
+                                error = %e,
+                                "fix_null_columns: cast Null to Utf8 failed, will drop and re-add"
+                            );
+                            to_drop.push(field.name().to_string());
+                            sql_expressions.push((field.name().to_string(), "''".to_string()));
+                        }
+                    }
                 }
             }
         }
-        if !alterations.is_empty() {
+
+        if !to_drop.is_empty() {
+            let drop_refs: Vec<&str> = to_drop.iter().map(|s| s.as_str()).collect();
             tracing::info!(
-                columns = ?alterations.iter().map(|a| a.path.clone()).collect::<Vec<_>>(),
-                "fix_null_columns: casting Null columns to Utf8"
+                columns = ?drop_refs,
+                "fix_null_columns: dropping Null columns"
             );
             table
-                .alter_columns(&alterations)
+                .drop_columns(&drop_refs)
                 .await
-                .map_err(|e| OmemError::Storage(format!("failed to alter null columns: {e}")))?;
+                .map_err(|e| OmemError::Storage(format!("failed to drop null columns: {e}")))?;
+
+            tracing::info!(
+                expressions = ?sql_expressions,
+                "fix_null_columns: re-adding columns with SqlExpressions"
+            );
+            table
+                .add_columns(
+                    lancedb::table::NewColumnTransform::SqlExpressions(sql_expressions),
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to add columns after drop: {e}"))
+                })?;
         }
+
         Ok(())
     }
 
