@@ -17,7 +17,7 @@ struct ClusterSummaryResponse {
 
 /// 基于 anchor memory 的内容推断集群级别的额外标签。
 /// 已有的标签会保留，只追加推断出的新标签。
-fn infer_cluster_tags(content: &str, existing_tags: &[String]) -> Vec<String> {
+pub fn infer_cluster_tags(content: &str, existing_tags: &[String]) -> Vec<String> {
     let mut tags: Vec<String> = existing_tags.to_vec();
     let content_lower = content.to_lowercase();
 

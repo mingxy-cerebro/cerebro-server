@@ -215,6 +215,7 @@ impl BackgroundClusterer {
                 anchor_memory.id.clone(),
             );
             cluster.member_count = member_indices.len() as u32;
+            cluster.tags = super::manager::infer_cluster_tags(&anchor_memory.content, &anchor_memory.tags);
 
             let cluster_id = cluster.id.clone();
             new_cluster_infos.push(NewClusterInfo {
