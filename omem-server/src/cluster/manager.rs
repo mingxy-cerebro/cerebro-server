@@ -193,8 +193,7 @@ impl ClusterManager {
             prompts::build_cluster_summary_prompt(&cluster.title, &cluster.summary, &member_contents);
         let resp: ClusterSummaryResponse = complete_json(llm, &system, &user).await?;
 
-        cluster_store.update_summary(cluster_id, &resp.summary).await?;
-        cluster_store.update_title(cluster_id, &resp.title).await?;
+        cluster_store.update_cluster_fields(cluster_id, &resp.title, &resp.summary).await?;
 
         info!(
             cluster_id,

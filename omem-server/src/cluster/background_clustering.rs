@@ -8,9 +8,25 @@ use crate::cluster::assigner::{AssignAction, ClusterAssigner};
 use crate::cluster::cluster_store::ClusterStore;
 use crate::cluster::kmeans;
 use crate::cluster::manager::ClusterManager;
+use crate::domain::cluster::MemoryCluster;
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
+use crate::ingest::prompts;
+use crate::llm::complete_json;
 use crate::store::lancedb::LanceStore;
+
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct ClusterSummaryResponse {
+    title: String,
+    summary: String,
+}
+
+struct NewClusterInfo {
+    id: String,
+    member_count: u32,
+}
 
 pub struct BackgroundClusterer {
     store: Arc<LanceStore>,
@@ -90,7 +106,7 @@ impl BackgroundClusterer {
             "message": "Loading all memory vectors..."
         }));
 
-        let vectors_with_ids = self.store.get_all_vectors().await?;
+        let mut vectors_with_ids = self.store.get_all_vectors().await?;
         let memories = self.store.list_all_active(Some(5000)).await?;
 
         if vectors_with_ids.is_empty() || memories.is_empty() {
@@ -111,6 +127,8 @@ impl BackgroundClusterer {
             .into_iter()
             .map(|m| (m.id.clone(), m))
             .collect();
+
+        vectors_with_ids.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut ids: Vec<String> = Vec::with_capacity(vectors_with_ids.len());
         let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors_with_ids.len());
@@ -137,21 +155,25 @@ impl BackgroundClusterer {
         .map_err(|e| OmemError::Internal(format!("kmeans spawn_blocking error: {e}")))?;
 
         self.store.clear_all_cluster_ids().await?;
-        self.cluster_manager.cluster_store().delete_all_clusters_by_tenant(&tenant_id).await?;
 
-        let mut stats = ClusterStats {
-            processed: 0,
-            assigned_to_existing: 0,
-            created_new_clusters: 0,
-            errors: 0,
-        };
+        let existing = self.cluster_manager.cluster_store().list_clusters_by_tenant(&tenant_id, 1000, 0).await?;
+        let existing_ids: Vec<String> = existing.iter().map(|c| c.id.clone()).collect();
+        self.cluster_manager.cluster_store().batch_delete_clusters_by_ids(&existing_ids).await?;
 
         let mut cluster_members: HashMap<usize, Vec<usize>> = HashMap::new();
         for (idx, &label) in result.labels.iter().enumerate() {
             cluster_members.entry(label).or_default().push(idx);
         }
 
-        let mut created_cluster_ids: Vec<String> = Vec::new();
+        let mut new_clusters: Vec<(MemoryCluster, Vec<f32>)> = Vec::new();
+        let mut new_cluster_infos: Vec<NewClusterInfo> = Vec::new();
+        let mut all_assignments: Vec<(String, Option<String>, bool)> = Vec::new();
+        let mut stats = ClusterStats {
+            processed: 0,
+            assigned_to_existing: 0,
+            created_new_clusters: 0,
+            errors: 0,
+        };
 
         for (_label, member_indices) in cluster_members {
             let anchor_idx = match member_indices.first() {
@@ -162,79 +184,83 @@ impl BackgroundClusterer {
             let anchor_memory = match memory_map.get(anchor_id) {
                 Some(m) => m,
                 None => {
-                    stats.errors += 1;
+                    stats.errors += member_indices.len();
                     continue;
                 }
             };
             let anchor_vector = &vectors[anchor_idx];
 
-            let cluster = match self.cluster_manager.create_cluster(anchor_memory, anchor_vector, anchor_memory.tags.clone()).await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(memory_id = %anchor_id, error = %e, "Failed to create cluster");
-                    stats.errors += 1;
-                    continue;
+            let (title, summary) = if let Some(llm) = self.cluster_manager.llm() {
+                let (system, user) =
+                    prompts::build_cluster_initial_summary_prompt(&anchor_memory.content, &anchor_memory.l0_abstract);
+                match complete_json::<ClusterSummaryResponse>(llm.as_ref(), &system, &user).await {
+                    Ok(resp) => (resp.title, resp.summary),
+                    Err(e) => {
+                        warn!(error = %e, memory_id = %anchor_id, "LLM summary failed, using fallback");
+                        let fallback_title: String = anchor_memory.content.chars().take(50).collect();
+                        (fallback_title, anchor_memory.l0_abstract.clone())
+                    }
                 }
+            } else {
+                let fallback_title: String = anchor_memory.content.chars().take(50).collect();
+                (fallback_title, anchor_memory.l0_abstract.clone())
             };
 
-            stats.created_new_clusters += 1;
-            created_cluster_ids.push(cluster.id.clone());
+            let mut cluster = MemoryCluster::new(
+                anchor_memory.tenant_id.clone(),
+                anchor_memory.space_id.clone(),
+                title,
+                summary,
+                anchor_memory.category.clone(),
+                anchor_memory.id.clone(),
+            );
+            cluster.member_count = member_indices.len() as u32;
 
-            if let Err(e) = self.store.update_memory_cluster_id(anchor_id, Some(&cluster.id), true).await {
-                warn!(memory_id = %anchor_id, cluster_id = %cluster.id, error = %e, "Failed to set anchor cluster_id");
-                stats.errors += 1;
+            let cluster_id = cluster.id.clone();
+            new_cluster_infos.push(NewClusterInfo {
+                id: cluster_id.clone(),
+                member_count: member_indices.len() as u32,
+            });
+
+            for (i, &member_idx) in member_indices.iter().enumerate() {
+                let is_anchor = i == 0;
+                all_assignments.push((ids[member_idx].clone(), Some(cluster_id.clone()), is_anchor));
             }
 
-            let anchor_preview: String = anchor_memory.content.chars().take(40).collect();
+            new_clusters.push((cluster, anchor_vector.clone()));
+            stats.created_new_clusters += 1;
+            stats.processed += member_indices.len();
+
             self.emit("cluster.memory_progress", serde_json::json!({
                 "memory_id": anchor_id,
-                "content_preview": anchor_preview,
+                "content_preview": anchor_memory.content.chars().take(40).collect::<String>(),
                 "stage": "creating_cluster",
                 "action": "create_new",
-                "cluster_id": cluster.id,
+                "cluster_id": cluster_id,
                 "processed": stats.processed,
                 "total": total,
                 "pct": (stats.processed as f64 / total as f64 * 100.0).round() as u32,
             }));
-
-            for &member_idx in &member_indices {
-                let member_id = &ids[member_idx];
-                if member_id == anchor_id {
-                    stats.processed += 1;
-                    continue;
-                }
-
-                let content_preview: String = memory_map
-                    .get(member_id)
-                    .map(|m| m.content.chars().take(40).collect())
-                    .unwrap_or_default();
-
-                self.emit("cluster.memory_progress", serde_json::json!({
-                    "memory_id": member_id,
-                    "content_preview": content_preview,
-                    "stage": "assigning",
-                    "action": "assign_existing",
-                    "cluster_id": cluster.id,
-                    "processed": stats.processed + 1,
-                    "total": total,
-                    "pct": ((stats.processed + 1) as f64 / total as f64 * 100.0).round() as u32,
-                }));
-
-                if let Err(e) = self.cluster_manager.assign_to_cluster(
-                    member_id,
-                    &cluster.id,
-                    self.store.clone(),
-                ).await {
-                    warn!(memory_id = %member_id, error = %e, "Failed to assign memory to cluster");
-                    stats.errors += 1;
-                } else {
-                    stats.assigned_to_existing += 1;
-                    stats.processed += 1;
-                }
-
-                tokio::task::yield_now().await;
-            }
         }
+
+        if !new_clusters.is_empty() {
+            self.cluster_manager.cluster_store().batch_create_clusters(&new_clusters).await?;
+        }
+
+        if !all_assignments.is_empty() {
+            self.store.batch_update_cluster_ids(&all_assignments).await?;
+        }
+
+        let member_counts: Vec<(&str, u32)> = new_cluster_infos.iter()
+            .map(|c| (c.id.as_str(), c.member_count))
+            .collect();
+        if !member_counts.is_empty() {
+            self.cluster_manager.cluster_store().batch_set_member_counts(&member_counts).await?;
+        }
+
+        stats.assigned_to_existing = total.saturating_sub(stats.errors + stats.created_new_clusters);
+
+        let created_cluster_ids: Vec<String> = new_cluster_infos.iter().map(|c| c.id.clone()).collect();
 
         self.emit("cluster.stage", serde_json::json!({
             "stage": "summarizing",
@@ -257,9 +283,8 @@ impl BackgroundClusterer {
         info!(
             processed = stats.processed,
             created_new_clusters = stats.created_new_clusters,
-            assigned_to_existing = stats.assigned_to_existing,
             errors = stats.errors,
-            "Global K-Means clustering completed"
+            "Global K-Means clustering completed (batch mode)"
         );
 
         self.emit("cluster.complete", serde_json::json!({

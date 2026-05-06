@@ -214,6 +214,33 @@ impl ClusterStore {
         Ok(())
     }
 
+    pub async fn batch_create_clusters(
+        &self,
+        clusters: &[(MemoryCluster, Vec<f32>)],
+    ) -> Result<(), OmemError> {
+        if clusters.is_empty() {
+            return Ok(());
+        }
+
+        let batches: Vec<RecordBatch> = clusters.iter()
+            .map(|(c, v)| Self::cluster_to_batch(c, v))
+            .collect::<Result<Vec<_>, OmemError>>()?;
+
+        let schema = batches[0].schema();
+        let combined = arrow::compute::concat_batches(&schema, &batches)
+            .map_err(|e| OmemError::Storage(format!("concat_batches failed: {e}")))?;
+        let reader = RecordBatchIterator::new(vec![Ok(combined)], schema);
+
+        self.table
+            .add(Box::new(reader) as Box<dyn RecordBatchReader + Send>)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch_create_clusters failed: {e}")))?;
+
+        info!(count = clusters.len(), "batch created clusters");
+        Ok(())
+    }
+
     pub async fn search_by_vector(
         &self,
         vector: &[f32],
@@ -428,6 +455,28 @@ impl ClusterStore {
         Ok(())
     }
 
+    pub async fn update_cluster_fields(
+        &self,
+        cluster_id: &str,
+        title: &str,
+        summary: &str,
+    ) -> Result<(), OmemError> {
+        let safe_id = escape_sql(cluster_id);
+        let safe_title = escape_sql(title);
+        let safe_summary = escape_sql(summary);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.table
+            .update()
+            .only_if(format!("id = '{safe_id}'"))
+            .column("title", format!("'{safe_title}'"))
+            .column("summary", format!("'{safe_summary}'"))
+            .column("updated_at", format!("'{now}'"))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("update_cluster_fields failed: {e}")))?;
+        Ok(())
+    }
+
     pub async fn increment_member_count(
         &self,
         cluster_id: &str,
@@ -515,6 +564,30 @@ impl ClusterStore {
         Ok(())
     }
 
+    pub async fn batch_set_member_counts(&self, counts: &[(&str, u32)]) -> Result<(), OmemError> {
+        if counts.is_empty() {
+            return Ok(());
+        }
+        let cases: Vec<String> = counts.iter()
+            .map(|(id, count)| format!("WHEN id = '{}' THEN {}", escape_sql(id), count))
+            .collect();
+        let case_expr = format!("CASE {} END", cases.join(" "));
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let ids: Vec<String> = counts.iter()
+            .map(|(id, _)| format!("'{}'", escape_sql(id)))
+            .collect();
+        let filter = format!("id IN ({})", ids.join(","));
+
+        self.table.update()
+            .only_if(filter)
+            .column("member_count", case_expr)
+            .column("updated_at", format!("'{now}'"))
+            .execute().await
+            .map_err(|e| OmemError::Storage(format!("batch_set_member_counts failed: {e}")))?;
+        Ok(())
+    }
+
     pub async fn recalculate_cluster_counts(
         &self,
         lance_store: &crate::store::lancedb::LanceStore,
@@ -576,6 +649,17 @@ impl ClusterStore {
             }
         }
         Ok(deleted)
+    }
+
+    pub async fn batch_delete_clusters_by_ids(&self, ids: &[String]) -> Result<(), OmemError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_list: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+        let filter = format!("id IN ({})", id_list.join(","));
+        self.table.delete(&filter).await
+            .map_err(|e| OmemError::Storage(format!("batch_delete_clusters_by_ids failed: {e}")))?;
+        Ok(())
     }
 
     pub async fn delete_all_clusters_by_tenant(

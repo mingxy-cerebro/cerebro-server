@@ -112,7 +112,7 @@ pub fn kmeans(data: &[Vec<f32>], max_k: usize, max_iterations: usize) -> KMeansR
     }
 
     KMeansResult {
-        labels,
+        labels: enforce_min_cluster_size(&points, &labels, k),
         centroids,
         k,
     }
@@ -137,7 +137,7 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 
 fn kmeans_plus_plus(points: &[Vec<f32>], k: usize) -> Vec<Vec<f32>> {
     let n = points.len();
-    let mut rng = fast_prng(n as u64);
+    let mut rng = fast_prng(42);
     let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
     let mut chosen = vec![false; n];
 
@@ -192,6 +192,72 @@ impl FastPrng {
 
 fn fast_prng(seed: u64) -> FastPrng {
     FastPrng::new(seed)
+}
+
+fn enforce_min_cluster_size(points: &[Vec<f32>], labels: &[usize], k: usize) -> Vec<usize> {
+    let n = labels.len();
+    if n == 0 || k <= 1 {
+        return labels.to_vec();
+    }
+
+    let mut counts = vec![0usize; k];
+    for &l in labels {
+        counts[l] += 1;
+    }
+
+    let min_size = ((n / (k * 4)).max(2)).min(n);
+
+    let tiny: Vec<usize> = (0..k).filter(|&j| counts[j] > 0 && counts[j] < min_size).collect();
+    if tiny.is_empty() {
+        return labels.to_vec();
+    }
+
+    let big: Vec<usize> = (0..k).filter(|&j| counts[j] >= min_size).collect();
+    if big.is_empty() {
+        return labels.to_vec();
+    }
+
+    let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
+    for j in 0..k {
+        let dim = points[0].len();
+        let mut c = vec![0.0f32; dim];
+        let mut c_count = 0usize;
+        for (i, point) in points.iter().enumerate() {
+            if labels[i] == j {
+                for (d, val) in c.iter_mut().enumerate().take(dim) {
+                    *val += point[d];
+                }
+                c_count += 1;
+            }
+        }
+        if c_count > 0 {
+            for val in c.iter_mut() {
+                *val /= c_count as f32;
+            }
+        }
+        centroids.push(c);
+    }
+
+    let mut result = labels.to_vec();
+    for &tiny_j in &tiny {
+        for (i, &l) in labels.iter().enumerate() {
+            if l != tiny_j {
+                continue;
+            }
+            let mut best_dist = f32::MAX;
+            let mut best_j = big[0];
+            for &bj in &big {
+                let d = cosine_distance(&points[i], &centroids[bj]);
+                if d < best_dist {
+                    best_dist = d;
+                    best_j = bj;
+                }
+            }
+            result[i] = best_j;
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

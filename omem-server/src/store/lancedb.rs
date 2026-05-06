@@ -1332,6 +1332,53 @@ impl LanceStore {
         Ok(())
     }
 
+    pub async fn batch_update_cluster_ids(
+        &self,
+        assignments: &[(String, Option<String>, bool)],
+    ) -> Result<(), OmemError> {
+        if assignments.is_empty() {
+            return Ok(());
+        }
+
+        let mut groups: std::collections::HashMap<Option<String>, Vec<(String, bool)>> = std::collections::HashMap::new();
+        for (memory_id, cluster_id, is_anchor) in assignments {
+            groups.entry(cluster_id.clone()).or_default().push((memory_id.clone(), *is_anchor));
+        }
+
+        for (cluster_id, members) in groups {
+            let table = self.table.clone();
+            let id_list: Vec<String> = members.iter()
+                .map(|(id, _)| format!("'{}'", escape_sql(id)))
+                .collect();
+            let filter = format!("id IN ({})", id_list.join(","));
+
+            let cluster_value = match &cluster_id {
+                Some(cid) => format!("'{}'", escape_sql(cid)),
+                None => "null".to_string(),
+            };
+
+            let anchors: Vec<String> = members.iter()
+                .filter(|(_, is_anchor)| *is_anchor)
+                .map(|(id, _)| format!("'{}'", escape_sql(id)))
+                .collect();
+            let is_anchor_expr = if anchors.is_empty() {
+                "false".to_string()
+            } else {
+                format!("CASE WHEN id IN ({}) THEN true ELSE false END", anchors.join(","))
+            };
+
+            table
+                .update()
+                .only_if(filter)
+                .column("cluster_id", cluster_value)
+                .column("is_cluster_anchor", is_anchor_expr)
+                .execute()
+                .await
+                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids failed: {e}")))?;
+        }
+        Ok(())
+    }
+
     pub async fn clear_all_cluster_ids(&self) -> Result<u64, OmemError> {
         let table = self.table.clone();
         let result = table
