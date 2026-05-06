@@ -1888,9 +1888,10 @@ impl LanceStore {
             })
             .await
             .map_err(|e| OmemError::Storage(format!("optimize compact failed: {e}")))?;
+        tracing::info!("optimize: compact completed");
 
         // Step 2: Prune — 10-minute safety window for concurrent writes
-        table
+        let prune_stats = table
             .optimize(OptimizeAction::Prune {
                 older_than: Some(
                     chrono::Duration::try_minutes(10)
@@ -1901,14 +1902,17 @@ impl LanceStore {
             })
             .await
             .map_err(|e| OmemError::Storage(format!("optimize prune failed: {e}")))?;
+        let pruned_bytes = prune_stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
+        tracing::info!(bytes_removed = %pruned_bytes, "optimize: prune completed");
 
         // Step 3: Optimize indices — merge unindexed data into existing indices
         table
             .optimize(OptimizeAction::Index(
-                lance_index::optimize::OptimizeOptions::default(),
+                lance_index::optimize::OptimizeOptions::merge(1),
             ))
             .await
             .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
+        tracing::info!("optimize: index merge completed");
 
         // Session recalls table — compact + prune only (no vector index)
         let sr_table = self.session_recalls_table.clone();
@@ -1977,6 +1981,9 @@ impl LanceStore {
 
         let pruned = stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
         tracing::info!(version_before = %version, bytes_removed = %pruned, "prune_old_versions completed");
+        if pruned == 0 {
+            tracing::debug!("prune_old_versions: no bytes removed, may need index cleanup");
+        }
 
         let new_version: u64 = table.version().await.unwrap_or(version);
         Ok(new_version)
