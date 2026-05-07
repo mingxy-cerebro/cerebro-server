@@ -33,3 +33,4 @@ __pycache__/
 
 # === 发布产物 ===
 omem-server-release
+.worktrees/
