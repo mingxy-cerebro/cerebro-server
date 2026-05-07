@@ -1620,7 +1620,7 @@ pub async fn session_ingest(
                     match store.vector_search(
                         vec,
                         5,
-                        0.92,
+                        0.75,
                         None,
                         None,
                         None,
