@@ -2034,11 +2034,15 @@ async fn fetch_session_work_memory(
         ..Default::default()
     };
 
-    let memories = match store.list_filtered(&filter, 100, 0).await {
-        Ok(mems) => mems
-            .into_iter()
-            .filter(|m| m.session_id.as_deref() == Some(sid) && m.scope != "private")
-            .collect::<Vec<_>>(),
+        let memories = match store.list_filtered(&filter, 100, 0).await {
+            Ok(mems) => mems
+                .into_iter()
+                .filter(|m| {
+                    m.session_id.as_deref() == Some(sid)
+                        && m.scope != "private"
+                        && m.category != Category::Preferences
+                })
+                .collect::<Vec<_>>(),
         Err(_) => return None,
     };
 
