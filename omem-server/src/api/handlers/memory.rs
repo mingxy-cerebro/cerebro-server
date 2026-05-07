@@ -1494,14 +1494,14 @@ pub async fn session_ingest(
             };
             let tags = {
                 let mut t = topic.tags.clone();
+                t.dedup();
+                t.truncate(3); // preserve semantic tags, leave room for system tags
                 if !t.contains(&"session_compress".to_string()) {
                     t.push("session_compress".to_string());
                 }
                 if memory_type == "PREFERENCE" && !t.contains(&"preference_extract".to_string()) {
                     t.push("preference_extract".to_string());
                 }
-                t.dedup();
-                t.truncate(5);
                 t
             };
 
@@ -1688,8 +1688,14 @@ pub async fn session_ingest(
                                             updated.tags.push(tag.clone());
                                         }
                                     }
+                                    // keep system tags at end, truncate semantic tags first
+                                    let system_tags: Vec<String> = updated.tags.iter()
+                                        .filter(|t| t.as_str() == "session_compress" || t.as_str() == "preference_extract")
+                                        .cloned().collect();
+                                    updated.tags.retain(|t| t.as_str() != "session_compress" && t.as_str() != "preference_extract");
                                     updated.tags.dedup();
-                                    updated.tags.truncate(5);
+                                    updated.tags.truncate(3);
+                                    updated.tags.extend(system_tags);
                                     updated.importance = (updated.importance + 0.1).min(1.0);
 
                                     if let Err(e) = store.update(&updated, None).await {
