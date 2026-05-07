@@ -1517,7 +1517,7 @@ pub async fn session_ingest(
             memory.source = Some("session_compress".to_string());
             memory.session_id = session_id.clone();
             memory.agent_id = agent_id.clone();
-            memory.tags = tags;
+            memory.tags = tags.clone();
             if topic.scope == "private" {
                 memory.scope = "private".to_string();
                 memory.visibility = "private".to_string();
@@ -1614,82 +1614,99 @@ pub async fn session_ingest(
                 }
             }
 
-            // ── PREFERENCE vector dedup: merge into similar existing preference ──
-            if memory_type == "PREFERENCE" {
-                if let Some(ref vec) = vectors.get(i) {
-                    match store.vector_search(
-                        vec,
-                        5,
-                        0.75,
-                        None,
-                        None,
-                        None,
-                        Some("preferences"),
-                    ).await {
-                        Ok(similar) => {
-                            if let Some((existing_pref, score)) = similar.first() {
-                                tracing::info!(
-                                    memory_id = %existing_pref.id,
-                                    score = score,
-                                    "PREFERENCE dedup: found similar existing preference, merging"
-                                );
-                                let today = chrono::Utc::now()
-                                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
-                                    .format("%Y-%m-%d %H:%M").to_string();
-                                let appended = format!(
-                                    "\n\n## {} [observed {}]\n{}",
-                                    topic.topic,
-                                    today,
-                                    summary
-                                );
-                                // Cap at 3000 chars to prevent unbounded growth
-                                let merged = if existing_pref.content.chars().count() + appended.chars().count() > 3000 {
-                                    let existing = existing_pref.content.chars().take(2800).collect::<String>();
-                                    let cap = 3000 - existing.chars().count();
-                                    format!("{}{}", existing, appended.chars().take(cap).collect::<String>())
-                                } else {
-                                    format!("{}{}", existing_pref.content, appended)
-                                };
-                                let mut updated = existing_pref.clone();
-                                updated.content = merged.clone();
-                                updated.l0_abstract = if merged.chars().count() <= 200 {
-                                    merged.clone()
-                                } else {
-                                    merged.chars().take(200).collect()
-                                };
-                                updated.l1_overview = if merged.chars().count() <= 150 {
-                                    merged.clone()
-                                } else {
-                                    format!("{}...", merged.chars().take(147).collect::<String>())
-                                };
-                                updated.l2_content = if merged.chars().count() <= 500 {
-                                    merged.clone()
-                                } else {
-                                    format!("{}...", merged.chars().take(497).collect::<String>())
-                                };
-                                for tag in &topic.tags {
-                                    if !updated.tags.contains(tag) {
-                                        updated.tags.push(tag.clone());
+            // ── PREFERENCE tag dedup: merge into existing preference with overlapping tags ──
+            if memory_type == "PREFERENCE" && !tags.is_empty() {
+                let new_tags: Vec<String> = tags.iter().filter(|t| {
+                    let t_lower = t.to_lowercase();
+                    t_lower != "session_compress" && t_lower != "preference_extract"
+                }).cloned().collect::<Vec<_>>();
+
+                if !new_tags.is_empty() {
+                    if let Some(ref vec) = vectors.get(i) {
+                        match store.vector_search(
+                            vec,
+                            10,
+                            0.2,
+                            None,
+                            None,
+                            None,
+                            Some("preferences"),
+                        ).await {
+                            Ok(candidates) => {
+                                let matched = candidates.iter().find(|(m, _)| {
+                                    let overlap = m.tags.iter().filter(|t| {
+                                        let t_lower = t.to_lowercase();
+                                        t_lower != "session_compress" && t_lower != "preference_extract" && new_tags.iter().any(|nt| nt.to_lowercase() == t_lower)
+                                    }).count();
+                                    overlap >= 1
+                                });
+
+                                if let Some((existing_pref, score)) = matched {
+                                    tracing::info!(
+                                        memory_id = %existing_pref.id,
+                                        score = score,
+                                        new_tags = ?new_tags,
+                                        existing_tags = ?existing_pref.tags,
+                                        "PREFERENCE dedup: tag overlap found, merging"
+                                    );
+                                    let today = chrono::Utc::now()
+                                        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                                        .format("%Y-%m-%d %H:%M").to_string();
+                                    let appended = format!(
+                                        "\n\n## {} [observed {}]\n{}",
+                                        topic.topic,
+                                        today,
+                                        summary
+                                    );
+                                    // Cap at 3000 chars to prevent unbounded growth
+                                    let merged = if existing_pref.content.chars().count() + appended.chars().count() > 3000 {
+                                        let existing = existing_pref.content.chars().take(2800).collect::<String>();
+                                        let cap = 3000 - existing.chars().count();
+                                        format!("{}{}", existing, appended.chars().take(cap).collect::<String>())
+                                    } else {
+                                        format!("{}{}", existing_pref.content, appended)
+                                    };
+                                    let mut updated = existing_pref.clone();
+                                    updated.content = merged.clone();
+                                    updated.l0_abstract = if merged.chars().count() <= 200 {
+                                        merged.clone()
+                                    } else {
+                                        merged.chars().take(200).collect()
+                                    };
+                                    updated.l1_overview = if merged.chars().count() <= 150 {
+                                        merged.clone()
+                                    } else {
+                                        format!("{}...", merged.chars().take(147).collect::<String>())
+                                    };
+                                    updated.l2_content = if merged.chars().count() <= 500 {
+                                        merged.clone()
+                                    } else {
+                                        format!("{}...", merged.chars().take(497).collect::<String>())
+                                    };
+                                    for tag in &tags {
+                                        if !updated.tags.contains(tag) {
+                                            updated.tags.push(tag.clone());
+                                        }
+                                    }
+                                    updated.tags.dedup();
+                                    updated.tags.truncate(5);
+                                    updated.importance = (updated.importance + 0.1).min(1.0);
+
+                                    if let Err(e) = store.update(&updated, None).await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            existing_pref_id = %existing_pref.id,
+                                            "PREFERENCE dedup merge failed, creating new (dedup candidate logged for cleanup)"
+                                        );
+                                    } else {
+                                        tracing::info!(id = %updated.id, "PREFERENCE: merged into existing");
+                                        continue;
                                     }
                                 }
-                                updated.tags.dedup();
-                                updated.tags.truncate(5);
-                                updated.importance = (updated.importance + 0.1).min(1.0);
-
-                                if let Err(e) = store.update(&updated, None).await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        existing_pref_id = %existing_pref.id,
-                                        "PREFERENCE dedup merge failed, creating new (dedup candidate logged for cleanup)"
-                                    );
-                                } else {
-                                    tracing::info!(id = %updated.id, "PREFERENCE: merged into existing");
-                                    continue;
-                                }
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "PREFERENCE vector search failed, creating new");
+                            Err(e) => {
+                                tracing::warn!(error = %e, "PREFERENCE candidate search failed, creating new");
+                            }
                         }
                     }
                 }
