@@ -18,7 +18,7 @@ use crate::ingest::IngestPipeline;
 use crate::lifecycle::tier::TierManager;
 use crate::retrieve::pipeline::SearchRequest;
 use crate::retrieve::RetrievalPipeline;
-use crate::profile::service::ProfileService;
+
 use crate::store::lancedb::ListFilter;
 use crate::store::StoreManager;
 
@@ -1443,13 +1443,6 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
-        let mut preference_count = 0usize;
-
-        let profile_svc = ProfileService::new(
-            store.clone(),
-            state.profile_cache.clone(),
-            tenant_id.clone(),
-        );
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
@@ -1462,14 +1455,6 @@ pub async fn session_ingest(
                     "WORK"
                 }
             });
-
-            // 一致性保障：category=preferences 时强制 memory_type=PREFERENCE
-            // 防止 LLM 返回不一致的 memory_type（如 "WORK"）导致偏好内容绕过 profile 注入
-            let memory_type = if topic.category.as_deref() == Some("preferences") {
-                "PREFERENCE"
-            } else {
-                memory_type
-            };
 
             let category: Category = topic.category.as_deref().and_then(|c| {
                 let normalized = match c.to_lowercase().as_str() {
@@ -1623,75 +1608,6 @@ pub async fn session_ingest(
                     }
                     tracing::info!("session_ingest: WORK memory exceeded limit, creating new");
                 }
-            }
-
-            // PREFERENCE分类：注入到用户Profile而非创建独立记忆条目
-            if memory_type == "PREFERENCE" {
-                preference_count += 1;
-                let key = &topic.topic;
-                let value = &topic.summary;
-
-                // 场景性关键词：包含这些词时说明是特定场景的反馈，不是永久偏好
-                let situational_keywords = [
-                    "这次", "刚才", "不应该", "纠正", "下次", "这次对话",
-                    "受影响", "中毒", "被影响", "别这样", "别再",
-                    "this time", "just now", "should not", "don't do that",
-                ];
-                let is_situational = situational_keywords
-                    .iter()
-                    .any(|kw| key.contains(kw) || value.contains(kw));
-
-                // 静态关键词：性格、价值观、偏好、习惯等长期稳定特质
-                let static_keywords = [
-                    "性格", "价值观", "偏好", "喜欢", "讨厌", "习惯", "风格", "原则",
-                    "personality", "value", "prefer", "like", "dislike", "habit", "style",
-                ];
-                let is_static = !is_situational
-                    && static_keywords.iter().any(|kw| key.contains(kw) || value.contains(kw));
-
-                // 场景性反馈低置信度，静态/动态偏好正常置信度
-                let confidence = if is_situational { 0.5f32 } else { 0.7f32 };
-
-                let result = if is_situational {
-                    // 场景性反馈也走dynamic通道，避免被当作永久偏好固化
-                    profile_svc
-                        .upsert_dynamic_fact(key, value, confidence)
-                        .await
-                } else if is_static {
-                    profile_svc
-                        .upsert_static_fact(key, value, confidence)
-                        .await
-                } else {
-                    profile_svc
-                        .upsert_dynamic_fact(key, value, confidence)
-                        .await
-                };
-
-                match result {
-                    Ok(()) => {
-                        tracing::info!(
-                            topic = %topic.topic,
-                            is_static = is_static,
-                            "session_ingest: PREFERENCE injected into user profile"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            topic = %topic.topic,
-                            "session_ingest: failed to inject PREFERENCE into profile"
-                        );
-                    }
-                }
-
-                // 每10个preference清理一次低置信度facts
-                if preference_count.is_multiple_of(10) {
-                    if let Err(e) = profile_svc.cleanup_low_confidence_facts(0.3).await {
-                        tracing::warn!(error = %e, "session_ingest: profile cleanup failed");
-                    }
-                }
-
-                continue;
             }
 
             let vector = vectors.get(i).cloned();

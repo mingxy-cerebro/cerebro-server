@@ -581,9 +581,12 @@ Each output topic MUST include a `replaces` array listing the 1-based indices of
 
 Default: 1 entry. NEVER fragment into 5+ pieces.
 
+CRITICAL SEPARATION RULE: If a session contains BOTH emotional/intimate interactions AND technical work, you MUST output at least 2 separate entries — one PRIVATE for emotional content and one MAIN for work content. Never mix intimate interactions with technical decisions in a single summary.
+
 ## VALUE FILTER
 SKIP: casual small talk, debugging status checks, tool/engine internal outputs, meta-discussion.
 KEEP: technical decisions, user preferences, code changes, file paths, architecture, user anger/criticism.
+SEPARATION: EMOTIONAL/intimate content MUST be in a separate PRIVATE entry from WORK/technical content. Never combine them.
 ANGER RULE: User frustration MUST be preserved as tagged rules (e.g., "铁律", "lessons_learned").
 If ZERO factual content → return [].
 
@@ -693,14 +696,14 @@ Return ONLY valid JSON:
 const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
 
 ## EXTRACTION SCOPE RULE (CRITICAL)
-- **WORK/Technical topics**: ONLY extract from the HUMAN USER's messages. Omit AI's analyses, code reviews, tool outputs, debugging process.
+- **WORK/Technical topics**: Extract from user instructions, decisions, and final outcomes. Omit raw tool outputs and verbose intermediate steps, but preserve key technical decisions even if stated by the AI.
 - **EMOTIONAL/Intimate topics**: Preserve KEY interactions from BOTH sides — the user's expressions AND the AI's meaningful emotional responses. Keep the warmth and back-and-forth dynamics.
 - **PREFERENCE topics**: Extract user preferences, personality traits, communication style, likes/dislikes from the conversation. These are about WHO the user IS, not what they're DOING.
 - **ALWAYS exclude**: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
 
 ## THREE CATEGORIES — DIFFERENTIATED GUIDANCE
 
-### EMOTIONAL (scope "private", category "profile")
+### EMOTIONAL (scope "private", category auto-detect)
 - Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
 Preserve emotional tone and key details. Compress into concise form (aim for ≤500 chars). Focus on feelings, key moments, and relationship significance.
 - Keep the warmth, nuance, and full conversational texture.
@@ -713,7 +716,7 @@ Preserve emotional tone and key details. Compress into concise form (aim for ≤
 
 ### WORK (scope "public", category auto-detect)
 - Technical decisions, code changes, file paths, architecture, project details, business models.
-- **DENOISE — extract conclusions only**: Strip all debugging process, trial-and-error, intermediate steps. Keep ONLY final results, key decisions, and actionable outcomes.
+- **DENOISE — prefer conclusions**: Prefer final results, key decisions, and actionable outcomes over intermediate steps. You may omit verbose trial-and-error, but preserve important technical decisions and discoveries made during the process.
 - Group related work topics into one entry whenever possible.
 - **MANDATORY**: If you can identify the project name, include it as a tag (e.g., "omem", "农服", "小小月").
 - **MANDATORY**: If you can identify the sub-topic, include it as a tag (e.g., "设计决策", "编码", "测试", "部署", "bug修复").
@@ -795,10 +798,12 @@ Return ONLY valid JSON array. Each element:
 - "summary": Concise content in Markdown. EMOTIONAL: ≤500 chars. WORK: ≤300 chars. PREFERENCE: ≤200 chars. Extract KEY CONCLUSIONS ONLY, not full conversation history.
 - "tags": Maximum 3 relevant tags (excluding "session_compress"). Focus on the MOST important keywords only.
 - "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
-- "category": For EMOTIONAL always "profile", for WORK use 6 categories above, for PREFERENCE always "preferences".
+- "category": For EMOTIONAL use the most fitting category from the 6 categories above (e.g., "events" for interactions/relationship milestones, "profile" for identity/relationship facts, "preferences" for intimate preferences). For WORK use 6 categories above, for PREFERENCE always "preferences".
 - "memory_type": The classification label.
 
-Escape all double quotes and newlines inside JSON strings. Return [] if nothing valuable.
+Escape all double quotes and newlines inside JSON strings.
+**MINIMUM EXTRACTION**: If the conversation contains ANY technical discussion, code changes, file paths, architecture decisions, or project details, you MUST extract at least one WORK entry. NEVER return [] when there is technical content.
+Return [] ONLY for conversations that are purely casual small talk with zero factual content.
 "###;
 
 #[allow(dead_code)]
