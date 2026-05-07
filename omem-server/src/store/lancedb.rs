@@ -1494,6 +1494,7 @@ impl LanceStore {
         scope_filter: Option<&str>,
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
+        category_filter: Option<&str>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
         let table = self.table.clone();
         let mut query = table
@@ -1520,6 +1521,12 @@ impl LanceStore {
                 }
                 filter.push_str(&format!("tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
+        }
+        if let Some(cat) = category_filter {
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(&format!("category = '{}'", escape_sql(cat)));
         }
         if !filter.is_empty() {
             query = query.only_if(filter);
@@ -2143,7 +2150,7 @@ mod tests {
         query_vec[0] = 1.0;
 
         let results = store
-            .vector_search(&query_vec, 3, 0.0, None, None, None)
+            .vector_search(&query_vec, 3, 0.0, None, None, None, None)
             .await
             .unwrap();
 

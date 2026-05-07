@@ -30,6 +30,9 @@ struct NewClusterInfo {
 
 pub struct BackgroundClusterer {
     store: Arc<LanceStore>,
+    cluster_store: Arc<ClusterStore>,
+    embed: Arc<dyn crate::embed::EmbedService>,
+    llm: Option<Arc<dyn crate::llm::LlmService>>,
     cluster_manager: Arc<ClusterManager>,
     event_bus: Option<Arc<EventBus>>,
     scheduler_control: Option<SharedSchedulerControl>,
@@ -44,9 +47,12 @@ impl BackgroundClusterer {
         _embed: Arc<dyn crate::embed::EmbedService>,
         llm: Option<Arc<dyn crate::llm::LlmService>>,
     ) -> Result<Self, OmemError> {
-        let cluster_manager = Arc::new(ClusterManager::new(cluster_store, llm));
+        let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), llm.clone()));
         Ok(Self {
             store,
+            cluster_store,
+            embed: _embed,
+            llm,
             cluster_manager,
             event_bus: None,
             scheduler_control: None,
@@ -82,8 +88,23 @@ impl BackgroundClusterer {
         }
     }
 
-    pub async fn cluster_all_unassigned(&self, _batch_size: usize) -> Result<ClusterStats, OmemError> {
-        self.cluster_global_kmeans().await
+    pub async fn cluster_all_unassigned(&self, batch_size: usize) -> Result<ClusterStats, OmemError> {
+        let tenant = if self.tenant_id.is_empty() {
+            "unknown"
+        } else {
+            &self.tenant_id
+        };
+        info!(batch_size, tenant, "cluster_all_unassigned: using safe incremental path (was destructive global k-means)");
+
+        Self::run_incremental_clustering(
+            self.store.clone(),
+            self.cluster_store.clone(),
+            self.embed.clone(),
+            self.llm.clone(),
+            Some(batch_size),
+            tenant,
+        )
+        .await
     }
 
     pub async fn cluster_global_kmeans(&self) -> Result<ClusterStats, OmemError> {

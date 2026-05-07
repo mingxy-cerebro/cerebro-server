@@ -198,7 +198,7 @@ impl RetrievalPipeline {
         let vector_fut = async {
             if let Some(ref qv) = request.query_vector {
                 self.store
-                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None)
+                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None, None)
                     .await
             } else {
                 Ok(Vec::new())
