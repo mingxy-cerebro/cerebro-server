@@ -1452,6 +1452,7 @@ pub async fn session_ingest(
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
         let mut work_original_parent_id: Option<String> = None;
+        let mut emotional_original_parent_id: Option<String> = None;
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
@@ -1530,94 +1531,147 @@ pub async fn session_ingest(
                 memory.visibility = "private".to_string();
             }
 
+            let apply_append = |mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String]| {
+                mem.content = new_content.to_string();
+                mem.l0_abstract = new_content.chars().take(200).collect();
+                mem.l1_overview = if new_content.chars().count() <= 150 {
+                    new_content.to_string()
+                } else {
+                    format!("{}...", new_content.chars().take(147).collect::<String>())
+                };
+                mem.l2_content = if new_content.chars().count() <= 500 {
+                    new_content.to_string()
+                } else {
+                    format!("{}...", new_content.chars().take(497).collect::<String>())
+                };
+                for tag in tags {
+                    if !mem.tags.contains(tag) {
+                        mem.tags.push(tag.clone());
+                    }
+                }
+            };
+
             if topic.scope == "private" {
-                if let Some(existing) = existing_emotional.clone() {
-                    let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
-                    let new_content = format!(
-                        "{}\n\n## {} {}\n{}",
-                        existing.content,
-                        today,
-                        topic.topic,
-                        summary
-                    );
+                let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
+                let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
 
+                let mut appended = false;
+
+                if let Some(mut existing) = existing_emotional.clone() {
+                    let new_content = format!("{}{}", existing.content, append_section);
                     if new_content.chars().count() <= 3000 {
-                        let mut updated = existing;
-                        updated.content = new_content.clone();
-                        let abstract_text: String = new_content.chars().take(200).collect();
-                        updated.l0_abstract = abstract_text;
-                        updated.l1_overview = if new_content.chars().count() <= 150 {
-                            new_content.clone()
-                        } else {
-                            format!("{}...", new_content.chars().take(147).collect::<String>())
-                        };
-                        updated.l2_content = if new_content.chars().count() <= 500 {
-                            new_content.clone()
-                        } else {
-                            format!("{}...", new_content.chars().take(497).collect::<String>())
-                        };
-                        for tag in &topic.tags {
-                            if !updated.tags.contains(tag) {
-                                updated.tags.push(tag.clone());
-                            }
-                        }
-
-                        if let Err(e) = store.update(&updated, None).await {
+                        apply_append(&mut existing, &new_content, &topic.tags);
+                        if let Err(e) = store.update(&existing, None).await {
                             tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
                         } else {
-                            tracing::info!(memory_id = %updated.id, "session_ingest: appended to existing emotional memory");
-                            existing_emotional = Some(updated);
-                            continue;
+                            tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing emotional memory");
+                            existing_emotional = Some(existing);
+                            appended = true;
                         }
                     }
-                    tracing::info!("session_ingest: emotional memory exceeded limit or update failed, creating new");
+                }
+
+                if !appended {
+                    if let Some(ref es) = emotional_summary {
+                        let skip_id = existing_emotional.as_ref().map(|e| e.id.clone());
+                        let digests: Vec<_> = es.memories.iter()
+                            .filter(|d| skip_id.as_ref().map_or(true, |sid| d.id != *sid))
+                            .collect();
+                        let mut loaded = Vec::new();
+                        for d in digests {
+                            if let Some(mem) = store.get_by_id(&d.id).await.ok().flatten() {
+                                loaded.push(mem);
+                            }
+                        }
+                        loaded.sort_by_key(|m| m.content.chars().count());
+
+                        for mut mem in loaded {
+                            let new_content = format!("{}{}", mem.content, append_section);
+                            if new_content.chars().count() <= 3000 {
+                                apply_append(&mut mem, &new_content, &topic.tags);
+                                if let Err(e) = store.update(&mem, None).await {
+                                    tracing::warn!(error = %e, "session_ingest: failed to append to fallback emotional memory");
+                                    continue;
+                                }
+                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback emotional memory (shortest fit)");
+                                existing_emotional = Some(mem);
+                                appended = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !appended {
+                        if emotional_original_parent_id.is_none() {
+                            emotional_original_parent_id = existing_emotional.as_ref().map(|m| m.id.clone());
+                        }
+                        tracing::info!("session_ingest: all emotional memories exceeded limit, creating new");
+                    }
+                }
+
+                if appended {
+                    continue;
                 }
             }
 
             if memory_type == "WORK" {
-                if let Some(existing_work) = existing_work_memory.clone() {
-                    let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
-                    let new_content = format!(
-                        "{}\n\n## {} {}\n{}",
-                        existing_work.content,
-                        today,
-                        topic.topic,
-                        summary
-                    );
+                let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
+                let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
 
+                let mut appended = false;
+
+                if let Some(mut existing) = existing_work_memory.clone() {
+                    let new_content = format!("{}{}", existing.content, append_section);
                     if new_content.chars().count() <= 3000 {
-                        let mut updated = existing_work;
-                        updated.content = new_content.clone();
-                        let abstract_text: String = new_content.chars().take(200).collect();
-                        updated.l0_abstract = abstract_text;
-                        updated.l1_overview = if new_content.chars().count() <= 150 {
-                            new_content.clone()
-                        } else {
-                            format!("{}...", new_content.chars().take(147).collect::<String>())
-                        };
-                        updated.l2_content = if new_content.chars().count() <= 500 {
-                            new_content.clone()
-                        } else {
-                            format!("{}...", new_content.chars().take(497).collect::<String>())
-                        };
-                        for tag in &topic.tags {
-                            if !updated.tags.contains(tag) {
-                                updated.tags.push(tag.clone());
-                            }
-                        }
-
-                        if let Err(e) = store.update(&updated, None).await {
+                        apply_append(&mut existing, &new_content, &topic.tags);
+                        if let Err(e) = store.update(&existing, None).await {
                             tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
                         } else {
-                            tracing::info!(memory_id = %updated.id, "session_ingest: appended to existing WORK memory");
-                            existing_work_memory = Some(updated);
-                            continue;
+                            tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing WORK memory");
+                            existing_work_memory = Some(existing);
+                            appended = true;
                         }
                     }
-                    tracing::info!("session_ingest: WORK memory exceeded limit, creating new with Continues relation");
-                    if work_original_parent_id.is_none() {
-                        work_original_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
+                }
+
+                if !appended {
+                    if let Some(ref ws) = work_summary {
+                        let skip_id = existing_work_memory.as_ref().map(|e| e.id.clone());
+                        let digests: Vec<_> = ws.memories.iter()
+                            .filter(|d| skip_id.as_ref().map_or(true, |sid| d.id != *sid))
+                            .collect();
+                        let mut loaded = Vec::new();
+                        for d in digests {
+                            if let Some(mem) = store.get_by_id(&d.id).await.ok().flatten() {
+                                loaded.push(mem);
+                            }
+                        }
+                        loaded.sort_by_key(|m| m.content.chars().count());
+
+                        for mut mem in loaded {
+                            let new_content = format!("{}{}", mem.content, append_section);
+                            if new_content.chars().count() <= 3000 {
+                                apply_append(&mut mem, &new_content, &topic.tags);
+                                if let Err(e) = store.update(&mem, None).await {
+                                    tracing::warn!(error = %e, "session_ingest: failed to append to fallback WORK memory");
+                                    continue;
+                                }
+                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback WORK memory (shortest fit)");
+                                existing_work_memory = Some(mem);
+                                appended = true;
+                                break;
+                            }
+                        }
                     }
+                    if !appended {
+                        if work_original_parent_id.is_none() {
+                            work_original_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
+                        }
+                        tracing::info!("session_ingest: all WORK memories exceeded limit, creating new");
+                    }
+                }
+
+                if appended {
+                    continue;
                 }
             }
 
@@ -1626,6 +1680,7 @@ pub async fn session_ingest(
                 let new_tags: Vec<String> = tags.iter().filter(|t| {
                     let t_lower = t.to_lowercase();
                     t_lower != "session_compress" && t_lower != "preference_extract"
+                        && !t_lower.starts_with("omem_")
                 }).cloned().collect::<Vec<_>>();
 
                 if !new_tags.is_empty() {
@@ -1643,7 +1698,9 @@ pub async fn session_ingest(
                                 let matched = candidates.iter().find(|(m, _)| {
                                     let overlap = m.tags.iter().filter(|t| {
                                         let t_lower = t.to_lowercase();
-                                        t_lower != "session_compress" && t_lower != "preference_extract" && new_tags.iter().any(|nt| nt.to_lowercase() == t_lower)
+                                        t_lower != "session_compress" && t_lower != "preference_extract"
+                                            && !t_lower.starts_with("omem_")
+                                            && new_tags.iter().any(|nt| nt.to_lowercase() == t_lower)
                                     }).count();
                                     overlap >= 1
                                 });
@@ -1697,9 +1754,16 @@ pub async fn session_ingest(
                                     }
                                     // keep system tags at end, truncate semantic tags first
                                     let system_tags: Vec<String> = updated.tags.iter()
-                                        .filter(|t| t.as_str() == "session_compress" || t.as_str() == "preference_extract")
-                                        .cloned().collect();
-                                    updated.tags.retain(|t| t.as_str() != "session_compress" && t.as_str() != "preference_extract");
+                                        .filter(|t| {
+                                            let t_lower = t.to_lowercase();
+                                            t_lower == "session_compress" || t_lower == "preference_extract"
+                                                || t_lower.starts_with("omem_")
+                                        }).cloned().collect();
+                                    updated.tags.retain(|t| {
+                                        let t_lower = t.to_lowercase();
+                                        t_lower != "session_compress" && t_lower != "preference_extract"
+                                            && !t_lower.starts_with("omem_")
+                                    });
                                     updated.tags.dedup();
                                     updated.tags.truncate(3);
                                     updated.tags.extend(system_tags);
@@ -1737,12 +1801,82 @@ pub async fn session_ingest(
                 }
             }
 
+            if memory_type == "EMOTIONAL" {
+                if let Some(ref parent_id) = emotional_original_parent_id {
+                    memory.relations.push(crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::Continues,
+                        target_id: parent_id.clone(),
+                        context_label: Some("auto-split on overflow".to_string()),
+                    });
+                    tracing::info!(parent = %parent_id, "EMOTIONAL: will create with Continues relation to original parent");
+                }
+            }
+
             let vector = vectors.get(i).cloned();
             if let Err(e) = store.create(&memory, vector.as_deref()).await {
                 tracing::error!(error = %e, "session_ingest_bg: create failed");
                 return;
             }
             stored += 1;
+
+            // ── Add continued_by reverse relation on parent (bidirectional link) ──
+            async fn add_continued_by_relation(
+                store: &crate::store::lancedb::LanceStore,
+                parent_id: &str,
+                child_id: &str,
+                label: &str,
+            ) {
+                const MAX_RETRIES: usize = 3;
+                for attempt in 0..MAX_RETRIES {
+                    let parent = match store.get_by_id(parent_id).await {
+                        Ok(Some(p)) => p,
+                        Ok(None) => break, // parent deleted — skip
+                        Err(e) => {
+                            tracing::warn!(error = %e, parent = %parent_id, attempt, "{label}: failed to get parent for continued_by");
+                            break;
+                        }
+                    };
+                    let mut updated = parent.clone();
+                    // Idempotent check: skip if relation already exists
+                    if updated.relations.iter().any(|r|
+                        r.relation_type == crate::domain::relation::RelationType::ContinuedBy && r.target_id == child_id
+                    ) {
+                        tracing::debug!(parent = %parent_id, child = %child_id, "{label}: continued_by relation already exists, skipping");
+                        break;
+                    }
+                    updated.relations.push(crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::ContinuedBy,
+                        target_id: child_id.to_string(),
+                        context_label: Some("auto-split continuation".to_string()),
+                    });
+                    match store.update(&updated, None).await {
+                        Ok(_) => {
+                            tracing::info!(parent = %parent_id, child = %child_id, "{label}: added continued_by relation to parent");
+                            break;
+                        }
+                        Err(e) if attempt < MAX_RETRIES - 1 => {
+                            tracing::warn!(error = %e, parent = %parent_id, attempt, "{label}: retry continued_by update");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, parent = %parent_id, "{label}: failed to add continued_by relation after retries");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if memory_type == "WORK" {
+                if let Some(ref parent_id) = work_original_parent_id {
+                    add_continued_by_relation(&store, parent_id, &memory.id, "WORK").await;
+                }
+            }
+            if memory_type == "EMOTIONAL" {
+                if let Some(ref parent_id) = emotional_original_parent_id {
+                    add_continued_by_relation(&store, parent_id, &memory.id, "EMOTIONAL").await;
+                }
+            }
+
             created_memories.push((memory.clone(), vector.clone()));
         }
 

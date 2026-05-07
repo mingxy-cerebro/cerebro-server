@@ -17,6 +17,7 @@ pub enum RelationType {
     Supports,
     Contradicts,
     Continues,
+    ContinuedBy,
 }
 
 impl fmt::Display for RelationType {
@@ -27,6 +28,7 @@ impl fmt::Display for RelationType {
             Self::Supports => write!(f, "supports"),
             Self::Contradicts => write!(f, "contradicts"),
             Self::Continues => write!(f, "continues"),
+            Self::ContinuedBy => write!(f, "continued_by"),
         }
     }
 }
@@ -41,6 +43,7 @@ impl FromStr for RelationType {
             "supports" => Ok(Self::Supports),
             "contradicts" => Ok(Self::Contradicts),
             "continues" => Ok(Self::Continues),
+            "continued_by" => Ok(Self::ContinuedBy),
             _ => Err(format!("unknown relation type: {s}")),
         }
     }
@@ -57,6 +60,7 @@ mod tests {
         assert_eq!(RelationType::Supports.to_string(), "supports");
         assert_eq!(RelationType::Contradicts.to_string(), "contradicts");
         assert_eq!(RelationType::Continues.to_string(), "continues");
+        assert_eq!(RelationType::ContinuedBy.to_string(), "continued_by");
     }
 
     #[test]
@@ -77,6 +81,26 @@ mod tests {
         let parsed: MemoryRelation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, rel);
         assert!(json.contains("\"continues\""));
+    }
+
+    #[test]
+    fn continued_by_from_str_roundtrip() {
+        let rt: RelationType = "continued_by".parse().unwrap();
+        assert_eq!(rt, RelationType::ContinuedBy);
+        assert_eq!(rt.to_string(), "continued_by");
+    }
+
+    #[test]
+    fn continued_by_serde_roundtrip() {
+        let rel = MemoryRelation {
+            relation_type: RelationType::ContinuedBy,
+            target_id: "mem-789".to_string(),
+            context_label: Some("auto-split continuation".to_string()),
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        let parsed: MemoryRelation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, rel);
+        assert!(json.contains("\"continued_by\""));
     }
 
     #[test]

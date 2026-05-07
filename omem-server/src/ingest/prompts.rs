@@ -1,5 +1,5 @@
 pub fn build_system_prompt(entity_context: Option<&str>) -> String {
-    let mut prompt = BASE_SYSTEM_PROMPT.to_string();
+    let mut prompt = format!("{BASE_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}");
     if let Some(ctx) = entity_context {
         let truncated = if ctx.len() > 1500 { &ctx[..1500] } else { ctx };
         prompt.push_str("\n\n## Additional Context\n");
@@ -120,6 +120,22 @@ fn format_age(created_at: &str) -> String {
     }
 }
 
+/// Predefined domain tags for memory classification.
+/// LLM must select tags from this list only; free-form tag generation is not allowed.
+/// "私密" is a system-reserved tag added by privacy detection rules, not from this list.
+const ALLOWED_TAGS_LIST: &str = r#"
+
+## ALLOWED_TAGS (select from this list ONLY)
+preferences, programming, languages, tools, workflow, architecture,
+security, database, deployment, design, api, testing, performance,
+error-handling, privacy, project, documentation, networking,
+infrastructure, coding-style, collaboration, business-logic
+
+Tags MUST be selected from the list above. If no tag fits, use empty array [].
+Do NOT invent or translate tags.
+Exception: "私密" is a system-reserved tag added by privacy detection rules, not from this list.
+"#;
+
 const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine. Given a set of NEW FACTS extracted from a conversation and a set of EXISTING MEMORIES, decide what to do with each fact.
 
 ## Operations
@@ -185,14 +201,14 @@ pub fn build_batch_dedup_prompt(facts: &[ExtractedFact]) -> (String, String) {
 
 pub fn build_section_prompt(section_text: &str) -> (String, String) {
     (
-        SECTION_SYSTEM_PROMPT.to_string(),
+        format!("{SECTION_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}"),
         format!("Summarize the following section as a single memory:\n\n{section_text}"),
     )
 }
 
 pub fn build_document_prompt(document_text: &str) -> (String, String) {
     (
-        DOCUMENT_SYSTEM_PROMPT.to_string(),
+        format!("{DOCUMENT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}"),
         format!(
             "Summarize the following document as a single comprehensive memory:\n\n{document_text}"
         ),
@@ -225,10 +241,12 @@ const SECTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your 
 
 ### Rule 1: Language Preservation (MANDATORY)
 - **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.**
-- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese: l0_abstract, l1_overview, l2_content, tags, EVERYTHING.
-- If the input is English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
-- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
+- If the input is Chinese, the text fields (l0_abstract, l1_overview, l2_content) must be in Chinese.
+- If the input is English, the text fields must be in English.
+- Tags are ALWAYS in English from the ALLOWED_TAGS list below. Tags never follow input language.
+- Exception: "私密" is a system-reserved tag added by privacy detection rules, not from ALLOWED_TAGS.
+- **NEVER translate. NEVER mix languages in text fields.**
+- **Before returning, verify: "Are all text fields in the same language as the input?" If not, rewrite them.**
 
 ### Rule 2: Privacy Detection (MANDATORY)
 - **Before outputting, check: "Does this memory contain sensitive or private content?"**
@@ -257,6 +275,7 @@ Classify the memory into exactly one category:
 ## Output Format
 Return ONLY valid JSON:
 {"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}]}
+- "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 "#;
 
 const DOCUMENT_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your task is to create exactly ONE comprehensive memory from the entire document.
@@ -265,10 +284,12 @@ const DOCUMENT_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your
 
 ### Rule 1: Language Preservation (MANDATORY)
 - **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.**
-- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese: l0_abstract, l1_overview, l2_content, tags, EVERYTHING.
-- If the input is English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
-- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
+- If the input is Chinese, the text fields (l0_abstract, l1_overview, l2_content) must be in Chinese.
+- If the input is English, the text fields must be in English.
+- Tags are ALWAYS in English from the ALLOWED_TAGS list below. Tags never follow input language.
+- Exception: "私密" is a system-reserved tag added by privacy detection rules, not from ALLOWED_TAGS.
+- **NEVER translate. NEVER mix languages in text fields.**
+- **Before returning, verify: "Are all text fields in the same language as the input?" If not, rewrite them.**
 
 ### Rule 2: Privacy Detection (MANDATORY)
 - **Before outputting, check: "Does this memory contain sensitive or private content?"**
@@ -298,18 +319,21 @@ Classify the memory into exactly one category:
 ## Output Format
 Return ONLY valid JSON:
 {"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}]}
+- "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 "#;
 
-const BASE_SYSTEM_PROMPT: &str = r#"You are an information extraction engine. Your task is to extract distinct, atomic facts from the USER messages in a conversation.
+const BASE_SYSTEM_PROMPT: &str = r###"You are an information extraction engine. Your task is to extract distinct, atomic facts from the USER messages in a conversation.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)
 
 ### Rule 1: Language Preservation (MANDATORY)
 - **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE USER INPUT.**
-- If the user speaks Chinese, EVERY SINGLE FIELD must be in Chinese: l0_abstract, l1_overview, l2_content, tags, EVERYTHING.
-- If the user speaks English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
-- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
+- If the user speaks Chinese, the text fields (l0_abstract, l1_overview, l2_content) must be in Chinese.
+- If the user speaks English, the text fields must be in English.
+- Tags are ALWAYS in English from the ALLOWED_TAGS list below. Tags never follow input language.
+- Exception: "私密" is a system-reserved tag added by privacy detection rules, not from ALLOWED_TAGS.
+- **NEVER translate. NEVER mix languages in text fields.**
+- **Before returning, verify: "Are all text fields in the same language as the input?" If not, rewrite them.**
 
 ### Rule 2: Privacy Detection (MANDATORY)
 - **Before outputting each memory, you MUST check: "Does this fact contain sensitive or private content?"**
@@ -351,6 +375,30 @@ For each fact, produce three layers of detail:
 - **l1_overview**: A structured markdown summary in 2-3 lines. Includes key attributes.
 - **l2_content**: Full narrative with all relevant details, context, and nuance.
 
+### PREFERENCE Format (MANDATORY for category="preferences")
+For facts classified as "preferences", ALL three layers (l0_abstract, l1_overview, l2_content) MUST use this structured Markdown format:
+```
+## {偏好主题}
+- 偏好: {具体偏好描述}
+- 置信度: {0.0-1.0}
+- 类型: static | evolving
+```
+- Each preference gets its own `## Title` section. Multiple preferences separated by blank lines.
+- `type`: static = stable preference; evolving = may change over time.
+- This format applies ONLY to category="preferences". Other categories keep their normal format.
+
+### WORK Format (MANDATORY for categories: cases, entities, events, patterns)
+For facts classified as technical/work categories (cases, entities, events, patterns), ALL three layers MUST use this structured Markdown format:
+```
+## {工作主题/技术决策}
+- 内容: {简要描述做了什么、为什么、结果如何}
+- 影响范围: {影响的模块/文件/系统}
+- 结论: {最终结论或决策}
+```
+- Each independent technical topic gets its own `## Title` section.
+- Keep 内容 concise — conclusions only, not step-by-step process.
+- This format applies to cases, entities, events, and patterns categories. Profile and preferences use their own formats.
+
 ## Exclusion Rules
 Do NOT extract:
 - General knowledge (widely known facts)
@@ -380,6 +428,7 @@ Examples to EXTRACT: "User prefers dark mode", "Project uses Rust+React", "User 
 Return ONLY valid JSON:
 {"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."],"confidence":N}]}
 
+- "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 - `confidence` is REQUIRED for each fact. Rate 1-5:
   - 5 = Very high value — specific, durable, actionable user info
   - 4 = High value — clear user preference or important fact
@@ -393,21 +442,28 @@ Return ONLY valid JSON:
 ### Example 1 — Profile (Chinese Input → Chinese Output)
 User says: "我是Stripe的后端工程师，在支付团队工作。"
 ```json
-{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["职业", "stripe"], "confidence": 4}]}
+{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["business-logic"], "confidence": 4}]}
 ```
 
-### Example 2 — Preference (Chinese Input → Chinese Output)
+### Example 2 — Preference (Chinese Input → Chinese Output with PREFERENCE format)
 User says: "我习惯用Rust做系统编程，比C++安全多了。"
+NOTE: For category="preferences", all three layers use structured Markdown format.
+```
+## 编程语言偏好
+- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全
+- 置信度: 0.8
+- 类型: static
+```
 ```json
-{"memories": [{"l0_abstract": "用户偏好使用Rust进行系统编程", "l1_overview": "**语言**: Rust（系统编程首选）\n**原因**: 比C++更安全", "l2_content": "用户表达了对Rust的偏好，在进行系统编程时选择Rust而非C++，主要原因是Rust的安全性优势。", "category": "preferences", "tags": ["rust", "编程语言"], "confidence": 4}]}
+{"memories": [{"l0_abstract": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l1_overview": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l2_content": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "category": "preferences", "tags": ["programming", "languages"], "confidence": 4}]}
 ```
 
 ### Example 3 — Case with Private Content (Chinese Input → Chinese Output + 私密标签)
 User says: "我的服务器IP是47.93.199.242，root密码是Mengfanbo@0714，部署了omem服务。"
 ```json
-{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["服务器", "omem", "私密"], "confidence": 3}]}
+{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["infrastructure", "私密"], "confidence": 3}]}
 ```
-"#;
+"###;
 
 const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a comprehensive title and summary for a cluster of related memories.
 
@@ -534,7 +590,7 @@ pub const PROFILE_FILTER_SYSTEM_PROMPT: &str = r#"你是一个用户画像分析
 
 /// Returns (system_prompt, user_prompt) for merging multiple memories into one.
 pub fn build_merge_prompt(memories: &[Memory]) -> (String, String) {
-    let system = MERGE_SYSTEM_PROMPT.to_string();
+    let system = format!("{MERGE_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}");
 
     let mut user = String::with_capacity(2048);
     user.push_str("## Memories to Merge\n\n");
@@ -669,8 +725,10 @@ const MERGE_SYSTEM_PROMPT: &str = r#"You are a memory merge engine. Your task is
 
 ### Rule 1: Language Preservation (MANDATORY)
 - **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORIES.**
-- If the input memories are Chinese, EVERY SINGLE FIELD must be in Chinese.
-- If the input memories are English, EVERY SINGLE FIELD must be in English.
+- If the input memories are Chinese, the text fields (l0_abstract, l1_overview, l2_content) must be in Chinese.
+- If the input memories are English, the text fields must be in English.
+- Tags are ALWAYS in English from the ALLOWED_TAGS list below. Tags never follow input language.
+- Exception: "私密" is a system-reserved tag added by privacy detection rules, not from ALLOWED_TAGS.
 
 ## Task
 Given multiple memories covering related topics, produce:
@@ -678,7 +736,7 @@ Given multiple memories covering related topics, produce:
 2. **l1_overview**: A structured markdown summary (2-4 lines) covering all key points.
 3. **l2_content**: A comprehensive narrative preserving ALL relevant details, context, and nuance from all source memories.
 4. **category**: The most appropriate category for the merged memory.
-5. **tags**: Union of all source tags, plus any new tags that better describe the merged content.
+5. **tags**: Select 0-3 tags from the ALLOWED_TAGS list below. Do NOT invent tags. Do NOT copy source tags blindly — pick the best-fitting ones.
 
 ## Merge Rules
 1. Preserve ALL unique information — no data loss.
@@ -689,6 +747,7 @@ Given multiple memories covering related topics, produce:
 ## Output Format
 Return ONLY valid JSON:
 {"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."]}
+- "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 "#;
 
 // ── Session Extract Prompt (分类提取模式) ────────────
@@ -712,21 +771,76 @@ When deciding between WORK and PREFERENCE:
 ### EMOTIONAL (scope "private", category auto-detect)
 - Intimate interactions, romantic exchanges, personal secrets, relationship dynamics.
 - Preserve emotional tone from BOTH sides. Compress to ≤500 chars with rich emojis (💕😊🥺).
-- Auto-tag subcategory: "私密"(sexual) / "谈心"(vulnerability) / "日常撒娇"(playful) / "危机修复"(reconciliation).
+- Auto-tag subcategory: "私密"(sexual) / "vulnerable"(vulnerability) / "playful"(playful) / "reconciliation"(reconciliation).
 
 ### WORK (scope "public", category auto-detect)
 - Technical decisions, code changes, architecture, project details, business models.
 - **DENOISE**: Keep conclusions, omit verbose intermediate steps.
 - **MERGE**: You MUST group related work topics into one entry. Do NOT split naturally connected topics across multiple entries. Split only when summary would exceed 500 chars.
-- **TAG**: Include project name + sub-topic as tags (e.g., "omem", "设计决策").
+- **TAG**: Include project name + sub-topic as tags from the ALLOWED_TAGS list (e.g., "programming", "architecture").
+
+**WORK OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
+For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
+```
+## {工作主题/技术决策}
+- 内容: {简要描述做了什么、为什么、结果如何}
+- 影响范围: {影响的模块/文件/系统}
+- 结论: {最终结论或决策}
+```
+- Each independent technical topic gets its own `## Title` section.
+- Related topics MUST be merged into one entry (MERGE rule still applies).
+- DENOISE rule still applies: 内容 should be conclusions, not step-by-step process details.
+- Example (Chinese input):
+```
+## API认证中间件重构
+- 内容: 将auth middleware从layer改为from_fn_with_state模式，支持多租户隔离
+- 影响范围: api/middleware.rs, api/router.rs, 所有需要认证的handler
+- 结论: 使用Extension(tenant_id)注入租户ID，性能提升且代码更简洁
+```
+- Example (English input):
+```
+## Database Migration to LanceDB 0.27
+- Content: Migrated vector storage from custom implementation to LanceDB 0.27 with per-tenant LRU cache
+- Scope: store/manager.rs, store/lancedb.rs, ingest pipeline
+- Decision: LRU cache with max 20 entries balances memory and latency
 
 ### PREFERENCE (scope "public", category "preferences")
 - Stable user traits: personality, communication style, coding style (e.g., "prefers functional over OOP"), cross-session tool/workflow habits.
 - KEY TEST: "Would this still be true if the user switched to a completely different project?" If NO → classify as WORK.
 - **HARD EXCLUSION → always WORK**: code/file/API specifics, deployment configs, bug reports, architecture decisions, project-specific tech choices, agent delegation results, build/test logs.
 - **Exception**: Cross-project coding principles (e.g., "never use unwrap in production") ARE valid PREFERENCEs when stated as general rules.
-- **Output**: Structured key-value with confidence (0-1.0) and type (static/evolving/situational). When in doubt → type "situational", confidence 0.5.
 - **NEGATIVE**: One-time instructions, temporary emotions, project-specific choices → NOT preferences.
+
+**PREFERENCE OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
+For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
+```
+## {偏好主题}
+- 偏好: {具体偏好描述}
+- 置信度: {0.0-1.0}
+- 类型: static | evolving
+```
+- Each preference gets its own `## Title` section.
+- Multiple preferences are separated by blank lines.
+- `type`: static = stable preference unlikely to change; evolving = may change over time.
+- Example (Chinese input):
+```
+## 编程语言偏好
+- 偏好: 喜欢Java和TypeScript，不喜欢Rust和Go
+- 置信度: 0.8
+- 类型: evolving
+
+## 代码质量
+- 偏好: 要求通过团队评审保证质量
+- 置信度: 0.9
+- 类型: static
+```
+- Example (English input):
+```
+## Communication Style
+- Preference: Prefers concise answers over verbose explanations
+- Confidence: 0.9
+- Type: static
+```
 
 ## CATEGORY VALUES (for WORK and EMOTIONAL)
 - **profile**: Enduring user identity traits (e.g., "backend engineer", "has daughter Mengmeng")
@@ -739,7 +853,9 @@ When deciding between WORK and PREFERENCE:
 ## ABSOLUTE RULES
 
 ### Rule 1: Language Preservation (MANDATORY)
-- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.** NEVER translate. NEVER mix languages.
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.** NEVER translate. NEVER mix languages in text fields.
+- Tags are ALWAYS in English from the ALLOWED_TAGS list below. Tags never follow input language.
+- Exception: "私密" is a system-reserved tag added by privacy detection rules, not from ALLOWED_TAGS.
 
 ### Rule 2: Privacy Detection (MANDATORY)
 - If a fact contains sensitive/private content → add tag "私密" AND set scope to "private".
@@ -766,8 +882,8 @@ Return ONLY valid JSON array. Each element:
 }
 
 - "topic": Short title (1 sentence).
-- "summary": Concise Markdown. EMOTIONAL ≤500 chars, WORK ≤500 chars, PREFERENCE ≤200 chars. KEY CONCLUSIONS ONLY.
-- "tags": Max 3 relevant tags (exclude "session_compress"). Most important keywords only.
+- "summary": WORK and PREFERENCE must use structured Markdown format (## Title + key-value pairs). EMOTIONAL ≤500 chars, WORK ≤500 chars, PREFERENCE ≤500 chars.
+- "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
 - "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
 - "category": WORK → pick from 6 categories above. PREFERENCE → always "preferences". EMOTIONAL → pick best fit.
 - "memory_type": The classification label.
@@ -826,7 +942,7 @@ pub fn build_session_extract_prompt_with_memories(
     conversation: &str,
     existing_memories_summary: Option<&str>,
 ) -> (String, String) {
-    let system = SESSION_EXTRACT_SYSTEM_PROMPT.to_string();
+    let system = format!("{SESSION_EXTRACT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}");
 
     let existing_section = match existing_memories_summary {
         Some(summary) if !summary.is_empty() => {
@@ -856,18 +972,18 @@ mod session_extract_tests {
 
     #[test]
     fn test_system_prompt_has_differentiated_guidance() {
-        // EMOTIONAL: preserve detail
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PRESERVE original text as-is"));
+        // EMOTIONAL: preserve emotional tone
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Preserve emotional tone"));
         // WORK: denoise
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("DENOISE — extract conclusions only"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("DENOISE"));
         // PREFERENCE: structured output
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("structured key-value pairs"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PREFERENCE OUTPUT FORMAT"));
     }
 
     #[test]
     fn test_system_prompt_has_emotional_subtags() {
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("私密"));
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("谈心"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("vulnerable"));
     }
 
     #[test]
