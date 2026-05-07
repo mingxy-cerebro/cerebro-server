@@ -305,8 +305,10 @@ impl ProfileService {
 
 async fn build_profile(
     store: &Arc<LanceStore>,
-    _llm: Option<&Arc<dyn LlmService>>,
+    llm: Option<&Arc<dyn LlmService>>,
 ) -> Result<UserProfile, OmemError> {
+    // TODO: Future enhancement — use llm with PROFILE_FILTER_SYSTEM_PROMPT for semantic quality filtering
+
     let filter = ListFilter {
         state: Some("active".to_string()),
         sort: "created_at".to_string(),
@@ -320,7 +322,23 @@ async fn build_profile(
         .filter(|m| m.visibility != "private")
         .collect();
 
-    let mut static_memories: Vec<_> = all_memories
+    let pre_filter_count = all_memories.len();
+
+    // Quality gate: filter out low-quality, empty, or trivial memories
+    let quality_memories: Vec<_> = all_memories
+        .into_iter()
+        .filter(|m| m.importance >= 0.3)
+        .filter(|m| m.content.trim().len() >= 10)
+        .collect();
+
+    tracing::info!(
+        total = pre_filter_count,
+        quality = quality_memories.len(),
+        filtered_out = pre_filter_count - quality_memories.len(),
+        "profile quality gate"
+    );
+
+    let mut static_memories: Vec<_> = quality_memories
         .iter()
         .filter(|m| m.category == Category::Profile || m.category == Category::Preferences)
         .collect();
@@ -342,7 +360,7 @@ async fn build_profile(
         .collect();
 
     let cutoff = Utc::now() - chrono::TimeDelta::try_days(7).unwrap_or_default();
-    let dynamic_context: Vec<String> = all_memories
+    let dynamic_context: Vec<String> = quality_memories
         .iter()
         .filter(|m| {
             matches!(

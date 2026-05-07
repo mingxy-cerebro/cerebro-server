@@ -140,7 +140,7 @@ impl AdmissionControl {
 
         let search_results = self
             .store
-            .vector_search(&query_vec, 5, 0.0, None, None, None)
+            .vector_search(&query_vec, 5, 0.0, None, None, None, None)
             .await
             .unwrap_or_default();
 

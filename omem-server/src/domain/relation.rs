@@ -16,6 +16,7 @@ pub enum RelationType {
     Contextualizes,
     Supports,
     Contradicts,
+    Continues,
 }
 
 impl fmt::Display for RelationType {
@@ -25,6 +26,7 @@ impl fmt::Display for RelationType {
             Self::Contextualizes => write!(f, "contextualizes"),
             Self::Supports => write!(f, "supports"),
             Self::Contradicts => write!(f, "contradicts"),
+            Self::Continues => write!(f, "continues"),
         }
     }
 }
@@ -38,6 +40,7 @@ impl FromStr for RelationType {
             "contextualizes" => Ok(Self::Contextualizes),
             "supports" => Ok(Self::Supports),
             "contradicts" => Ok(Self::Contradicts),
+            "continues" => Ok(Self::Continues),
             _ => Err(format!("unknown relation type: {s}")),
         }
     }
@@ -53,6 +56,27 @@ mod tests {
         assert_eq!(RelationType::Contextualizes.to_string(), "contextualizes");
         assert_eq!(RelationType::Supports.to_string(), "supports");
         assert_eq!(RelationType::Contradicts.to_string(), "contradicts");
+        assert_eq!(RelationType::Continues.to_string(), "continues");
+    }
+
+    #[test]
+    fn continues_from_str_roundtrip() {
+        let rt: RelationType = "continues".parse().unwrap();
+        assert_eq!(rt, RelationType::Continues);
+        assert_eq!(rt.to_string(), "continues");
+    }
+
+    #[test]
+    fn continues_serde_roundtrip() {
+        let rel = MemoryRelation {
+            relation_type: RelationType::Continues,
+            target_id: "mem-789".to_string(),
+            context_label: Some("split continuation".to_string()),
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        let parsed: MemoryRelation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, rel);
+        assert!(json.contains("\"continues\""));
     }
 
     #[test]

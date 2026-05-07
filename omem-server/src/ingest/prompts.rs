@@ -713,6 +713,7 @@ Preserve emotional tone and key details. Compress into concise form (aim for ≤
   - "日常撒娇" — playful banter, teasing, cute interactions
   - "危机修复" — arguments, apologies, reconciliation
 - **IMPORTANT**: When existing memories contain similar emotional content, MERGE and enrich — do not create duplicates. Preserve the emotional arc across conversations.
+- **EMOJI RICHNESS**: Use emojis liberally in the summary to convey emotional tone and atmosphere (e.g., 💕😊🥺💗🌹💋✨🌙). Emojis add warmth and make the memory more vivid when recalled.
 
 ### WORK (scope "public", category auto-detect)
 - Technical decisions, code changes, file paths, architecture, project details, business models.

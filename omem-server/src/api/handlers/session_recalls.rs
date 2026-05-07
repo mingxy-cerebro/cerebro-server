@@ -270,7 +270,7 @@ pub async fn should_recall(
             } else {
                 let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
                 store
-                    .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, Some(tags))
+                    .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, Some(tags), None)
                     .await
                     .unwrap_or_default()
             };
@@ -301,7 +301,7 @@ pub async fn should_recall(
         } else {
             let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
             store
-                .vector_search(search_vec, remaining + 5, effective_min_score, None, vis_ref, None)
+                .vector_search(search_vec, remaining + 5, effective_min_score, None, vis_ref, None, None)
                 .await
                 .unwrap_or_default()
         };
@@ -336,7 +336,7 @@ pub async fn should_recall(
         } else {
             let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
             store
-                .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, None)
+                .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, None, None)
                 .await
                 .unwrap_or_default()
         }
