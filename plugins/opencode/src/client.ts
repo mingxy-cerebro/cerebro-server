@@ -173,6 +173,7 @@ export class OmemClient {
     agentId?: string,
     sessionId?: string,
     visibility?: string,
+    category?: string,
   ): Promise<MemoryDto | null> {
     const safeContent = sanitizeContent(content, this.getCfg("maxContentChars", 30000));
     return this.post<MemoryDto>("/v1/memories", {
@@ -183,6 +184,7 @@ export class OmemClient {
       agent_id: agentId,
       session_id: sessionId,
       visibility,
+      category,
     });
   }
 

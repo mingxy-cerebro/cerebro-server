@@ -42,6 +42,7 @@ pub struct CreateMemoryBody {
     pub tier: Option<String>,
     pub scope: Option<String>,
     pub visibility: Option<String>,
+    pub category: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -219,9 +220,16 @@ pub async fn create_memory(
         return Err(OmemError::Validation("content cannot be empty".to_string()));
     }
 
+    let category = if let Some(cat_str) = body.category {
+        cat_str
+            .parse::<Category>()
+            .map_err(|e: String| OmemError::Validation(e))?
+    } else {
+        Category::Cases
+    };
     let mut memory = Memory::new(
         &content,
-        Category::Preferences,
+        category,
         MemoryType::Pinned,
         &auth.tenant_id,
     );

@@ -50,6 +50,10 @@ export function buildTools(client: OmemClient, containerTags: string[], context:
           .string()
           .optional()
           .describe("Memory visibility: 'global' (default, visible to all agents) or 'private' (only visible to the storing agent). Use 'private' for sensitive data like credentials, personal info, or anything the user wouldn't want shared."),
+        category: tool.schema
+          .string()
+          .optional()
+          .describe("Memory category: 'cases' (default, for work/facts/decisions), 'preferences' (likes/dislikes), 'entities' (projects/tools/people), 'events' (milestones), 'profile' (identity traits), 'patterns' (workflows)"),
       },
       async execute(args) {
         const allTags = [...containerTags, ...(args.tags ?? [])];
@@ -61,6 +65,7 @@ export function buildTools(client: OmemClient, containerTags: string[], context:
           context.agentId,
           context.getSessionId(),
           args.visibility,
+          args.category,
         );
         if (!result) return JSON.stringify({ ok: false, error: "The omem server may be unavailable." });
         return JSON.stringify({ ok: true, id: result.id, tags: result.tags });
