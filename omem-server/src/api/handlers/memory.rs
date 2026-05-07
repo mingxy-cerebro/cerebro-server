@@ -1443,6 +1443,7 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
+        let mut work_overflow_parent_id: Option<String> = None;
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
@@ -1606,7 +1607,90 @@ pub async fn session_ingest(
                             continue;
                         }
                     }
-                    tracing::info!("session_ingest: WORK memory exceeded limit, creating new");
+                    tracing::info!("session_ingest: WORK memory exceeded limit, creating new with Continues relation");
+                    work_overflow_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
+                }
+            }
+
+            // ── PREFERENCE vector dedup: merge into similar existing preference ──
+            if memory_type == "PREFERENCE" {
+                if let Some(ref vec) = vectors.get(i) {
+                    match store.vector_search(
+                        vec,
+                        5,
+                        0.85,
+                        None,
+                        None,
+                        None,
+                        Some("preferences"),
+                    ).await {
+                        Ok(similar) => {
+                            if let Some((existing_pref, score)) = similar.first() {
+                                tracing::info!(
+                                    memory_id = %existing_pref.id,
+                                    score = score,
+                                    "PREFERENCE dedup: found similar existing preference, merging"
+                                );
+                                let today = chrono::Utc::now()
+                                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                                    .format("%Y-%m-%d %H:%M").to_string();
+                                let merged = format!(
+                                    "{}\n\n## {} [observed {}]\n{}",
+                                    existing_pref.content,
+                                    topic.topic,
+                                    today,
+                                    summary
+                                );
+                                let mut updated = existing_pref.clone();
+                                updated.content = merged.clone();
+                                updated.l0_abstract = if merged.chars().count() <= 200 {
+                                    merged.clone()
+                                } else {
+                                    merged.chars().take(200).collect()
+                                };
+                                updated.l1_overview = if merged.chars().count() <= 150 {
+                                    merged.clone()
+                                } else {
+                                    format!("{}...", merged.chars().take(147).collect::<String>())
+                                };
+                                updated.l2_content = if merged.chars().count() <= 500 {
+                                    merged.clone()
+                                } else {
+                                    format!("{}...", merged.chars().take(497).collect::<String>())
+                                };
+                                for tag in &topic.tags {
+                                    if !updated.tags.contains(tag) {
+                                        updated.tags.push(tag.clone());
+                                    }
+                                }
+                                updated.tags.dedup();
+                                updated.tags.truncate(5);
+                                updated.importance = (updated.importance + 0.1).min(1.0);
+
+                                if let Err(e) = store.update(&updated, None).await {
+                                    tracing::warn!(error = %e, "PREFERENCE dedup merge failed, creating new");
+                                } else {
+                                    tracing::info!(id = %updated.id, "PREFERENCE: merged into existing");
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "PREFERENCE vector search failed, creating new");
+                        }
+                    }
+                }
+            }
+
+            // ── WORK overflow: add Continues relation before create ──
+            if memory_type == "WORK" {
+                if let Some(parent_id) = work_overflow_parent_id.take() {
+                    memory.relations.push(crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::Continues,
+                        target_id: parent_id.clone(),
+                        context_label: Some("auto-split on overflow".to_string()),
+                    });
+                    tracing::info!(parent = %parent_id, "WORK: will create with Continues relation to parent");
                 }
             }
 
