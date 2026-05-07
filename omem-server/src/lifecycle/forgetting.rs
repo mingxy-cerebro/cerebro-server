@@ -2,17 +2,21 @@ use std::sync::Arc;
 
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
-use crate::domain::types::MemoryState;
-use crate::lifecycle::decay::parse_datetime;
+use crate::domain::types::{MemoryState, MemoryType};
+use crate::lifecycle::decay::{DecayConfig, DecayEngine, parse_datetime};
 use crate::store::lancedb::LanceStore;
 
 pub struct AutoForgetter {
     store: Arc<LanceStore>,
+    decay: DecayEngine,
 }
 
 impl AutoForgetter {
     pub fn new(store: Arc<LanceStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            decay: DecayEngine::new(DecayConfig::default()),
+        }
     }
 
     pub fn detect_ttl(content: &str) -> Option<chrono::TimeDelta> {
@@ -35,7 +39,7 @@ impl AutoForgetter {
     }
 
     pub async fn cleanup_expired(&self) -> Result<Vec<Memory>, OmemError> {
-        let memories = self.store.list(10000, 0).await?;
+        let memories = self.store.list(2000, 0).await?;
         let now = chrono::Utc::now();
         let mut deleted = Vec::new();
 
@@ -57,7 +61,7 @@ impl AutoForgetter {
         &self,
         max_age_days: u32,
     ) -> Result<Vec<Memory>, OmemError> {
-        let memories = self.store.list(10000, 0).await?;
+        let memories = self.store.list(2000, 0).await?;
         let now = chrono::Utc::now();
         let max_age = chrono::TimeDelta::try_days(max_age_days as i64)
             .unwrap_or_else(chrono::TimeDelta::zero);
@@ -78,6 +82,42 @@ impl AutoForgetter {
         }
 
         Ok(archived)
+    }
+
+    /// Remove stale memories based on Weibull decay composite score.
+    /// Max 50 deletions per run to prevent mass data loss.
+    pub async fn cleanup_stale(&self) -> Result<Vec<Memory>, OmemError> {
+        let memories = self.store.list(2000, 0).await?;
+        let mut deleted = Vec::new();
+
+        for memory in memories {
+            if memory.state != MemoryState::Active {
+                continue;
+            }
+            // Never delete pinned memories or memories with high access count
+            if memory.memory_type == MemoryType::Pinned {
+                continue;
+            }
+            if memory.access_count >= 5 {
+                continue;
+            }
+
+            if self.decay.is_stale(&memory) {
+                if deleted.len() >= 50 {
+                    break;
+                }
+                tracing::info!(
+                    memory_id = %memory.id,
+                    tier = %memory.tier,
+                    access_count = memory.access_count,
+                    "forgetting_stale_memory"
+                );
+                self.store.hard_delete(&memory.id).await?;
+                deleted.push(memory);
+            }
+        }
+
+        Ok(deleted)
     }
 }
 

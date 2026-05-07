@@ -1931,6 +1931,14 @@ impl LanceStore {
         }
     }
 
+    /// Returns the actual number of un-pruned versions on disk (not the ever-increasing version ID).
+    /// Uses list_versions() which reads actual manifest files — versions deleted by prune are excluded.
+    async fn version_count(&self, table: &Table) -> usize {
+        table.list_versions().await
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX)  // On error, assume worst case → trigger optimize
+    }
+
     /// Optimize LanceDB tables: compact → prune → index optimize to reclaim disk space
     /// and maintain query performance.
     pub async fn optimize(&self) -> Result<(), OmemError> {
@@ -1970,43 +1978,47 @@ impl LanceStore {
             .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
         tracing::info!("optimize: index merge completed");
 
-        // Session recalls table — compact + prune only (no vector index)
+        // Session recalls table — compact + prune only (no vector index), but only if bloated
         let sr_table = self.session_recalls_table.clone();
         {
-            let _ = sr_table
-                .optimize(OptimizeAction::Compact {
-                    options: CompactionOptions::default(),
-                    remap_options: None,
-                })
-                .await;
-            let _ = sr_table
-                .optimize(OptimizeAction::Prune {
-                    older_than: Some(
-                        chrono::Duration::try_minutes(10)
-                            .unwrap_or_else(|| chrono::Duration::minutes(10)),
-                    ),
-                    delete_unverified: Some(true),
-                    error_if_tagged_old_versions: None,
-                })
-                .await;
+            let sr_count = self.version_count(&sr_table).await;
+            if sr_count > 20 {
+                tracing::info!(version_count = sr_count, "optimize: session_recalls version count high, compacting");
+                let _ = sr_table
+                    .optimize(OptimizeAction::Compact {
+                        options: CompactionOptions::default(),
+                        remap_options: None,
+                    })
+                    .await;
+                let _ = sr_table
+                    .optimize(OptimizeAction::Prune {
+                        older_than: Some(
+                            chrono::Duration::try_minutes(10)
+                                .unwrap_or_else(|| chrono::Duration::minutes(10)),
+                        ),
+                        delete_unverified: Some(true),
+                        error_if_tagged_old_versions: None,
+                    })
+                    .await;
+            }
         }
 
         Ok(())
     }
 
-    /// Lazy compact: check version count after write ops, auto-compact when > threshold.
+    /// Lazy compact: check actual version count on disk, auto-compact when > threshold.
     /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
     /// NOTE: No longer called from write path. Used by PruneDaemon background task only.
     pub async fn maybe_optimize(&self) {
         let table = self.table.clone();
-        let version: u64 = table.version().await.unwrap_or(0);
-        const COMPACT_THRESHOLD: u64 = 50;
+        let count = self.version_count(&table).await;
+        const COMPACT_THRESHOLD: usize = 50;
 
-        if version <= COMPACT_THRESHOLD {
+        if count <= COMPACT_THRESHOLD {
             return;
         }
 
-        tracing::info!(%version, threshold = COMPACT_THRESHOLD, "lazy_compact: version count exceeded threshold, running optimize");
+        tracing::info!(version_count = count, threshold = COMPACT_THRESHOLD, "lazy_compact: version count exceeded threshold, running optimize");
 
         if let Err(e) = self.optimize().await {
             tracing::warn!(error = %e, "lazy_compact: optimize failed");
@@ -2015,12 +2027,12 @@ impl LanceStore {
 
     /// Prune old versions without compacting — safe to run concurrently with writes.
     /// Prune only deletes manifest files, does not rewrite data, so no commit conflicts.
-    pub async fn prune_old_versions(&self) -> Result<u64, OmemError> {
+    pub async fn prune_old_versions(&self) -> Result<usize, OmemError> {
         let table = self.table.clone();
-        let version: u64 = table.version().await.unwrap_or(0);
+        let count_before = self.version_count(&table).await;
 
-        if version <= 10 {
-            return Ok(version);
+        if count_before <= 10 {
+            return Ok(count_before);
         }
 
         let stats = table
@@ -2035,14 +2047,14 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("prune failed: {e}")))?;
 
-        let pruned = stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
-        tracing::info!(version_before = %version, bytes_removed = %pruned, "prune_old_versions completed");
-        if pruned == 0 {
+        let pruned_bytes = stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
+        tracing::info!(version_count_before = count_before, bytes_removed = %pruned_bytes, "prune_old_versions completed");
+        if pruned_bytes == 0 {
             tracing::debug!("prune_old_versions: no bytes removed, may need index cleanup");
         }
 
-        let new_version: u64 = table.version().await.unwrap_or(version);
-        Ok(new_version)
+        let count_after = self.version_count(&table).await;
+        Ok(count_after)
     }
 }
 
@@ -2470,5 +2482,55 @@ mod tests {
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_version_count_reflects_actual_versions() {
+        let (store, _dir) = setup().await;
+
+        // Initial state: after init_table(), version_count should be small
+        let count_initial = store.version_count(&store.table).await;
+        assert!(count_initial <= 15, "initial version count should be small, got {count_initial}");
+
+        // Each create adds a version
+        for i in 0..10 {
+            let mem = make_memory("t-001", &format!("memory {i}"));
+            store.create(&mem, None).await.unwrap();
+        }
+
+        let count_after_writes = store.version_count(&store.table).await;
+        assert!(
+            count_after_writes > count_initial,
+            "version count should increase after writes: before={count_initial}, after={count_after_writes}"
+        );
+
+        // Prune should reduce version count
+        let result = store.prune_old_versions().await;
+        assert!(result.is_ok(), "prune should succeed");
+
+        let count_after_prune = store.version_count(&store.table).await;
+        assert!(
+            count_after_prune <= count_after_writes,
+            "version count should decrease or stay same after prune: before={count_after_writes}, after={count_after_prune}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_optimize_respects_version_count() {
+        let (store, _dir) = setup().await;
+
+        // With only a few versions, maybe_optimize should be a no-op
+        let count_before = store.version_count(&store.table).await;
+        assert!(count_before < 50, "fresh table should have few versions");
+
+        // maybe_optimize should NOT trigger optimize when count is low
+        store.maybe_optimize().await;
+
+        let count_after = store.version_count(&store.table).await;
+        // count should be similar (no new versions created by maybe_optimize)
+        assert!(
+            count_after <= count_before + 2,
+            "maybe_optimize should not create versions when count is low: before={count_before}, after={count_after}"
+        );
     }
 }

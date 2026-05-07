@@ -98,18 +98,23 @@ impl LifecycleScheduler {
             }
         }
 
-        // Spawn background prune daemon — runs every 60s, only prunes if version > 100
+        // Spawn background prune daemon — runs every 60s
         let prune_self = self.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let stores = prune_self.store_manager.cached_stores().await;
                 for store in &stores {
-                    if let Ok(v) = store.prune_old_versions().await {
-                        if v > 100 {
-                            info!(version = %v, "prune_daemon: high version count after prune");
+                    match store.prune_old_versions().await {
+                        Ok(count) => {
+                            tracing::debug!(version_count = count, "prune_daemon: post-prune version count");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "prune_daemon: prune failed");
                         }
                     }
+                    // maybe_optimize internally checks version_count, only compacts when truly needed
+                    store.maybe_optimize().await;
                 }
                 if let Some(locks) = &prune_self.session_locks {
                     let before = locks.len();
@@ -247,6 +252,18 @@ impl LifecycleScheduler {
                 warn!(error = %e, "scheduler_archive_superseded_failed");
             }
             _ => {}
+        }
+
+        match forgetter.cleanup_stale().await {
+            Ok(stale) => {
+                if !stale.is_empty() {
+                    info!(count = stale.len(), "scheduler_cleanup_stale_complete");
+                    removed.extend(stale);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "scheduler_cleanup_stale_failed");
+            }
         }
 
         removed
