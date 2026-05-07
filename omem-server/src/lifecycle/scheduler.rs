@@ -380,6 +380,8 @@ impl LifecycleScheduler {
             self.llm.clone(),
             Some(50),
             &tenant_id,
+            self.event_bus.clone(),
+            tenant_id.clone(),
         ).await {
             Ok(stats) => {
                 if stats.processed > 0 {

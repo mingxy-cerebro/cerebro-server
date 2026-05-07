@@ -96,15 +96,39 @@ impl BackgroundClusterer {
         };
         info!(batch_size, tenant, "cluster_all_unassigned: using safe incremental path (was destructive global k-means)");
 
-        Self::run_incremental_clustering(
+        self.emit("cluster.started", serde_json::json!({
+            "batch_size": batch_size,
+            "message": format!("Starting incremental clustering (batch_size={})", batch_size)
+        }));
+
+        let result = Self::run_incremental_clustering(
             self.store.clone(),
             self.cluster_store.clone(),
             self.embed.clone(),
             self.llm.clone(),
             Some(batch_size),
             tenant,
+            self.event_bus.clone(),
+            self.tenant_id.clone(),
         )
-        .await
+        .await;
+
+        match &result {
+            Ok(stats) => {
+                self.emit("cluster.stage", serde_json::json!({
+                    "stage": "done",
+                    "message": format!("Incremental clustering done: processed={}, created={}, errors={}", stats.processed, stats.created_new_clusters, stats.errors)
+                }));
+            }
+            Err(e) => {
+                self.emit("cluster.failed", serde_json::json!({
+                    "error": e.to_string(),
+                    "message": "Incremental clustering failed"
+                }));
+            }
+        }
+
+        result
     }
 
     pub async fn cluster_global_kmeans(&self) -> Result<ClusterStats, OmemError> {
@@ -329,6 +353,8 @@ impl BackgroundClusterer {
         llm: Option<Arc<dyn crate::llm::LlmService>>,
         batch_size: Option<usize>,
         tenant_id: &str,
+        event_bus: Option<Arc<EventBus>>,
+        event_tenant_id: String,
     ) -> Result<ClusterStats, OmemError> {
         let limit = batch_size.unwrap_or(50).min(50);
 
@@ -404,6 +430,9 @@ impl BackgroundClusterer {
                         &store,
                         memory,
                         &mut stats,
+                        limit,
+                        &event_bus,
+                        &event_tenant_id,
                     ).await;
                 }
                 tokio::task::yield_now().await;
@@ -419,6 +448,9 @@ impl BackgroundClusterer {
                     &store,
                     memory,
                     &mut stats,
+                    limit,
+                    &event_bus,
+                    &event_tenant_id,
                 ).await;
                 tokio::task::yield_now().await;
             }
@@ -451,7 +483,14 @@ impl BackgroundClusterer {
         store: &Arc<LanceStore>,
         memory: &Memory,
         stats: &mut ClusterStats,
+        total_limit: usize,
+        event_bus: &Option<Arc<EventBus>>,
+        event_tenant_id: &str,
     ) {
+        let prev_processed = stats.processed;
+        let action_label;
+        let stage_label;
+
         match assigner.assign(memory).await {
             Ok(result) => {
                 match result.action {
@@ -466,24 +505,55 @@ impl BackgroundClusterer {
                                     debug!(memory_id = %memory.id, cluster_id, confidence = result.confidence, "incremental: assigned");
                                     stats.assigned_to_existing += 1;
                                     stats.processed += 1;
+                                    action_label = "assign_existing";
+                                    stage_label = "assigning";
                                 }
                                 Err(e) => {
                                     warn!(memory_id = %memory.id, error = %e, "incremental: assign failed");
                                     stats.errors += 1;
+                                    action_label = "skip";
+                                    stage_label = "assigning";
                                 }
                             }
                         } else {
                             Self::create_new_cluster_for(cluster_manager, store, memory, stats).await;
+                            action_label = "create_new";
+                            stage_label = "creating_cluster";
                         }
                     }
                     AssignAction::CreateNew => {
                         Self::create_new_cluster_for(cluster_manager, store, memory, stats).await;
+                        action_label = "create_new";
+                        stage_label = "creating_cluster";
                     }
                 }
             }
             Err(e) => {
                 warn!(memory_id = %memory.id, error = %e, "incremental: assigner failed");
                 stats.errors += 1;
+                action_label = "skip";
+                stage_label = "error";
+            }
+        }
+
+        // Emit SSE progress event (only if something was processed)
+        if stats.processed > prev_processed {
+            if let Some(bus) = event_bus {
+                let pct = (stats.processed as f64 / total_limit as f64 * 100.0).round() as u32;
+                bus.publish(ServerEvent {
+                    event_type: "cluster.memory_progress".to_string(),
+                    tenant_id: event_tenant_id.to_string(),
+                    data: Some(serde_json::json!({
+                        "memory_id": memory.id,
+                        "content_preview": memory.content.chars().take(40).collect::<String>(),
+                        "stage": stage_label,
+                        "action": action_label,
+                        "processed": stats.processed,
+                        "total": total_limit,
+                        "pct": pct,
+                    })),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                });
             }
         }
     }

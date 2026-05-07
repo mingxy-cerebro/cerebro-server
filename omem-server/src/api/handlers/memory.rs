@@ -1447,11 +1447,10 @@ pub async fn session_ingest(
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
-                // 兼容旧prompt：根据scope和category推断
+                // Fallback: scope-based only, no category→memory_type promotion
+                // (was: category=preferences auto-promoted to PREFERENCE, causing WORK misclassification)
                 if topic.scope == "private" {
                     "EMOTIONAL"
-                } else if topic.category.as_deref() == Some("preferences") {
-                    "PREFERENCE"
                 } else {
                     "WORK"
                 }

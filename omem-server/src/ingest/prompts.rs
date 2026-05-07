@@ -695,94 +695,64 @@ Return ONLY valid JSON:
 
 const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
 
-## EXTRACTION SCOPE RULE (CRITICAL)
-- **WORK/Technical topics**: Extract from user instructions, decisions, and final outcomes. Omit raw tool outputs and verbose intermediate steps, but preserve key technical decisions even if stated by the AI.
-- **EMOTIONAL/Intimate topics**: Preserve KEY interactions from BOTH sides — the user's expressions AND the AI's meaningful emotional responses. Keep the warmth and back-and-forth dynamics.
-- **PREFERENCE topics**: Extract user preferences, personality traits, communication style, likes/dislikes from the conversation. These are about WHO the user IS, not what they're DOING.
-- **ALWAYS exclude**: compress/DCP logs, build results, deployment status, agent delegations, memory system meta-discussion.
+## CLASSIFICATION PRIORITY (read FIRST, apply STRICTLY)
+When deciding between WORK and PREFERENCE:
+1. Content about ANY specific project, code, file, deployment, bug, or technical implementation → **always WORK**
+2. Uncertain if lasting trait or one-time observation → **default to WORK** (safe choice)
+3. Only PREFERENCE when confident it describes a **STABLE, CROSS-SESSION user trait** (applies regardless of project)
 
-## THREE CATEGORIES — DIFFERENTIATED GUIDANCE
+## ALWAYS SKIP
+- compress/DCP logs, build/test results, CI/CD logs, deployment status
+- agent delegations, memory system meta-discussion
+- AI internal reasoning or status reports
+- Casual small talk with zero factual content
+
+## THREE CATEGORIES
 
 ### EMOTIONAL (scope "private", category auto-detect)
-- Intimate interactions, pet names, flirtation, private feelings, romantic exchanges, personal secrets, relationship details.
-Preserve emotional tone and key details. Compress into concise form (aim for ≤500 chars). Focus on feelings, key moments, and relationship significance.
-- Keep the warmth, nuance, and full conversational texture.
-- Auto-tag with emotional subcategory:
-  - "私密" — sexual/flirtatious content, intimate physical references
-  - "谈心" — deep emotional exchange, trust building, vulnerability sharing
-  - "日常撒娇" — playful banter, teasing, cute interactions
-  - "危机修复" — arguments, apologies, reconciliation
-- **IMPORTANT**: When existing memories contain similar emotional content, MERGE and enrich — do not create duplicates. Preserve the emotional arc across conversations.
-- **EMOJI RICHNESS**: Use emojis liberally in the summary to convey emotional tone and atmosphere (e.g., 💕😊🥺💗🌹💋✨🌙). Emojis add warmth and make the memory more vivid when recalled.
+- Intimate interactions, romantic exchanges, personal secrets, relationship dynamics.
+- Preserve emotional tone from BOTH sides. Compress to ≤500 chars with rich emojis (💕😊🥺).
+- Auto-tag subcategory: "私密"(sexual) / "谈心"(vulnerability) / "日常撒娇"(playful) / "危机修复"(reconciliation).
 
 ### WORK (scope "public", category auto-detect)
-- Technical decisions, code changes, file paths, architecture, project details, business models.
-- **DENOISE — prefer conclusions**: Prefer final results, key decisions, and actionable outcomes over intermediate steps. You may omit verbose trial-and-error, but preserve important technical decisions and discoveries made during the process.
-- Group related work topics into one entry whenever possible.
-- **MANDATORY**: If you can identify the project name, include it as a tag (e.g., "omem", "农服", "小小月").
-- **MANDATORY**: If you can identify the sub-topic, include it as a tag (e.g., "设计决策", "编码", "测试", "部署", "bug修复").
-- **IMPORTANT**: When existing memories cover the same topic, SUPERSEDE with the latest conclusion — do not accumulate redundant work history.
+- Technical decisions, code changes, architecture, project details, business models.
+- **DENOISE**: Keep conclusions, omit verbose intermediate steps.
+- **MERGE**: You MUST group related work topics into one entry. Do NOT split naturally connected topics across multiple entries. Split only when summary would exceed 500 chars.
+- **TAG**: Include project name + sub-topic as tags (e.g., "omem", "设计决策").
 
 ### PREFERENCE (scope "public", category "preferences")
-- User's personality traits, communication style, coding preferences, tool choices, workflow habits.
-- These describe WHO the user is, not what they're currently working on.
-- Examples: "Prefers concise communication", "Likes dark themes", "Values direct feedback"
-- **IMPORTANT**: Do NOT include project-specific technical decisions here — those are WORK.
-- **OUTPUT FORMAT for summary**: Use structured key-value pairs with confidence:
-  ```
-  ## 沟通风格
-  - 偏好: 直接简洁
-  - 置信度: 0.8
-  - 类型: static
-  ```
-  Where "type" is one of: "static" (stable trait), "evolving" (may change over time), "situational" (context-dependent).
-- **SCENARIO vs TRAIT DISTINCTION**: Carefully distinguish between:
-  - **Scenario feedback**: User correcting the AI's behavior in a specific moment (e.g., "这次你回答得不对", "刚才是受XX影响", "下次别这样"). These are CONTEXT-SPECIFIC and should be marked as type "situational" with lower confidence (0.5).
-  - **Permanent preference**: User stating a lasting trait or habit (e.g., "我喜欢用Rust", "我习惯晚上写代码"). These are STABLE and should be marked as type "static".
-  - **Evolving preference**: User's preference that may change over time or depends on context. Mark as type "evolving".
-  When in doubt, prefer "situational" over "static". It is better to miss a permanent preference than to incorrectly solidify a scenario-specific correction as a permanent trait.
-- **IMPORTANT**: When existing memories already record a preference, evaluate if new evidence strengthens or contradicts it. Strengthen → increase confidence. Contradict → update value and mark type as "evolving".
-- **NEGATIVE EXAMPLES (do NOT extract as PREFERENCE)**:
-  - "User said I was wrong this time" → situational feedback, not a stable preference
-  - "User seemed frustrated today" → temporary emotional state, not a trait
-  - "User asked me to format code differently once" → one-time instruction, not a lasting preference
-  - "User likes the response style in this conversation" → meta-commentary, not cross-session preference
+- Stable user traits: personality, communication style, coding style (e.g., "prefers functional over OOP"), cross-session tool/workflow habits.
+- KEY TEST: "Would this still be true if the user switched to a completely different project?" If NO → classify as WORK.
+- **HARD EXCLUSION → always WORK**: code/file/API specifics, deployment configs, bug reports, architecture decisions, project-specific tech choices, agent delegation results, build/test logs.
+- **Exception**: Cross-project coding principles (e.g., "never use unwrap in production") ARE valid PREFERENCEs when stated as general rules.
+- **Output**: Structured key-value with confidence (0-1.0) and type (static/evolving/situational). When in doubt → type "situational", confidence 0.5.
+- **NEGATIVE**: One-time instructions, temporary emotions, project-specific choices → NOT preferences.
 
-### NOISE → SKIP
-- Casual small talk with no lasting value
-- Tool/engine outputs, build logs, compress results
-- AI assistant's internal reasoning or status reports
-- Greetings, filler, meta-discussion about the memory system
-
-## ABSOLUTE RULES
-
-### Rule 1: Language Preservation (MANDATORY)
-- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.**
-- NEVER translate. NEVER mix languages.
-
-### Rule 2: Privacy Detection (MANDATORY)
-- If a fact contains sensitive/private content → add tag "私密" AND set scope to "private".
-
-### Rule 3: Persona Rule (CRITICAL)
-- NEVER refer to the user as "用户" or "你" in the summary.
-- Write as direct, factual statements.
-
-### Rule 4: Existing Memory Awareness (CRITICAL)
-- If the user prompt contains a "## Existing Memories" section, you MUST:
-  1. Compare new extraction candidates against existing memories
-  2. For EMOTIONAL: merge and enrich, preserving emotional arc
-  3. For WORK: supersede old conclusions with newer ones
-  4. For PREFERENCE: strengthen/contradict existing preferences
-- Do NOT extract information already perfectly captured in existing memories unless you have new details to add.
-
-## CATEGORY CLASSIFICATION (for WORK topics)
-Use ONLY these 6 valid values for category:
-- **profile**: Stable, repeated characteristics or identity of the user. Must be enduring traits (not temporary states, moods, or one-time actions). Valid: "User is a backend engineer", "User has a daughter named Mengmeng". NOT profile: "User seems tired today", "User asked a question about X".
-- **preferences**: Likes, dislikes, tool choices, style preferences
+## CATEGORY VALUES (for WORK and EMOTIONAL)
+- **profile**: Enduring user identity traits (e.g., "backend engineer", "has daughter Mengmeng")
+- **preferences**: Likes, dislikes, style preferences (EMOTIONAL may also use this)
 - **entities**: Persistent nouns (projects, tools, people, orgs)
 - **events**: Things that happened — milestones, incidents, decisions
 - **cases**: Problem→solution pairs, debugging stories
 - **patterns**: Reusable processes, workflows, conventions
+
+## ABSOLUTE RULES
+
+### Rule 1: Language Preservation (MANDATORY)
+- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT.** NEVER translate. NEVER mix languages.
+
+### Rule 2: Privacy Detection (MANDATORY)
+- If a fact contains sensitive/private content → add tag "私密" AND set scope to "private".
+
+### Rule 3: Persona Rule
+- Write summaries as direct factual statements. Avoid "用户" or second-person references.
+
+### Rule 4: Existing Memory Awareness
+When "## Existing Memories" section exists:
+- **EMOTIONAL**: Merge and enrich, preserve emotional arc
+- **WORK**: Supersede old conclusions with newer ones
+- **PREFERENCE**: Strengthen (↑confidence) or contradict (update + mark "evolving")
+Do NOT re-extract information already perfectly captured.
 
 ## OUTPUT FORMAT
 Return ONLY valid JSON array. Each element:
@@ -796,14 +766,14 @@ Return ONLY valid JSON array. Each element:
 }
 
 - "topic": Short title (1 sentence).
-- "summary": Concise content in Markdown. EMOTIONAL: ≤500 chars. WORK: ≤300 chars. PREFERENCE: ≤200 chars. Extract KEY CONCLUSIONS ONLY, not full conversation history.
-- "tags": Maximum 3 relevant tags (excluding "session_compress"). Focus on the MOST important keywords only.
+- "summary": Concise Markdown. EMOTIONAL ≤500 chars, WORK ≤500 chars, PREFERENCE ≤200 chars. KEY CONCLUSIONS ONLY.
+- "tags": Max 3 relevant tags (exclude "session_compress"). Most important keywords only.
 - "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
-- "category": For EMOTIONAL use the most fitting category from the 6 categories above (e.g., "events" for interactions/relationship milestones, "profile" for identity/relationship facts, "preferences" for intimate preferences). For WORK use 6 categories above, for PREFERENCE always "preferences".
+- "category": WORK → pick from 6 categories above. PREFERENCE → always "preferences". EMOTIONAL → pick best fit.
 - "memory_type": The classification label.
 
 Escape all double quotes and newlines inside JSON strings.
-**MINIMUM EXTRACTION**: If the conversation contains ANY technical discussion, code changes, file paths, architecture decisions, or project details, you MUST extract at least one WORK entry. NEVER return [] when there is technical content.
+**MINIMUM EXTRACTION**: If the conversation contains substantial technical content (decisions, code, architecture), extract at least one WORK entry. Brief mentions alone ("fixed a bug") do not require extraction.
 Return [] ONLY for conversations that are purely casual small talk with zero factual content.
 "###;
 
