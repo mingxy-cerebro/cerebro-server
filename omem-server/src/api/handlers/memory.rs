@@ -1443,7 +1443,7 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
-        let mut work_overflow_parent_id: Option<String> = None;
+        let mut work_original_parent_id: Option<String> = None;
 
         for (i, topic) in topics.iter().enumerate() {
             let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
@@ -1608,7 +1608,9 @@ pub async fn session_ingest(
                         }
                     }
                     tracing::info!("session_ingest: WORK memory exceeded limit, creating new with Continues relation");
-                    work_overflow_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
+                    if work_original_parent_id.is_none() {
+                        work_original_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
+                    }
                 }
             }
 
@@ -1618,7 +1620,7 @@ pub async fn session_ingest(
                     match store.vector_search(
                         vec,
                         5,
-                        0.85,
+                        0.92,
                         None,
                         None,
                         None,
@@ -1634,13 +1636,20 @@ pub async fn session_ingest(
                                 let today = chrono::Utc::now()
                                     .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
                                     .format("%Y-%m-%d %H:%M").to_string();
-                                let merged = format!(
-                                    "{}\n\n## {} [observed {}]\n{}",
-                                    existing_pref.content,
+                                let appended = format!(
+                                    "\n\n## {} [observed {}]\n{}",
                                     topic.topic,
                                     today,
                                     summary
                                 );
+                                // Cap at 3000 chars to prevent unbounded growth
+                                let merged = if existing_pref.content.chars().count() + appended.chars().count() > 3000 {
+                                    let existing = existing_pref.content.chars().take(2800).collect::<String>();
+                                    let cap = 3000 - existing.chars().count();
+                                    format!("{}{}", existing, appended.chars().take(cap).collect::<String>())
+                                } else {
+                                    format!("{}{}", existing_pref.content, appended)
+                                };
                                 let mut updated = existing_pref.clone();
                                 updated.content = merged.clone();
                                 updated.l0_abstract = if merged.chars().count() <= 200 {
@@ -1668,7 +1677,11 @@ pub async fn session_ingest(
                                 updated.importance = (updated.importance + 0.1).min(1.0);
 
                                 if let Err(e) = store.update(&updated, None).await {
-                                    tracing::warn!(error = %e, "PREFERENCE dedup merge failed, creating new");
+                                    tracing::warn!(
+                                        error = %e,
+                                        existing_pref_id = %existing_pref.id,
+                                        "PREFERENCE dedup merge failed, creating new (dedup candidate logged for cleanup)"
+                                    );
                                 } else {
                                     tracing::info!(id = %updated.id, "PREFERENCE: merged into existing");
                                     continue;
@@ -1684,13 +1697,13 @@ pub async fn session_ingest(
 
             // ── WORK overflow: add Continues relation before create ──
             if memory_type == "WORK" {
-                if let Some(parent_id) = work_overflow_parent_id.take() {
+                if let Some(ref parent_id) = work_original_parent_id {
                     memory.relations.push(crate::domain::relation::MemoryRelation {
                         relation_type: crate::domain::relation::RelationType::Continues,
                         target_id: parent_id.clone(),
                         context_label: Some("auto-split on overflow".to_string()),
                     });
-                    tracing::info!(parent = %parent_id, "WORK: will create with Continues relation to parent");
+                    tracing::info!(parent = %parent_id, "WORK: will create with Continues relation to original parent");
                 }
             }
 
