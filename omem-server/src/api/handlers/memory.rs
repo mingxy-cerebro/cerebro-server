@@ -15,6 +15,7 @@ use crate::domain::types::MemoryType;
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
 use crate::ingest::IngestPipeline;
 
+use crate::lifecycle::decay::DecayEngine;
 use crate::lifecycle::tier::TierManager;
 use crate::retrieve::pipeline::SearchRequest;
 use crate::retrieve::RetrievalPipeline;
@@ -350,7 +351,8 @@ pub async fn search_memories(
             accessible_spaces: accessible_space_ids.clone(),
         };
 
-        let mut retrieval_pipeline = RetrievalPipeline::new(store.clone());
+        let mut retrieval_pipeline = RetrievalPipeline::new(store.clone())
+            .with_decay_config(state.config.decay_config());
         if let Some(ref reranker) = state.reranker {
             retrieval_pipeline = retrieval_pipeline.with_reranker(reranker.clone());
         }
@@ -411,6 +413,8 @@ pub async fn search_memories(
         .get_accessible_stores(&auth.tenant_id, &target_spaces)
         .await?;
 
+    let cross_space_decay_config = state.config.decay_config();
+
     // Parallel cross-space search via JoinSet
     let mut join_set = tokio::task::JoinSet::new();
     for acc in accessible {
@@ -433,6 +437,7 @@ pub async fn search_memories(
 
         let accessible_spaces_clone = accessible_space_ids.clone();
         let reranker_clone = state.reranker.clone();
+        let decay_cfg = cross_space_decay_config.clone();
         join_set.spawn(async move {
             let request = SearchRequest {
                 query,
@@ -447,7 +452,7 @@ pub async fn search_memories(
                 agent_id_filter,
                 accessible_spaces: accessible_spaces_clone,
             };
-            let mut pipeline = RetrievalPipeline::new(store);
+            let mut pipeline = RetrievalPipeline::new(store).with_decay_config(decay_cfg);
             if let Some(reranker) = reranker_clone {
                 pipeline = pipeline.with_reranker(reranker);
             }
@@ -608,7 +613,9 @@ pub async fn get_memory(
     if !params.skip_access {
         memory.access_count += 1;
         memory.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
-        let new_tier = TierManager::with_defaults().evaluate_tier(&memory);
+        let tier_config = state.config.tier_config();
+        let decay_config = state.config.decay_config();
+        let new_tier = TierManager::new(tier_config, DecayEngine::new(decay_config)).evaluate_tier(&memory);
         if new_tier != old_tier {
             tracing::info!(memory_id = %memory.id, old_tier = %old_tier, new_tier = %new_tier, access_count = old_count + 1, "tier_promoted");
             memory.append_tier_change(&old_tier.to_string(), &new_tier.to_string(), "access_via_get");
@@ -1504,8 +1511,8 @@ pub async fn session_ingest(
                 let mut t = topic.tags.clone();
                 t.dedup();
                 t.truncate(3); // preserve semantic tags, leave room for system tags
-                if !t.contains(&"session_compress".to_string()) {
-                    t.push("session_compress".to_string());
+                if !t.contains(&"session_ingest".to_string()) {
+                    t.push("session_ingest".to_string());
                 }
                 if memory_type == "PREFERENCE" && !t.contains(&"preference_extract".to_string()) {
                     t.push("preference_extract".to_string());
@@ -1522,7 +1529,7 @@ pub async fn session_ingest(
             memory.l0_abstract = topic.topic.clone();
             memory.l1_overview = l1_overview;
             memory.l2_content = l2_content;
-            memory.source = Some("session_compress".to_string());
+            memory.source = Some("session_ingest".to_string());
             memory.session_id = session_id.clone();
             memory.agent_id = agent_id.clone();
             memory.tags = tags.clone();

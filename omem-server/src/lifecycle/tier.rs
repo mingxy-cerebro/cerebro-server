@@ -3,6 +3,7 @@ use crate::domain::types::Tier;
 
 use super::decay::{parse_days_ago, DecayConfig, DecayEngine};
 
+#[derive(Clone)]
 pub struct TierConfig {
     pub working_access_threshold: u32,
     pub working_composite_threshold: f32,
@@ -27,6 +28,28 @@ impl Default for TierConfig {
     }
 }
 
+impl TierConfig {
+    pub fn from_config(
+        working_access_threshold: u32,
+        working_composite_threshold: f32,
+        core_access_threshold: u32,
+        core_composite_threshold: f32,
+        core_importance_threshold: f32,
+        peripheral_composite_threshold: f32,
+        peripheral_age_days: f32,
+    ) -> Self {
+        Self {
+            working_access_threshold,
+            working_composite_threshold,
+            core_access_threshold,
+            core_composite_threshold,
+            core_importance_threshold,
+            peripheral_composite_threshold,
+            peripheral_age_days,
+        }
+    }
+}
+
 pub struct TierManager {
     config: TierConfig,
     decay: DecayEngine,
@@ -42,6 +65,10 @@ impl TierManager {
             TierConfig::default(),
             DecayEngine::new(DecayConfig::default()),
         )
+    }
+
+    pub fn from_config(tier_config: TierConfig, decay_config: DecayConfig) -> Self {
+        Self::new(tier_config, DecayEngine::new(decay_config))
     }
 
     pub fn evaluate_tier(&self, memory: &Memory) -> Tier {

@@ -146,6 +146,13 @@ async fn main() {
             .with_event_bus(state.event_bus.clone())
             .with_scheduler_control(ctrl.clone())
             .with_session_locks(state.session_locks.clone())
+            .with_lifecycle_config(
+                config.decay_config(),
+                config.tier_config(),
+                config.forgetting_max_stale_deletions,
+                config.forgetting_access_count_protection,
+                config.forgetting_superseded_archive_days,
+            )
         );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(

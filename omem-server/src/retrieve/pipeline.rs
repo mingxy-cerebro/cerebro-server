@@ -99,6 +99,11 @@ impl RetrievalPipeline {
         self
     }
 
+    pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
+        self.decay_engine = DecayEngine::new(config);
+        self
+    }
+
     pub fn with_default_limit(mut self, limit: usize) -> Self {
         self.default_limit = limit;
         self

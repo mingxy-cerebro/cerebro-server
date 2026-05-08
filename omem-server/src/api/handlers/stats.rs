@@ -11,7 +11,7 @@ use crate::domain::memory::Memory;
 use crate::domain::space::SharingAction;
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::Tier;
-use crate::lifecycle::decay::{DecayConfig, DecayEngine};
+use crate::lifecycle::decay::DecayEngine;
 
 // ── Query params ─────────────────────────────────────────────────────
 
@@ -196,10 +196,11 @@ pub async fn get_stats(
 // ── GET /v1/stats/config ─────────────────────────────────────────────
 
 pub async fn get_config(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthInfo>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let decay = DecayConfig::default();
+    let decay = state.config.decay_config();
+    let tier = state.config.tier_config();
 
     Ok(Json(serde_json::json!({
         "decay": {
@@ -215,12 +216,12 @@ pub async fn get_config(
             }
         },
         "promotion": {
-            "peripheral_to_working": { "min_access_count": 3, "min_composite": 0.4 },
-            "working_to_core": { "min_access_count": 10, "min_composite": 0.7, "min_importance": 0.8 }
+            "peripheral_to_working": { "min_access_count": tier.working_access_threshold, "min_composite": tier.working_composite_threshold },
+            "working_to_core": { "min_access_count": tier.core_access_threshold, "min_composite": tier.core_composite_threshold, "min_importance": tier.core_importance_threshold }
         },
         "demotion": {
-            "core_to_working": { "max_composite": 0.15 },
-            "working_to_peripheral": { "max_composite": 0.15 }
+            "core_to_working": { "max_composite": tier.peripheral_composite_threshold },
+            "working_to_peripheral": { "max_composite": tier.peripheral_composite_threshold }
         },
         "retrieval": {
             "stages": ["parallel_search","rrf_fusion","rrf_normalize","min_score_filter","topk_cap","cross_encoder_rerank","bm25_floor","decay_boost","importance_weight","length_normalization","hard_cutoff","mmr_diversity"],
@@ -346,8 +347,8 @@ pub async fn get_decay(
         .await?
         .ok_or_else(|| OmemError::NotFound(format!("memory {}", params.memory_id)))?;
 
-    let config = DecayConfig::default();
-    let engine = DecayEngine::new(DecayConfig::default());
+    let config = state.config.decay_config();
+    let engine = DecayEngine::new(config.clone());
 
     let (beta, floor) = match memory.tier {
         Tier::Core => (config.beta_core, config.floor_core),

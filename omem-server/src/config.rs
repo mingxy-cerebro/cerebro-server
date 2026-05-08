@@ -62,6 +62,31 @@ pub struct OmemConfig {
     /// Set to "false" to disable LLM judgment and use similarity scores only.
     /// Default: true
     pub cluster_llm_judge_enabled: bool,
+
+    // Lifecycle decay configuration
+    pub decay_half_life_days: f32,
+    pub decay_stale_threshold: f32,
+    pub decay_importance_modulation: f32,
+    pub decay_beta_core: f32,
+    pub decay_beta_working: f32,
+    pub decay_beta_peripheral: f32,
+    pub decay_floor_core: f32,
+    pub decay_floor_working: f32,
+    pub decay_floor_peripheral: f32,
+
+    // Tier configuration
+    pub tier_working_access_threshold: u32,
+    pub tier_working_composite_threshold: f32,
+    pub tier_core_access_threshold: u32,
+    pub tier_core_composite_threshold: f32,
+    pub tier_core_importance_threshold: f32,
+    pub tier_peripheral_composite_threshold: f32,
+    pub tier_peripheral_age_days: f32,
+
+    // Forgetting configuration
+    pub forgetting_max_stale_deletions: usize,
+    pub forgetting_access_count_protection: u32,
+    pub forgetting_superseded_archive_days: u32,
 }
 
 impl Default for OmemConfig {
@@ -98,6 +123,25 @@ impl Default for OmemConfig {
             cluster_auto_merge_threshold: 0.90,
             cluster_candidate_count: 15,
             cluster_llm_judge_enabled: true,
+            decay_half_life_days: 30.0,
+            decay_stale_threshold: 0.3,
+            decay_importance_modulation: 1.5,
+            decay_beta_core: 0.8,
+            decay_beta_working: 1.0,
+            decay_beta_peripheral: 1.3,
+            decay_floor_core: 0.9,
+            decay_floor_working: 0.7,
+            decay_floor_peripheral: 0.5,
+            tier_working_access_threshold: 3,
+            tier_working_composite_threshold: 0.4,
+            tier_core_access_threshold: 10,
+            tier_core_composite_threshold: 0.7,
+            tier_core_importance_threshold: 0.8,
+            tier_peripheral_composite_threshold: 0.15,
+            tier_peripheral_age_days: 60.0,
+            forgetting_max_stale_deletions: 50,
+            forgetting_access_count_protection: 5,
+            forgetting_superseded_archive_days: 30,
         }
     }
 }
@@ -105,7 +149,7 @@ impl Default for OmemConfig {
 impl OmemConfig {
     pub fn from_env() -> Self {
         let defaults = Self::default();
-        Self {
+        let mut config = Self {
             port: env::var("OMEM_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -168,7 +212,178 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.cluster_llm_judge_enabled),
+            decay_half_life_days: env::var("OMEM_DECAY_HALF_LIFE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_half_life_days),
+            decay_stale_threshold: env::var("OMEM_DECAY_STALE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_stale_threshold),
+            decay_importance_modulation: env::var("OMEM_DECAY_IMPORTANCE_MODULATION")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_importance_modulation),
+            decay_beta_core: env::var("OMEM_DECAY_BETA_CORE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_beta_core),
+            decay_beta_working: env::var("OMEM_DECAY_BETA_WORKING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_beta_working),
+            decay_beta_peripheral: env::var("OMEM_DECAY_BETA_PERIPHERAL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_beta_peripheral),
+            decay_floor_core: env::var("OMEM_DECAY_FLOOR_CORE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_floor_core),
+            decay_floor_working: env::var("OMEM_DECAY_FLOOR_WORKING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_floor_working),
+            decay_floor_peripheral: env::var("OMEM_DECAY_FLOOR_PERIPHERAL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.decay_floor_peripheral),
+            tier_working_access_threshold: env::var("OMEM_TIER_WORKING_ACCESS_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_working_access_threshold),
+            tier_working_composite_threshold: env::var("OMEM_TIER_WORKING_COMPOSITE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_working_composite_threshold),
+            tier_core_access_threshold: env::var("OMEM_TIER_CORE_ACCESS_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_core_access_threshold),
+            tier_core_composite_threshold: env::var("OMEM_TIER_CORE_COMPOSITE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_core_composite_threshold),
+            tier_core_importance_threshold: env::var("OMEM_TIER_CORE_IMPORTANCE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_core_importance_threshold),
+            tier_peripheral_composite_threshold: env::var("OMEM_TIER_PERIPHERAL_COMPOSITE_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_peripheral_composite_threshold),
+            tier_peripheral_age_days: env::var("OMEM_TIER_PERIPHERAL_AGE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.tier_peripheral_age_days),
+            forgetting_max_stale_deletions: env::var("OMEM_FORGETTING_MAX_STALE_DELETIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.forgetting_max_stale_deletions),
+            forgetting_access_count_protection: env::var("OMEM_FORGETTING_ACCESS_COUNT_PROTECTION")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.forgetting_access_count_protection),
+            forgetting_superseded_archive_days: env::var("OMEM_FORGETTING_SUPERSEDED_ARCHIVE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.forgetting_superseded_archive_days),
+        };
+
+        // Validate lifecycle parameters — warn and fallback to defaults on invalid values
+        let d = OmemConfig::default();
+        if config.decay_half_life_days <= 0.0 || config.decay_half_life_days.is_nan() {
+            tracing::warn!("OMEM_DECAY_HALF_LIFE_DAYS must be > 0, falling back to default");
+            config.decay_half_life_days = d.decay_half_life_days;
         }
+        if config.decay_stale_threshold <= 0.0 || config.decay_stale_threshold > 1.0 {
+            tracing::warn!("OMEM_DECAY_STALE_THRESHOLD must be in (0, 1], falling back to default");
+            config.decay_stale_threshold = d.decay_stale_threshold;
+        }
+        if config.decay_importance_modulation <= 0.0 || config.decay_importance_modulation.is_nan() {
+            tracing::warn!("OMEM_DECAY_IMPORTANCE_MODULATION must be > 0, falling back to default");
+            config.decay_importance_modulation = d.decay_importance_modulation;
+        }
+        if config.decay_beta_core <= 0.0 || config.decay_beta_core.is_nan() {
+            tracing::warn!("OMEM_DECAY_BETA_CORE must be > 0, falling back to default");
+            config.decay_beta_core = d.decay_beta_core;
+        }
+        if config.decay_beta_working <= 0.0 || config.decay_beta_working.is_nan() {
+            tracing::warn!("OMEM_DECAY_BETA_WORKING must be > 0, falling back to default");
+            config.decay_beta_working = d.decay_beta_working;
+        }
+        if config.decay_beta_peripheral <= 0.0 || config.decay_beta_peripheral.is_nan() {
+            tracing::warn!("OMEM_DECAY_BETA_PERIPHERAL must be > 0, falling back to default");
+            config.decay_beta_peripheral = d.decay_beta_peripheral;
+        }
+        if !(0.0..=1.0).contains(&config.decay_floor_core) {
+            tracing::warn!("OMEM_DECAY_FLOOR_CORE must be in [0, 1], falling back to default");
+            config.decay_floor_core = d.decay_floor_core;
+        }
+        if !(0.0..=1.0).contains(&config.decay_floor_working) {
+            tracing::warn!("OMEM_DECAY_FLOOR_WORKING must be in [0, 1], falling back to default");
+            config.decay_floor_working = d.decay_floor_working;
+        }
+        if !(0.0..=1.0).contains(&config.decay_floor_peripheral) {
+            tracing::warn!("OMEM_DECAY_FLOOR_PERIPHERAL must be in [0, 1], falling back to default");
+            config.decay_floor_peripheral = d.decay_floor_peripheral;
+        }
+        if config.tier_working_composite_threshold <= 0.0 || config.tier_working_composite_threshold > 1.0 {
+            tracing::warn!("OMEM_TIER_WORKING_COMPOSITE_THRESHOLD must be in (0, 1], falling back to default");
+            config.tier_working_composite_threshold = d.tier_working_composite_threshold;
+        }
+        if config.tier_core_composite_threshold <= 0.0 || config.tier_core_composite_threshold > 1.0 {
+            tracing::warn!("OMEM_TIER_CORE_COMPOSITE_THRESHOLD must be in (0, 1], falling back to default");
+            config.tier_core_composite_threshold = d.tier_core_composite_threshold;
+        }
+        if config.tier_core_importance_threshold <= 0.0 || config.tier_core_importance_threshold > 1.0 {
+            tracing::warn!("OMEM_TIER_CORE_IMPORTANCE_THRESHOLD must be in (0, 1], falling back to default");
+            config.tier_core_importance_threshold = d.tier_core_importance_threshold;
+        }
+        if config.tier_peripheral_composite_threshold <= 0.0 || config.tier_peripheral_composite_threshold > 1.0 {
+            tracing::warn!("OMEM_TIER_PERIPHERAL_COMPOSITE_THRESHOLD must be in (0, 1], falling back to default");
+            config.tier_peripheral_composite_threshold = d.tier_peripheral_composite_threshold;
+        }
+        if config.tier_peripheral_age_days <= 0.0 {
+            tracing::warn!("OMEM_TIER_PERIPHERAL_AGE_DAYS must be > 0, falling back to default");
+            config.tier_peripheral_age_days = d.tier_peripheral_age_days;
+        }
+        if config.forgetting_max_stale_deletions == 0 {
+            tracing::warn!("OMEM_FORGETTING_MAX_STALE_DELETIONS must be > 0, falling back to default");
+            config.forgetting_max_stale_deletions = d.forgetting_max_stale_deletions;
+        }
+        if config.forgetting_superseded_archive_days == 0 {
+            tracing::warn!("OMEM_FORGETTING_SUPERSEDED_ARCHIVE_DAYS must be > 0, falling back to default");
+            config.forgetting_superseded_archive_days = d.forgetting_superseded_archive_days;
+        }
+
+        config
+    }
+
+    pub fn decay_config(&self) -> crate::lifecycle::decay::DecayConfig {
+        crate::lifecycle::decay::DecayConfig::from_config(
+            self.decay_half_life_days,
+            self.decay_stale_threshold,
+            self.decay_importance_modulation,
+            self.decay_beta_core,
+            self.decay_beta_working,
+            self.decay_beta_peripheral,
+            self.decay_floor_core,
+            self.decay_floor_working,
+            self.decay_floor_peripheral,
+        )
+    }
+
+    pub fn tier_config(&self) -> crate::lifecycle::tier::TierConfig {
+        crate::lifecycle::tier::TierConfig::from_config(
+            self.tier_working_access_threshold,
+            self.tier_working_composite_threshold,
+            self.tier_core_access_threshold,
+            self.tier_core_composite_threshold,
+            self.tier_core_importance_threshold,
+            self.tier_peripheral_composite_threshold,
+            self.tier_peripheral_age_days,
+        )
     }
 
     pub fn store_uri(&self) -> String {

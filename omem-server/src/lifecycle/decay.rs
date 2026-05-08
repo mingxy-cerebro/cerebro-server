@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use crate::domain::memory::Memory;
 use crate::domain::types::Tier;
 
+#[derive(Clone)]
 pub struct DecayConfig {
     pub half_life_days: f32,
     pub recency_weight: f32,
@@ -36,6 +37,36 @@ impl Default for DecayConfig {
             floor_core: 0.9,
             floor_working: 0.7,
             floor_peripheral: 0.5,
+        }
+    }
+}
+
+impl DecayConfig {
+    pub fn from_config(
+        half_life_days: f32,
+        stale_threshold: f32,
+        importance_modulation: f32,
+        beta_core: f32,
+        beta_working: f32,
+        beta_peripheral: f32,
+        floor_core: f32,
+        floor_working: f32,
+        floor_peripheral: f32,
+    ) -> Self {
+        Self {
+            half_life_days,
+            recency_weight: 0.4,
+            frequency_weight: 0.3,
+            intrinsic_weight: 0.3,
+            importance_modulation,
+            stale_threshold,
+            search_boost_min: 0.3,
+            beta_core,
+            beta_working,
+            beta_peripheral,
+            floor_core,
+            floor_working,
+            floor_peripheral,
         }
     }
 }

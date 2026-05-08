@@ -14,6 +14,8 @@ use crate::cluster::manager::ClusterManager;
 use crate::domain::memory::Memory;
 use crate::lifecycle::forgetting::AutoForgetter;
 use crate::lifecycle::tier::TierManager;
+use crate::lifecycle::decay::DecayConfig;
+use crate::lifecycle::tier::TierConfig;
 use crate::store::StoreManager;
 
 pub struct LifecycleScheduler {
@@ -28,6 +30,11 @@ pub struct LifecycleScheduler {
     event_bus: Option<SharedEventBus>,
     scheduler_control: Option<SharedSchedulerControl>,
     session_locks: Option<Arc<SessionLockMap>>,
+    decay_config: DecayConfig,
+    tier_config: TierConfig,
+    forgetting_max_stale_deletions: usize,
+    forgetting_access_count_protection: u32,
+    forgetting_superseded_archive_days: u32,
 }
 
 impl LifecycleScheduler {
@@ -48,6 +55,11 @@ impl LifecycleScheduler {
             event_bus: None,
             scheduler_control: None,
             session_locks: None,
+            decay_config: DecayConfig::default(),
+            tier_config: TierConfig::default(),
+            forgetting_max_stale_deletions: 50,
+            forgetting_access_count_protection: 5,
+            forgetting_superseded_archive_days: 30,
         }
     }
 
@@ -66,6 +78,22 @@ impl LifecycleScheduler {
         locks: Arc<SessionLockMap>,
     ) -> Self {
         self.session_locks = Some(locks);
+        self
+    }
+
+    pub fn with_lifecycle_config(
+        mut self,
+        decay_config: DecayConfig,
+        tier_config: TierConfig,
+        max_stale_deletions: usize,
+        access_count_protection: u32,
+        superseded_archive_days: u32,
+    ) -> Self {
+        self.decay_config = decay_config;
+        self.tier_config = tier_config;
+        self.forgetting_max_stale_deletions = max_stale_deletions;
+        self.forgetting_access_count_protection = access_count_protection;
+        self.forgetting_superseded_archive_days = superseded_archive_days;
         self
     }
 
@@ -180,7 +208,7 @@ impl LifecycleScheduler {
     }
 
     async fn run_once_inner(&self) -> Result<(), crate::domain::error::OmemError> {
-        let tier_manager = TierManager::with_defaults();
+        let tier_manager = TierManager::from_config(self.tier_config.clone(), self.decay_config.clone());
         let stores = self.store_manager.cached_stores().await;
 
         if stores.is_empty() {
@@ -229,7 +257,7 @@ impl LifecycleScheduler {
     }
 
     async fn run_forgetting(&self, store: &Arc<crate::store::LanceStore>) -> Vec<Memory> {
-        let forgetter = AutoForgetter::new(store.clone());
+        let forgetter = AutoForgetter::new(store.clone(), self.decay_config.clone(), self.forgetting_max_stale_deletions, self.forgetting_access_count_protection, self.forgetting_superseded_archive_days);
         let mut removed = Vec::new();
 
         match forgetter.cleanup_expired().await {
@@ -243,7 +271,7 @@ impl LifecycleScheduler {
             _ => {}
         }
 
-        match forgetter.archive_superseded(30).await {
+        match forgetter.archive_superseded().await {
             Ok(archived) if !archived.is_empty() => {
                 info!(archived = archived.len(), "scheduler_superseded_archive");
                 removed.extend(archived);

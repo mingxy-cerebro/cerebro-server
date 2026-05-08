@@ -8,6 +8,7 @@ use tracing::warn;
 use crate::api::server::AppState;
 use crate::cluster::manager::ClusterManager;
 use crate::domain::error::OmemError;
+use crate::lifecycle::decay::DecayConfig;
 use crate::lifecycle::forgetting::AutoForgetter;
 use crate::lifecycle::tier::TierManager;
 
@@ -40,7 +41,9 @@ pub async fn trigger_lifecycle(
 }
 
 async fn run_lifecycle_cycle(state: Arc<AppState>) {
-    let tier_manager = TierManager::with_defaults();
+    let decay_config = state.config.decay_config();
+    let tier_config = state.config.tier_config();
+    let tier_manager = TierManager::from_config(tier_config, decay_config.clone());
     let stores = state.store_manager.cached_stores().await;
 
     if stores.is_empty() {
@@ -49,7 +52,7 @@ async fn run_lifecycle_cycle(state: Arc<AppState>) {
 
     for store in &stores {
         evaluate_tiers(store, &tier_manager).await;
-        let removed = run_forgetting(store).await;
+        let removed = run_forgetting(store, &state, decay_config.clone()).await;
         cleanup_orphan_clusters(&state, &removed).await;
     }
 
@@ -64,8 +67,14 @@ async fn run_lifecycle_cycle(state: Arc<AppState>) {
     }
 }
 
-async fn run_forgetting(store: &Arc<crate::store::LanceStore>) -> Vec<crate::domain::memory::Memory> {
-    let forgetter = AutoForgetter::new(store.clone());
+async fn run_forgetting(store: &Arc<crate::store::LanceStore>, state: &Arc<AppState>, decay_config: DecayConfig) -> Vec<crate::domain::memory::Memory> {
+    let forgetter = AutoForgetter::new(
+        store.clone(),
+        decay_config,
+        state.config.forgetting_max_stale_deletions,
+        state.config.forgetting_access_count_protection,
+        state.config.forgetting_superseded_archive_days,
+    );
     let mut removed = Vec::new();
 
     match forgetter.cleanup_expired().await {
@@ -79,7 +88,7 @@ async fn run_forgetting(store: &Arc<crate::store::LanceStore>) -> Vec<crate::dom
         _ => {}
     }
 
-    match forgetter.archive_superseded(30).await {
+    match forgetter.archive_superseded().await {
         Ok(archived) if !archived.is_empty() => {
             tracing::info!(archived = archived.len(), "lifecycle_superseded_archive");
             removed.extend(archived);
@@ -88,6 +97,18 @@ async fn run_forgetting(store: &Arc<crate::store::LanceStore>) -> Vec<crate::dom
             warn!(error = %e, "lifecycle_archive_superseded_failed");
         }
         _ => {}
+    }
+
+    match forgetter.cleanup_stale().await {
+        Ok(stale) => {
+            if !stale.is_empty() {
+                tracing::info!(count = stale.len(), "lifecycle_cleanup_stale_complete");
+                removed.extend(stale);
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "lifecycle_cleanup_stale_failed");
+        }
     }
 
     removed

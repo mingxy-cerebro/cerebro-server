@@ -9,13 +9,19 @@ use crate::store::lancedb::LanceStore;
 pub struct AutoForgetter {
     store: Arc<LanceStore>,
     decay: DecayEngine,
+    max_stale_deletions: usize,
+    access_count_protection: u32,
+    superseded_archive_days: u32,
 }
 
 impl AutoForgetter {
-    pub fn new(store: Arc<LanceStore>) -> Self {
+    pub fn new(store: Arc<LanceStore>, decay_config: DecayConfig, max_stale_deletions: usize, access_count_protection: u32, superseded_archive_days: u32) -> Self {
         Self {
             store,
-            decay: DecayEngine::new(DecayConfig::default()),
+            decay: DecayEngine::new(decay_config),
+            max_stale_deletions,
+            access_count_protection,
+            superseded_archive_days,
         }
     }
 
@@ -59,11 +65,10 @@ impl AutoForgetter {
 
     pub async fn archive_superseded(
         &self,
-        max_age_days: u32,
     ) -> Result<Vec<Memory>, OmemError> {
         let memories = self.store.list(2000, 0).await?;
         let now = chrono::Utc::now();
-        let max_age = chrono::TimeDelta::try_days(max_age_days as i64)
+        let max_age = chrono::TimeDelta::try_days(self.superseded_archive_days as i64)
             .unwrap_or_else(chrono::TimeDelta::zero);
         let mut archived = Vec::new();
 
@@ -98,12 +103,12 @@ impl AutoForgetter {
             if memory.memory_type == MemoryType::Pinned {
                 continue;
             }
-            if memory.access_count >= 5 {
+            if memory.access_count >= self.access_count_protection {
                 continue;
             }
 
             if self.decay.is_stale(&memory) {
-                if deleted.len() >= 50 {
+                if deleted.len() >= self.max_stale_deletions {
                     break;
                 }
                 tracing::info!(
@@ -219,7 +224,7 @@ mod tests {
         m_permanent.updated_at = m_permanent.created_at.clone();
         store.create(&m_permanent, Some(&v)).await.expect("create");
 
-        let forgetter = AutoForgetter::new(store.clone());
+        let forgetter = AutoForgetter::new(store.clone(), DecayConfig::default(), 50, 5, 30);
         let count = forgetter.cleanup_expired().await.expect("cleanup");
 
         assert_eq!(
@@ -259,8 +264,8 @@ mod tests {
         let m_active = make_memory("t-001", "active preference C");
         store.create(&m_active, Some(&v)).await.expect("create");
 
-        let forgetter = AutoForgetter::new(store.clone());
-        let count = forgetter.archive_superseded(30).await.expect("archive");
+        let forgetter = AutoForgetter::new(store.clone(), DecayConfig::default(), 50, 5, 30);
+        let count = forgetter.archive_superseded().await.expect("archive");
 
         assert_eq!(
             count.len(), 1,
@@ -283,7 +288,7 @@ mod tests {
         let m = make_memory("t-001", "I like Rust");
         store.create(&m, Some(&v)).await.expect("create");
 
-        let forgetter = AutoForgetter::new(store);
+        let forgetter = AutoForgetter::new(store, DecayConfig::default(), 50, 5, 30);
         let count = forgetter.cleanup_expired().await.expect("cleanup");
         assert_eq!(count.len(), 0);
     }
