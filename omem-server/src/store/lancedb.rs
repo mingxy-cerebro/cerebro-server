@@ -81,6 +81,8 @@ pub struct LanceStore {
     table: Table,
     session_recalls_table: Table,
     fts_indexed: AtomicBool,
+    /// Base URI for this tenant's LanceDB data (e.g. "omem-data/personal/{tenant_id}")
+    uri: String,
 }
 
 impl LanceStore {
@@ -124,6 +126,7 @@ impl LanceStore {
             table,
             session_recalls_table,
             fts_indexed: AtomicBool::new(false),
+            uri: uri.to_string(),
         })
     }
 
@@ -269,12 +272,14 @@ impl LanceStore {
             Err(e) => tracing::warn!("Failed to purge deleted rows (non-critical): {e}"),
         }
 
-        // Compact + prune + index optimize on startup to recover from version bloat
-        let start = std::time::Instant::now();
-        if let Err(e) = self.optimize().await {
-            tracing::warn!(error = %e, "startup_optimize_failed");
-        } else {
-            tracing::info!(duration_ms = start.elapsed().as_millis() as u64, "startup_optimize_completed");
+        // Startup: rebuild all indices to clean up accumulated index fragment UUIDs.
+        // This is safe and idempotent: drop all → prune orphaned files → recreate needed indices.
+        // Without this, index UUID directories accumulate indefinitely (10K+ observed).
+        if let Err(e) = self.rebuild_indices().await {
+            tracing::warn!(error = %e, "startup: rebuild_indices failed, falling back to optimize");
+            if let Err(e) = self.optimize().await {
+                tracing::warn!(error = %e, "startup_optimize_failed");
+            }
         }
 
         Ok(())
@@ -1666,6 +1671,14 @@ impl LanceStore {
     pub async fn create_fts_index(&self) -> Result<(), OmemError> {
         let table = self.table.clone();
 
+        // Dedup check: skip FTS creation if indexes already exist for these columns.
+        // This prevents accumulating orphan FTS index fragments across restarts.
+        let existing = table.list_indices().await
+            .map_err(|e| OmemError::Storage(format!("list_indices for FTS dedup failed: {e}")))?;
+        let indexed_columns: std::collections::HashSet<String> = existing.iter()
+            .flat_map(|idx| idx.columns.clone())
+            .collect();
+
         // Use ngram tokenizer for better CJK support.
         // simple tokenizer splits on whitespace/punctuation only — useless for Chinese.
         // ngram(2,4) generates all 2-4 char substrings, enabling substring matching for CJK.
@@ -1676,20 +1689,24 @@ impl LanceStore {
             .stem(false)
             .remove_stop_words(false);
 
-        table
-            .create_index(&["content"], Index::FTS(fts_params.clone()))
-            .execute()
-            .await
-            .map_err(|e| {
-                OmemError::Storage(format!("failed to create FTS index on content: {e}"))
-            })?;
-        table
-            .create_index(&["l0_abstract"], Index::FTS(fts_params))
-            .execute()
-            .await
-            .map_err(|e| {
-                OmemError::Storage(format!("failed to create FTS index on l0_abstract: {e}"))
-            })?;
+        if !indexed_columns.contains("content") {
+            table
+                .create_index(&["content"], Index::FTS(fts_params.clone()))
+                .execute()
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to create FTS index on content: {e}"))
+                })?;
+        }
+        if !indexed_columns.contains("l0_abstract") {
+            table
+                .create_index(&["l0_abstract"], Index::FTS(fts_params))
+                .execute()
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to create FTS index on l0_abstract: {e}"))
+                })?;
+        }
         Ok(())
     }
 
@@ -1979,7 +1996,7 @@ impl LanceStore {
         // Step 3: Optimize indices — merge unindexed data into existing indices
         table
             .optimize(OptimizeAction::Index(
-                lance_index::optimize::OptimizeOptions::merge(1),
+                lance_index::optimize::OptimizeOptions::merge(128),
             ))
             .await
             .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
@@ -2009,6 +2026,84 @@ impl LanceStore {
                     .await;
             }
         }
+
+        Ok(())
+    }
+
+    /// Rebuild all indices from scratch by dropping every existing index, pruning orphaned
+    /// index files from disk, then recreating only the indices we actually need.
+    ///
+    /// This is the nuclear option for cleaning up index fragment accumulation.
+    /// Triggered at startup when fragment count exceeds INDEX_FRAGMENT_THRESHOLD.
+    pub async fn rebuild_indices(&self) -> Result<(), OmemError> {
+        let table = self.table.clone();
+
+        // Step 1: List all existing indices
+        let existing = table.list_indices().await
+            .map_err(|e| OmemError::Storage(format!("rebuild_indices: list_indices failed: {e}")))?;
+        let fragment_count = existing.len();
+        tracing::info!(
+            index_count = fragment_count,
+            "rebuild_indices: dropping all existing indices"
+        );
+
+        // Step 2: Drop every index by name
+        for idx in &existing {
+            if let Err(e) = table.drop_index(&idx.name).await {
+                // Log but don't fail — best-effort cleanup
+                tracing::warn!(
+                    index_name = %idx.name,
+                    error = %e,
+                    "rebuild_indices: failed to drop index, skipping"
+                );
+            }
+        }
+        tracing::info!("rebuild_indices: all indices dropped from manifest");
+
+        // Step 3: Prune to remove orphaned index UUID directories from disk
+        table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(
+                    chrono::Duration::try_minutes(0)
+                        .unwrap_or_else(|| chrono::Duration::minutes(0)),
+                ),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .map_err(|e| OmemError::Storage(format!("rebuild_indices: prune failed: {e}")))?;
+        tracing::info!("rebuild_indices: orphaned index files pruned");
+
+        // Step 3.5: Brute-force disk cleanup — prune only clears manifest-level refs,
+        // but orphaned UUID directories under _indices/ may persist on disk.
+        let indices_dir = std::path::Path::new(&self.uri)
+            .join("memories.lance")
+            .join("_indices");
+        if indices_dir.is_dir() {
+            let mut cleaned = 0u32;
+            let mut entries = match std::fs::read_dir(&indices_dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(path = %indices_dir.display(), error = %e, "rebuild_indices: failed to read _indices dir");
+                    return self.ensure_scalar_indexes().await.and(self.create_fts_index().await);
+                }
+            };
+            while let Some(Ok(entry)) = entries.next() {
+                if entry.path().is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                        tracing::warn!(path = %entry.path().display(), error = %e, "rebuild_indices: failed to remove orphan dir");
+                    } else {
+                        cleaned += 1;
+                    }
+                }
+            }
+            tracing::info!(cleaned, "rebuild_indices: disk-level orphan cleanup done");
+        }
+
+        // Step 4: Recreate only the indices we need (scalar + FTS)
+        self.ensure_scalar_indexes().await?;
+        self.create_fts_index().await?;
+        tracing::info!("rebuild_indices: indices rebuilt successfully");
 
         Ok(())
     }
@@ -2428,7 +2523,7 @@ mod tests {
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false) };
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new() };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -2484,7 +2579,7 @@ mod tests {
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false) };
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new() };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
