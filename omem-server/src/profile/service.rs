@@ -305,7 +305,7 @@ impl ProfileService {
 
 async fn build_profile(
     store: &Arc<LanceStore>,
-    llm: Option<&Arc<dyn LlmService>>,
+    _llm: Option<&Arc<dyn LlmService>>,
 ) -> Result<UserProfile, OmemError> {
     // TODO: Future enhancement — use llm with PROFILE_FILTER_SYSTEM_PROMPT for semantic quality filtering
 
