@@ -357,6 +357,7 @@ export function sessionIdleHook(
   threshold: number = 0,
   getMainSessionId?: () => string | undefined,
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
+  agentId?: string,
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
@@ -432,7 +433,7 @@ export function sessionIdleHook(
         }
 
         try {
-          await omemClient.sessionIngest(conversationMessages, sessionID, undefined, sessionTitle, projectName);
+          await omemClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
           for (const id of newMessageIds) {
             processedMessageIds.add(id);
           }
