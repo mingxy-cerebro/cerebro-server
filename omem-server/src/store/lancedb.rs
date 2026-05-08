@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
@@ -81,8 +81,9 @@ pub struct LanceStore {
     table: Table,
     session_recalls_table: Table,
     fts_indexed: AtomicBool,
-    /// Base URI for this tenant's LanceDB data (e.g. "omem-data/personal/{tenant_id}")
     uri: String,
+    write_count: Arc<AtomicU32>,
+    rebuilding: Arc<AtomicBool>,
 }
 
 impl LanceStore {
@@ -127,6 +128,8 @@ impl LanceStore {
             session_recalls_table,
             fts_indexed: AtomicBool::new(false),
             uri: uri.to_string(),
+            write_count: Arc::new(AtomicU32::new(0)),
+            rebuilding: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1130,6 +1133,7 @@ impl LanceStore {
         }
 
         // OOM guard: no maybe_optimize on write path — auto_cleanup handles it
+        self.maybe_rebuild_on_write();
         Ok(())
     }
 
@@ -1311,6 +1315,7 @@ impl LanceStore {
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
         }
+        self.maybe_rebuild_on_write();
         Ok(())
     }
 
@@ -2108,6 +2113,59 @@ impl LanceStore {
         Ok(())
     }
 
+    const REBUILD_WRITE_THRESHOLD: u32 = 50;
+
+    /// GC-style trigger: after each write, increment counter and spawn
+    /// background rebuild_indices() when threshold is exceeded.
+    /// Zero-cost when idle (atomic increment only).
+    fn maybe_rebuild_on_write(&self) {
+        let count = self.write_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if count < Self::REBUILD_WRITE_THRESHOLD {
+            return;
+        }
+        if self.rebuilding.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return;
+        }
+        let table = self.table.clone();
+        let uri = self.uri.clone();
+        let wc = Arc::clone(&self.write_count);
+        let rb = Arc::clone(&self.rebuilding);
+        tokio::spawn(async move {
+            tracing::info!(write_count = count, "GC trigger: spawning background rebuild_indices");
+            let existing = match table.list_indices().await {
+                Ok(indices) => indices,
+                Err(e) => {
+                    tracing::warn!(error = %e, "background rebuild: list_indices failed");
+                    rb.store(false, Ordering::Release);
+                    return;
+                }
+            };
+            for idx in &existing {
+                if let Err(e) = table.drop_index(&idx.name).await {
+                    tracing::warn!(index_name = %idx.name, error = %e, "background rebuild: drop_index failed");
+                }
+            }
+            let _ = table.optimize(OptimizeAction::Prune {
+                older_than: Some(chrono::Duration::try_minutes(0).unwrap_or_else(|| chrono::Duration::minutes(0))),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: None,
+            }).await;
+            let indices_dir = std::path::Path::new(&uri).join("memories.lance").join("_indices");
+            if indices_dir.is_dir() {
+                if let Ok(mut entries) = std::fs::read_dir(&indices_dir) {
+                    while let Some(Ok(entry)) = entries.next() {
+                        if entry.path().is_dir() {
+                            let _ = std::fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
+            }
+            tracing::info!("background rebuild_indices completed, index fragments cleaned");
+            wc.store(0, Ordering::Relaxed);
+            rb.store(false, Ordering::Release);
+        });
+    }
+
     /// Lazy compact: check actual version count on disk, auto-compact when > threshold.
     /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
     /// NOTE: No longer called from write path. Used by PruneDaemon background task only.
@@ -2523,7 +2581,7 @@ mod tests {
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new() };
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -2579,7 +2637,7 @@ mod tests {
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new() };
+        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
