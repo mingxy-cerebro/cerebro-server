@@ -108,6 +108,8 @@ pub struct UpdateMemoryBody {
     pub state: Option<String>,
     pub tier: Option<String>,
     pub tier_history: Option<String>,
+    pub session_id: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -684,6 +686,14 @@ pub async fn update_memory(
 
     if let Some(th) = body.tier_history {
         memory.tier_history = if th.is_empty() { None } else { Some(th) };
+    }
+
+    if let Some(sid) = body.session_id {
+        memory.session_id = Some(sid);
+    }
+
+    if let Some(psid) = body.parent_session_id {
+        memory.parent_session_id = Some(psid);
     }
 
     memory.updated_at = chrono::Utc::now().to_rfc3339();
