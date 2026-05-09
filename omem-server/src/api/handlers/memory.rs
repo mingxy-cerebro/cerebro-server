@@ -1970,16 +1970,6 @@ pub async fn session_ingest(
             "session_ingest: created independent memories"
         );
 
-        // ── Post-ingest compact: prevent version bloat from accumulating ──
-        // Each ingest creates/updates multiple memories → LanceDB versions pile up fast.
-        // Compact here keeps versions low between scheduler cycles.
-        if stored > 0 {
-            if let Err(e) = store.optimize().await {
-                tracing::warn!(error = %e, "session_ingest: post-ingest optimize failed");
-            } else {
-                tracing::info!(tenant = %tenant_id, "session_ingest: post-ingest optimize completed");
-            }
-        }
     });
 
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({
@@ -2107,9 +2097,10 @@ fn clean_message_content(content: &str) -> String {
 
 
 
-/// Fetch up to N recent private (EMOTIONAL) session_compress memories for a session.
+/// Fetch up to N recent private (EMOTIONAL) session memories for a session.
 /// Returns a merged summary instead of a single memory to provide richer context
 /// and avoid duplicate extractions.
+/// No tags filter — matches by session_id + scope to support both session_ingest and session_compress sources.
 async fn fetch_session_emotional_memory(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
@@ -2119,7 +2110,6 @@ async fn fetch_session_emotional_memory(
     let limit = limit.unwrap_or(5);
 
     let filter = ListFilter {
-        tags: Some(vec!["session_compress".to_string()]),
         ..Default::default()
     };
 
@@ -2161,7 +2151,8 @@ async fn fetch_session_emotional_memory(
     })
 }
 
-/// Fetch up to N recent public (WORK) session_compress memories for a session.
+/// Fetch up to N recent public (WORK) session memories for a session.
+/// No tags filter — matches by session_id + scope to support both session_ingest and session_compress sources.
 async fn fetch_session_work_memory(
     store: &crate::store::lancedb::LanceStore,
     session_id: Option<&str>,
@@ -2171,7 +2162,6 @@ async fn fetch_session_work_memory(
     let limit = limit.unwrap_or(5);
 
     let filter = ListFilter {
-        tags: Some(vec!["session_compress".to_string()]),
         ..Default::default()
     };
 

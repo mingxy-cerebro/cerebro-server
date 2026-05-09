@@ -126,24 +126,11 @@ impl LifecycleScheduler {
             }
         }
 
-        // Spawn background prune daemon — runs every 60s
+        // Spawn background session-lock cleanup daemon — runs every 60s
         let prune_self = self.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                let stores = prune_self.store_manager.cached_stores().await;
-                for store in &stores {
-                    match store.prune_old_versions().await {
-                        Ok(count) => {
-                            tracing::debug!(version_count = count, "prune_daemon: post-prune version count");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "prune_daemon: prune failed");
-                        }
-                    }
-                    // maybe_optimize internally checks version_count, only compacts when truly needed
-                    store.maybe_optimize().await;
-                }
                 if let Some(locks) = &prune_self.session_locks {
                     let before = locks.len();
                     locks.retain(|_, (_, last_used)| last_used.elapsed() < Duration::from_secs(86400));

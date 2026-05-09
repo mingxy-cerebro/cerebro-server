@@ -12,6 +12,7 @@ use lancedb::index::scalar::{BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuil
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::{CompactionOptions, NewColumnTransform, OptimizeAction, Table};
+use lance_index::DatasetIndexExt;
 use lancedb::Connection;
 
 use crate::domain::category::Category;
@@ -1133,7 +1134,7 @@ impl LanceStore {
         }
 
         // OOM guard: no maybe_optimize on write path — auto_cleanup handles it
-        self.maybe_rebuild_on_write();
+        self.after_mutation();
         Ok(())
     }
 
@@ -1315,7 +1316,7 @@ impl LanceStore {
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
         }
-        self.maybe_rebuild_on_write();
+        self.after_mutation();
         Ok(())
     }
 
@@ -1439,11 +1440,13 @@ impl LanceStore {
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
             .map_err(|e| OmemError::Storage(format!("hard_delete failed: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 
     pub async fn batch_hard_delete_by_ids(&self, ids: &[String]) -> Result<usize, OmemError> {
         if ids.is_empty() {
+            self.after_mutation();
             return Ok(0);
         }
         let table = self.table.clone();
@@ -1453,6 +1456,7 @@ impl LanceStore {
             .delete(&format!("id IN ({id_list})"))
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete_by_ids failed: {e}")))?;
+        self.after_mutation();
         Ok(ids.len())
     }
 
@@ -1874,6 +1878,7 @@ impl LanceStore {
             .delete(filter)
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete failed: {e}")))?;
+        self.after_mutation();
         Ok(count)
     }
 
@@ -1894,6 +1899,7 @@ impl LanceStore {
             .delete("true")
             .await
             .map_err(|e| OmemError::Storage(format!("delete_all failed: {e}")))?;
+        self.after_mutation();
         Ok(count)
     }
 
@@ -2113,14 +2119,14 @@ impl LanceStore {
         Ok(())
     }
 
-    const REBUILD_WRITE_THRESHOLD: u32 = 50;
+    const GC_WRITE_THRESHOLD: u32 = 50;
 
-    /// GC-style trigger: after each write, increment counter and spawn
-    /// background rebuild_indices() when threshold is exceeded.
-    /// Zero-cost when idle (atomic increment only).
-    fn maybe_rebuild_on_write(&self) {
+    /// Called after every mutation (add/update/delete) to trigger periodic GC.
+    /// Unified GC: prune old versions → compact fragments → merge indices → cleanup orphan UUIDs.
+    /// Only runs when write_count exceeds threshold; zero-cost when idle.
+    fn after_mutation(&self) {
         let count = self.write_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if count < Self::REBUILD_WRITE_THRESHOLD {
+        if count < Self::GC_WRITE_THRESHOLD {
             return;
         }
         if self.rebuilding.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
@@ -2131,36 +2137,122 @@ impl LanceStore {
         let wc = Arc::clone(&self.write_count);
         let rb = Arc::clone(&self.rebuilding);
         tokio::spawn(async move {
-            tracing::info!(write_count = count, "GC trigger: spawning background rebuild_indices");
-            let existing = match table.list_indices().await {
-                Ok(indices) => indices,
-                Err(e) => {
-                    tracing::warn!(error = %e, "background rebuild: list_indices failed");
-                    rb.store(false, Ordering::Release);
-                    return;
+            tracing::info!(write_count = count, "GC trigger: unified gc (prune + compact + index merge + orphan cleanup)");
+
+            // Step 1: Prune old versions (10-minute safety window)
+            match table
+                .optimize(OptimizeAction::Prune {
+                    older_than: Some(
+                        chrono::Duration::try_minutes(10)
+                            .unwrap_or_else(|| chrono::Duration::minutes(10)),
+                    ),
+                    delete_unverified: Some(true),
+                    error_if_tagged_old_versions: None,
+                })
+                .await
+            {
+                Ok(stats) => {
+                    let pruned_bytes = stats.prune.map(|p| p.bytes_removed).unwrap_or(0);
+                    tracing::info!(bytes_removed = %pruned_bytes, "GC: prune completed");
                 }
-            };
-            for idx in &existing {
-                if let Err(e) = table.drop_index(&idx.name).await {
-                    tracing::warn!(index_name = %idx.name, error = %e, "background rebuild: drop_index failed");
+                Err(e) => {
+                    tracing::warn!(error = %e, "GC: prune failed");
                 }
             }
-            let _ = table.optimize(OptimizeAction::Prune {
-                older_than: Some(chrono::Duration::try_minutes(0).unwrap_or_else(|| chrono::Duration::minutes(0))),
-                delete_unverified: Some(true),
-                error_if_tagged_old_versions: None,
-            }).await;
-            let indices_dir = std::path::Path::new(&uri).join("memories.lance").join("_indices");
+
+            // Step 2: Compact — merge small fragment files
+            match table
+                .optimize(OptimizeAction::Compact {
+                    options: CompactionOptions::default(),
+                    remap_options: None,
+                })
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("GC: compact completed");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "GC: compact failed");
+                }
+            }
+
+            // Step 3: Index merge — merge unindexed data into existing indices
+            match table
+                .optimize(OptimizeAction::Index(
+                    lance_index::optimize::OptimizeOptions::merge(128),
+                ))
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("GC: index merge completed");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "GC: index merge failed");
+                }
+            }
+
+            // Step 4: Surgical orphan index cleanup — delete only orphan UUID dirs
+            let active_uuids: std::collections::HashSet<String> = if let Some(wrapper) = table.dataset() {
+                match wrapper.get().await {
+                    Ok(dataset) => match dataset.load_indices().await {
+                        Ok(indices) => {
+                            indices.iter().map(|idx| idx.uuid.to_string()).collect()
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "GC orphan cleanup: load_indices failed, skipping disk cleanup");
+                            wc.store(0, Ordering::Relaxed);
+                            rb.store(false, Ordering::Release);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "GC orphan cleanup: dataset get failed, skipping disk cleanup");
+                        wc.store(0, Ordering::Relaxed);
+                        rb.store(false, Ordering::Release);
+                        return;
+                    }
+                }
+            } else {
+                tracing::warn!("GC orphan cleanup: no dataset available, skipping disk cleanup");
+                wc.store(0, Ordering::Relaxed);
+                rb.store(false, Ordering::Release);
+                return;
+            };
+
+            let indices_dir = std::path::Path::new(&uri)
+                .join("memories.lance")
+                .join("_indices");
+            let mut cleaned = 0u32;
+            let mut kept = 0u32;
             if indices_dir.is_dir() {
                 if let Ok(mut entries) = std::fs::read_dir(&indices_dir) {
                     while let Some(Ok(entry)) = entries.next() {
-                        if entry.path().is_dir() {
-                            let _ = std::fs::remove_dir_all(entry.path());
+                        if !entry.path().is_dir() {
+                            continue;
+                        }
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if active_uuids.contains(&name) {
+                            kept += 1;
+                        } else {
+                            match std::fs::remove_dir_all(entry.path()) {
+                                Ok(()) => cleaned += 1,
+                                Err(e) => tracing::warn!(
+                                    path = %entry.path().display(),
+                                    error = %e,
+                                    "GC orphan cleanup: failed to remove orphan dir"
+                                ),
+                            }
                         }
                     }
                 }
             }
-            tracing::info!("background rebuild_indices completed, index fragments cleaned");
+            tracing::info!(
+                cleaned,
+                kept,
+                "GC: unified gc complete"
+            );
+
+            // Reset counters
             wc.store(0, Ordering::Relaxed);
             rb.store(false, Ordering::Release);
         });
