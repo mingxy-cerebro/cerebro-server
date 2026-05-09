@@ -1281,6 +1281,8 @@ pub async fn reembed_memories(
 pub struct SessionIngestBody {
     pub messages: Vec<MessageDto>,
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     pub agent_id: Option<String>,
     pub session_title: Option<String>,
     pub project_name: Option<String>,
@@ -1334,6 +1336,7 @@ pub async fn session_ingest(
     let tenant_id = auth.tenant_id.clone();
     let agent_id = body.agent_id.or(auth.agent_id.clone());
     let session_id = body.session_id.clone();
+    let parent_session_id = body.parent_session_id.clone();
     let session_key = body.session_id.as_deref().unwrap_or("default").to_string();
     let response_session_id = session_id.clone();
 
@@ -1531,6 +1534,7 @@ pub async fn session_ingest(
             memory.l2_content = l2_content;
             memory.source = Some("session_ingest".to_string());
             memory.session_id = session_id.clone();
+            memory.parent_session_id = parent_session_id.clone();
             memory.agent_id = agent_id.clone();
             memory.tags = tags.clone();
             if topic.scope == "private" {
