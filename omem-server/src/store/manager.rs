@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use super::lancedb::LanceStore;
 use crate::domain::error::OmemError;
@@ -38,6 +38,7 @@ pub struct StoreManager {
     cache: Mutex<HashMap<String, CacheEntry>>,
     session_cache: Mutex<HashMap<String, SessionCacheEntry>>,
     max_cached: usize,
+    tenant_store: OnceCell<Arc<crate::store::TenantStore>>,
 }
 
 impl StoreManager {
@@ -47,6 +48,7 @@ impl StoreManager {
             cache: Mutex::new(HashMap::new()),
             session_cache: Mutex::new(HashMap::new()),
             max_cached: DEFAULT_MAX_CACHED,
+            tenant_store: OnceCell::new(),
         }
     }
 
@@ -59,6 +61,7 @@ impl StoreManager {
             cache: Mutex::new(HashMap::new()),
             session_cache: Mutex::new(HashMap::new()),
             max_cached,
+            tenant_store: OnceCell::new(),
         }
     }
 
@@ -100,6 +103,29 @@ impl StoreManager {
     pub async fn cached_stores(&self) -> Vec<Arc<LanceStore>> {
         let cache = self.cache.lock().await;
         cache.values().map(|e| e.store.clone()).collect()
+    }
+
+    pub fn set_tenant_store(&self, tenant_store: Arc<crate::store::TenantStore>) {
+        let _ = self.tenant_store.set(tenant_store);
+    }
+
+    pub async fn all_stores(&self) -> Result<Vec<Arc<LanceStore>>, OmemError> {
+        let tenants = {
+            let ts = self.tenant_store.get()
+                .ok_or_else(|| OmemError::Internal("tenant_store not configured".into()))?;
+            ts.list_all().await
+                .map_err(|e| OmemError::Internal(format!("list_all failed: {}", e)))?
+        };
+        let mut stores = Vec::new();
+        for tenant in tenants {
+            match self.get_store(&tenant.id).await {
+                Ok(store) => stores.push(store),
+                Err(e) => {
+                    tracing::warn!(tenant_id = %tenant.id, error = %e, "all_stores: skipping tenant");
+                }
+            }
+        }
+        Ok(stores)
     }
 
     /// Weight by space type: personal=1.0 > team=0.8 > org=0.6.

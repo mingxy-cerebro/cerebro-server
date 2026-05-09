@@ -2,6 +2,113 @@ import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
 import type { OmemClient, SearchResult } from "./client.js";
 import type { OmemPluginConfig } from "./config.js";
 import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
+import { logDebug, logError as logErr } from "./logger.js";
+import { readFile } from "node:fs/promises";
+
+const projectNameCache = new Map<string, string>();
+
+async function detectProjectName(rootPath: string): Promise<string | undefined> {
+  const cached = projectNameCache.get(rootPath);
+  if (cached !== undefined) {
+    logDebug("detectProjectName cache hit", { rootPath, result: cached });
+    return cached;
+  }
+
+  let result: string | undefined;
+
+  try {
+    const agents = await readFile(`${rootPath}/AGENTS.md`, "utf-8");
+    const headingMatch = agents.match(/^#\s+(.+)/m);
+    if (headingMatch) {
+      result = headingMatch[1].replace(/\s*\(.*?\)/g, "").trim() || undefined;
+    }
+    logDebug("detectProjectName step1 AGENTS.md", { rootPath, result });
+  } catch {}
+
+  if (!result) {
+    try {
+      const pkg = await readFile(`${rootPath}/package.json`, "utf-8");
+      const nameMatch = pkg.match(/"name"\s*:\s*"([^"]+)"/);
+      if (nameMatch) result = nameMatch[1].trim() || undefined;
+      logDebug("detectProjectName step2 package.json", { rootPath, result });
+    } catch {}
+  }
+
+  if (!result) {
+    try {
+      const cargo = await readFile(`${rootPath}/Cargo.toml`, "utf-8");
+      const inPackage = cargo.replace(/\r\n/g, "\n").split("\n").reduce(
+        (acc, line) => {
+          if (/^\[package\]/.test(line.trim())) return { ...acc, inSection: true };
+          if (/^\[/.test(line.trim())) return { ...acc, inSection: false };
+          if (acc.inSection) {
+            const m = line.match(/name\s*=\s*"([^"]+)"/);
+            if (m) return { ...acc, name: m[1] };
+          }
+          return acc;
+        },
+        { inSection: false, name: undefined as string | undefined },
+      );
+      result = inPackage.name?.trim() || undefined;
+      logDebug("detectProjectName step3 Cargo.toml", { rootPath, result });
+    } catch {}
+  }
+
+  if (!result) {
+    try {
+      const gomod = await readFile(`${rootPath}/go.mod`, "utf-8");
+      const modMatch = gomod.match(/^module\s+(\S+)/m);
+      if (modMatch) {
+        const segments = modMatch[1].split("/");
+        result = segments.pop()?.trim() || undefined;
+      }
+      logDebug("detectProjectName step4 go.mod", { rootPath, result });
+    } catch {}
+  }
+
+  if (!result) {
+    try {
+      const pyproj = await readFile(`${rootPath}/pyproject.toml`, "utf-8");
+      const inProject = pyproj.replace(/\r\n/g, "\n").split("\n").reduce(
+        (acc, line) => {
+          if (/^\[project\]/.test(line.trim())) return { ...acc, inSection: true };
+          if (/^\[/.test(line.trim())) return { ...acc, inSection: false };
+          if (acc.inSection) {
+            const m = line.match(/name\s*=\s*"([^"]+)"/);
+            if (m) return { ...acc, name: m[1] };
+          }
+          return acc;
+        },
+        { inSection: false, name: undefined as string | undefined },
+      );
+      result = inProject.name?.trim() || undefined;
+      logDebug("detectProjectName step5 pyproject.toml", { rootPath, result });
+    } catch {}
+  }
+
+  if (!result) {
+    try {
+      const composer = await readFile(`${rootPath}/composer.json`, "utf-8");
+      const nameMatch = composer.match(/"name"\s*:\s*"([^"]+)"/);
+      if (nameMatch) result = nameMatch[1].trim() || undefined;
+      logDebug("detectProjectName step6 composer.json", { rootPath, result });
+    } catch {}
+  }
+
+  if (!result) {
+    result = rootPath.split("/").pop() || rootPath.split("\\").pop() || undefined;
+    logDebug("detectProjectName step7 fallback dirname", { rootPath, result });
+  }
+
+  if (result) {
+    result = result.trim() || undefined;
+  }
+
+  if (result) {
+    projectNameCache.set(rootPath, result);
+  }
+  return result;
+}
 
 function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs: number = 7000) {
   if (!tui) return;
@@ -304,7 +411,7 @@ export function keywordDetectionHook(_client: OmemClient, _containerTags: string
   };
 }
 
-export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined) {
+export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any) {
   return async (
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
@@ -318,19 +425,40 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
           // Use main session ID for sub-agent sessions so memories merge into the main session
           const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
           const isSubAgent = getMainSessionId?.() && input.sessionID !== getMainSessionId();
+
+          // Detect project name from session info
+          let projectName: string | undefined;
           try {
+            if (sdkClient && input.sessionID) {
+              const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
+              logDebug("compactingHook sessionInfo", { sessionInfo: JSON.stringify(sessionInfo) });
+              logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
+              projectName = sessionInfo?.data?.directory
+                ? await detectProjectName(sessionInfo.data.directory)
+                : undefined;
+              logDebug("compactingHook projectName", { projectName: String(projectName) });
+            }
+          } catch (e) {
+            logErr("compactingHook detectProjectName failed", { error: String(e) });
+          }
+
+          try {
+            logDebug("compactingHook ingestMessages called", { msgCount: messages.length, projectName: String(projectName), sessionId: effectiveSessionId });
             const result = await client.ingestMessages(messages, {
               mode: ingestMode,
               tags: [...containerTags, "auto-capture"],
               sessionId: effectiveSessionId,
-              parentSessionId: isSubAgent ? input.sessionID : undefined,
+              parentSessionId: isSubAgent ? getMainSessionId?.() : undefined,
+              projectName: projectName,
             });
+            logDebug("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
             if (result === null) {
               showToast(tui, "🔴 Archive Failed", "Session archive blocked · check spiritual realm status", "error");
             } else {
               showToast(tui, "📦 Session Archived", `${messages.length} residual dialogues archived · merged into the realm`, "success");
             }
-          } catch {
+          } catch (e) {
+            logErr("compactingHook ingestMessages failed", { error: String(e) });
             showToast(tui, "🔴 Archive Failed", "Session archive blocked · spiritual pulse anomaly", "error");
           }
           sessionMessages.delete(input.sessionID);
@@ -428,21 +556,27 @@ export function sessionIdleHook(
         let projectName: string | undefined;
         try {
           const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
-          sessionTitle = sessionInfo?.title;
-          projectName = sessionInfo?.project?.rootPath
-            ? sessionInfo.project.rootPath.split("/").pop()
+          logDebug("sessionIdleHook sessionInfo", { sessionInfo: JSON.stringify(sessionInfo) });
+          logDebug("sessionIdleHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
+          sessionTitle = sessionInfo?.data?.title;
+          projectName = sessionInfo?.data?.directory
+            ? await detectProjectName(sessionInfo.data.directory)
             : undefined;
+          logDebug("sessionIdleHook projectName", { projectName: String(projectName) });
         } catch (e) {
-          // 获取失败不影响主流程
+          logErr("sessionIdleHook detectProjectName failed", { error: String(e) });
         }
 
         try {
+          logDebug("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, projectName: String(projectName), sessionId: sessionID, title: String(sessionTitle) });
           await omemClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
+          logDebug("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
             processedMessageIds.add(id);
           }
           showToast(tui, "🧠 Memory Sealed", `${conversationMessages.length} dialogues captured · entrusted to the heavens for refinement`, "success");
         } catch (err) {
+          logErr("sessionIdleHook sessionIngest failed", { error: String(err) });
           showToast(tui, "🔴 Session Capture Failed", String(err).substring(0, 100), "error");
         }
       } catch (err) {

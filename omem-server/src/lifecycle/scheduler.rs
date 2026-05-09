@@ -196,7 +196,7 @@ impl LifecycleScheduler {
 
     async fn run_once_inner(&self) -> Result<(), crate::domain::error::OmemError> {
         let tier_manager = TierManager::from_config(self.tier_config.clone(), self.decay_config.clone());
-        let stores = self.store_manager.cached_stores().await;
+        let stores = self.store_manager.all_stores().await?;
 
         if stores.is_empty() {
             return Ok(());

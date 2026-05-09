@@ -54,6 +54,7 @@ async fn main() {
         .init_table()
         .await
         .expect("failed to init tenants table");
+    store_manager.set_tenant_store(tenant_store.clone());
 
     let space_store = Arc::new(
         SpaceStore::new(&system_uri)
@@ -153,6 +154,7 @@ async fn main() {
                 config.forgetting_access_count_protection,
                 config.forgetting_superseded_archive_days,
             )
+            .with_services(state.embed.clone(), Some(state.llm.clone()))
         );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(

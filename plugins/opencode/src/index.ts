@@ -132,7 +132,7 @@ const OmemPlugin: Plugin = async (input) => {
       return recallHook(input, output);
     },
     "chat.message": keywordDetectionHook(omemClient, containerTags, config.autoCaptureThreshold, tui, config.ingestMode),
-    "experimental.session.compacting": compactingHook(omemClient, containerTags, tui, config.ingestMode, isAutoStoreEnabled, () => currentSessionId),
+    "experimental.session.compacting": compactingHook(omemClient, containerTags, tui, config.ingestMode, isAutoStoreEnabled, () => currentSessionId, client),
     tool: buildTools(omemClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
     event: sessionIdleHook(omemClient, containerTags, tui, client, config.ingestMode, config.autoCaptureThreshold, () => currentSessionId, isAutoStoreEnabled, agentId),
     "shell.env": async (_input: any, output: any) => {

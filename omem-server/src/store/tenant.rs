@@ -115,6 +115,26 @@ impl TenantStore {
         Ok(None)
     }
 
+    pub async fn list_all(&self) -> Result<Vec<Tenant>, OmemError> {
+        let batches: Vec<RecordBatch> = self.table
+            .clone()
+            .query()
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("tenant list_all query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("tenant list_all collect failed: {e}")))?;
+
+        let mut tenants = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                tenants.push(Self::row_to_tenant(batch, row)?);
+            }
+        }
+        Ok(tenants)
+    }
+
     fn row_to_tenant(batch: &RecordBatch, row: usize) -> Result<Tenant, OmemError> {
         let get_str = |name: &str| -> Result<String, OmemError> {
             let col = batch

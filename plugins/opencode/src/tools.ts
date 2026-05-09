@@ -32,28 +32,56 @@ export function buildTools(client: OmemClient, containerTags: string[], context:
       description:
         "Store a new memory in the user's long-term memory. " +
         "Use when the user explicitly asks to remember something, " +
-        "or when you identify important preferences, facts, or decisions worth preserving.",
+        "or when you identify important preferences, facts, or decisions worth preserving. " +
+        "IMPORTANT: Before calling, you MUST analyze: (1) Which category fits best? (2) Is this project-specific or cross-project? (3) Does it contain sensitive data? (4) Are tags accurate and descriptive? " +
+        "Every memory MUST have a correct category and at least 1 meaningful tag.",
       args: {
-        content: tool.schema.string().describe("The information to remember"),
+        content: tool.schema.string().describe(
+          "The information to remember. MUST be: atomic (one fact per memory), complete (self-contained without context), and precise (no ambiguity). " +
+          "BAD: 'fixed some bugs'. GOOD: 'Fixed memory_type validation bug in memory.rs:1480 - LLM returns illegal \"pinned\" value, added match guard to normalize to WORK/EMOTIONAL fallback'."
+        ),
         tags: tool.schema
           .array(tool.schema.string())
           .optional()
-          .describe("Optional categorization tags"),
+          .describe(
+            "REQUIRED. At least 1 tag in snake_case. Tags describe the memory's topic/domain for future retrieval. " +
+          "Examples: rust_backend, memory_system, bug_fix, user_preference, project_config. " +
+          "NEVER leave empty — if unsure, use a broad tag like the project name or topic area."
+          ),
         source: tool.schema
           .string()
-          .describe("Origin context, e.g. 'conversation', 'code-review', 'user-input'"),
+          .describe("Origin context, e.g. 'conversation', 'code-review', 'user-input', 'debugging', 'architecture-decision'"),
         scope: tool.schema
           .string()
           .optional()
-          .describe("Memory scope: 'project' (default, only visible in this project) or 'global' (visible across all projects)"),
+          .describe(
+            "'project' (default) = only visible in current project context. 'global' = visible across all projects. " +
+          "Rule: if the memory applies generally (user preferences, general knowledge, cross-project patterns) use 'global'. " +
+          "If it's specific to one project's code/architecture, use 'project'."
+          ),
         visibility: tool.schema
           .string()
           .optional()
-          .describe("Memory visibility: 'global' (default, visible to all agents) or 'private' (only visible to the storing agent). Use 'private' for sensitive data like credentials, personal info, or anything the user wouldn't want shared."),
+          .describe(
+            "'global' (default) = all agents can see and recall this memory. 'private' = ONLY the current agent can see it. " +
+          "MUST use 'private' when content contains: passwords, API keys, tokens, database credentials, SSH keys, personal information (phone, email, address), " +
+          "internal company details, or anything the user would NOT want other agents to access. " +
+          "WARNING: private memories are invisible to ALL other agents — if in doubt, ask the user. " +
+          "Do NOT overuse 'private' for normal work notes — default 'global' is correct for most cases."
+          ),
         category: tool.schema
           .string()
           .optional()
-          .describe("Memory category: 'cases' (default, for work/facts/decisions), 'preferences' (likes/dislikes), 'entities' (projects/tools/people), 'events' (milestones), 'profile' (identity traits), 'patterns' (workflows)"),
+          .describe(
+            "MUST be one of (choose the BEST fit): " +
+          "'cases' (default) = work records, bug fixes, architecture decisions, implementation notes, meeting conclusions; " +
+          "'preferences' = user likes/dislikes, coding style preferences, tool choices (e.g. 'prefers Vim over VSCode'); " +
+          "'entities' = projects, tools, people, concepts — defining what something IS (e.g. 'omem-server: Rust memory backend using LanceDB'); " +
+          "'events' = time-bound milestones (deployments, releases, incidents); " +
+          "'profile' = user identity traits (role, skills, team membership); " +
+          "'patterns' = workflows, methodologies, best practices, recurring solutions. " +
+          "When in doubt, use 'cases'."
+          ),
       },
       async execute(args) {
         const allTags = [...containerTags, ...(args.tags ?? [])];

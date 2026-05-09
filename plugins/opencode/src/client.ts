@@ -21,6 +21,7 @@ export interface IngestOptions {
   parentSessionId?: string;
   entityContext?: string;
   tags?: string[];
+  projectName?: string;
 }
 
 export interface SearchResult {
@@ -128,7 +129,7 @@ export class OmemClient {
 
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
-        logWarn(`${init.method ?? "GET"} ${path} → ${res.status} ${res.statusText}: ${errorBody}`);
+        logWarn("HTTP error", { method: init.method ?? "GET", path, status: res.status, statusText: res.statusText, errorBody });
         throw new Error(`[omem] ${res.status} ${res.statusText}${errorBody ? ": " + errorBody : ""}`);
       }
 
@@ -137,10 +138,10 @@ export class OmemClient {
       return (await res.json()) as T;
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        logWarn(`${init.method ?? "GET"} ${path} timed out`);
+        logWarn("Request timed out", { method: init.method ?? "GET", path, timeoutMs: timeoutMs ?? this.getCfg("requestTimeoutMs", 15000) });
         throw new Error(`[omem] Request timed out (${timeoutMs ?? this.getCfg("requestTimeoutMs", 15000)}ms)`);
       } else {
-        logError(`${init.method ?? "GET"} ${path} failed:`, err);
+        logError("Request failed", { method: init.method ?? "GET", path, error: String(err) });
         throw err;
       }
     } finally {
@@ -242,6 +243,7 @@ export class OmemClient {
       parent_session_id: opts.parentSessionId,
       entity_context: opts.entityContext,
       tags: opts.tags,
+      project_name: opts.projectName,
     });
   }
 

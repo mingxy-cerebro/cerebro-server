@@ -74,6 +74,8 @@ pub struct IngestRequest {
     pub entity_context: Option<String>,
     #[serde(default)]
     pub mode: IngestMode,
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]

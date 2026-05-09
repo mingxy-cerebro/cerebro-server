@@ -37,6 +37,7 @@ impl FactExtractor {
         &self,
         messages: &[IngestMessage],
         entity_context: Option<&str>,
+        project_name: Option<&str>,
     ) -> Result<Vec<ExtractedFact>, OmemError> {
         if messages.is_empty() {
             return Ok(Vec::new());
@@ -50,7 +51,7 @@ impl FactExtractor {
         }
 
         let system = prompts::build_system_prompt(entity_context);
-        let user = prompts::build_user_prompt(&cleaned);
+        let user = prompts::build_user_prompt(&cleaned, project_name);
 
         let result: ExtractionResult = complete_json(self.llm.as_ref(), &system, &user).await?;
 

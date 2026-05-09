@@ -34,6 +34,7 @@ pub struct CreateMemoryBody {
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
     pub entity_context: Option<String>,
+    pub project_name: Option<String>,
 
     // Direct single memory creation
     pub content: Option<String>,
@@ -178,6 +179,10 @@ pub async fn create_memory(
             _ => IngestMode::Smart,
         };
 
+        let project_name = body.project_name.as_deref().map(|name| {
+            name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').take(32).collect::<String>()
+        }).filter(|s| !s.is_empty());
+
         let request = IngestRequest {
             messages: messages
                 .into_iter()
@@ -191,6 +196,7 @@ pub async fn create_memory(
             session_id: body.session_id,
             entity_context: body.entity_context,
             mode,
+            project_name,
         };
 
         let session_store = state
@@ -1303,6 +1309,10 @@ struct SessionTopicSummary {
     topic: String,
     summary: String,
     #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
     tags: Vec<String>,
     #[serde(default = "default_scope")]
     scope: String,
@@ -1349,6 +1359,13 @@ pub async fn session_ingest(
     let parent_session_id = body.parent_session_id.clone();
     let session_key = body.session_id.as_deref().unwrap_or("default").to_string();
     let response_session_id = session_id.clone();
+    let project_name = body.project_name.as_deref().map(|name| {
+        name.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .take(32)
+            .collect::<String>()
+    }).filter(|s| !s.is_empty());
+    tracing::info!(raw_project_name = ?body.project_name, clean_project_name = ?project_name, "session_ingest: project_name received");
 
     // Fire-and-forget: process in background, return 202 immediately
     tokio::spawn(async move {
@@ -1439,6 +1456,7 @@ pub async fn session_ingest(
         let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt_with_memories(
             &conversation,
             combined_summary.as_deref(),
+            project_name.as_deref(),
         );
 
         let topics: Vec<SessionTopicSummary> = match crate::llm::complete_json(
@@ -1475,7 +1493,7 @@ pub async fn session_ingest(
         let mut emotional_original_parent_id: Option<String> = None;
 
         for (i, topic) in topics.iter().enumerate() {
-            let memory_type = topic.memory_type.as_deref().unwrap_or_else(|| {
+            let memory_type_raw = topic.memory_type.as_deref().unwrap_or_else(|| {
                 // Fallback: scope-based only, no category→memory_type promotion
                 // (was: category=preferences auto-promoted to PREFERENCE, causing WORK misclassification)
                 if topic.scope == "private" {
@@ -1484,6 +1502,14 @@ pub async fn session_ingest(
                     "WORK"
                 }
             });
+            // Validate: LLM may return invalid values (e.g. "pinned"). Force to valid set.
+            let memory_type = match memory_type_raw {
+                "EMOTIONAL" | "WORK" | "PREFERENCE" => memory_type_raw,
+                _ => {
+                    tracing::warn!(invalid_memory_type = %memory_type_raw, "LLM returned invalid memory_type, falling back to scope-based");
+                    if topic.scope == "private" { "EMOTIONAL" } else { "WORK" }
+                }
+            };
 
             let category: Category = topic.category.as_deref().and_then(|c| {
                 let normalized = match c.to_lowercase().as_str() {
@@ -1506,18 +1532,25 @@ pub async fn session_ingest(
             } else {
                 topic.summary.clone()
             };
-            let l1_overview = {
-                let s = &summary;
-                if s.chars().count() <= 150 { s.clone() } else {
-                    let truncated: String = s.chars().take(147).collect();
-                    format!("{}...", truncated)
+            // Use overview/detail fields if provided by LLM, otherwise fallback to truncated summary
+            let l1_overview = match &topic.overview {
+                Some(o) if !o.is_empty() => o.clone(),
+                _ => {
+                    let s = &summary;
+                    if s.chars().count() <= 150 { s.clone() } else {
+                        let truncated: String = s.chars().take(147).collect();
+                        format!("{}...", truncated)
+                    }
                 }
             };
-            let l2_content = {
-                let s = &summary;
-                if s.chars().count() <= 500 { s.clone() } else {
-                    let truncated: String = s.chars().take(497).collect();
-                    format!("{}...", truncated)
+            let l2_content = match &topic.detail {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => {
+                    let s = &summary;
+                    if s.chars().count() <= 500 { s.clone() } else {
+                        let truncated: String = s.chars().take(497).collect();
+                        format!("{}...", truncated)
+                    }
                 }
             };
             let tags = {
@@ -1552,18 +1585,30 @@ pub async fn session_ingest(
                 memory.visibility = "private".to_string();
             }
 
-            let apply_append = |mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String]| {
+            let apply_append = |mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String], topic_title: &str, topic_overview: Option<&str>, topic_detail: Option<&str>| {
                 mem.content = new_content.to_string();
-                mem.l0_abstract = new_content.chars().take(200).collect();
-                mem.l1_overview = if new_content.chars().count() <= 150 {
-                    new_content.to_string()
-                } else {
-                    format!("{}...", new_content.chars().take(147).collect::<String>())
+                // Preserve the latest topic title (with project prefix) as l0_abstract
+                mem.l0_abstract = topic_title.to_string();
+                // Use overview/detail fields if provided, otherwise fallback to truncated content
+                mem.l1_overview = match topic_overview {
+                    Some(o) if !o.is_empty() => o.to_string(),
+                    _ => {
+                        if new_content.chars().count() <= 150 {
+                            new_content.to_string()
+                        } else {
+                            format!("{}...", new_content.chars().take(147).collect::<String>())
+                        }
+                    }
                 };
-                mem.l2_content = if new_content.chars().count() <= 500 {
-                    new_content.to_string()
-                } else {
-                    format!("{}...", new_content.chars().take(497).collect::<String>())
+                mem.l2_content = match topic_detail {
+                    Some(d) if !d.is_empty() => d.to_string(),
+                    _ => {
+                        if new_content.chars().count() <= 500 {
+                            new_content.to_string()
+                        } else {
+                            format!("{}...", new_content.chars().take(497).collect::<String>())
+                        }
+                    }
                 };
                 for tag in tags {
                     if !mem.tags.contains(tag) {
@@ -1581,7 +1626,7 @@ pub async fn session_ingest(
                 if let Some(mut existing) = existing_emotional.clone() {
                     let new_content = format!("{}{}", existing.content, append_section);
                     if new_content.chars().count() <= 3000 {
-                        apply_append(&mut existing, &new_content, &topic.tags);
+                        apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
                         if let Err(e) = store.update(&existing, None).await {
                             tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
                         } else {
@@ -1609,7 +1654,7 @@ pub async fn session_ingest(
                         for mut mem in loaded {
                             let new_content = format!("{}{}", mem.content, append_section);
                             if new_content.chars().count() <= 3000 {
-                                apply_append(&mut mem, &new_content, &topic.tags);
+                                apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
                                 if let Err(e) = store.update(&mem, None).await {
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback emotional memory");
                                     continue;
@@ -1636,14 +1681,51 @@ pub async fn session_ingest(
 
             if memory_type == "WORK" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
-                let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
+                let section_header = format!("## {} {}", today, topic.topic);
+                let section_body = summary.clone();
 
                 let mut appended = false;
 
                 if let Some(mut existing) = existing_work_memory.clone() {
-                    let new_content = format!("{}{}", existing.content, append_section);
+                    // Smart dedup: if same topic header pattern exists, replace it; otherwise append
+                    // Use exact suffix match to avoid substring false positives (e.g. "修复bug" matching "修复bug导致的新问题")
+                    let new_content = {
+                        let topic_marker = &topic.topic;
+                        if existing.content.contains(topic_marker) {
+                            // Find and replace the section that contains this topic
+                            let mut replaced = false;
+                            let mut result = String::new();
+                            let mut in_matching_section = false;
+                            for line in existing.content.lines() {
+                                // Use ends_with for precise match: "## 2025-05-09 修复bug" ends_with "修复bug"
+                                // This avoids false positives like "修复bug导致的新问题"
+                                if line.starts_with("## ") && line.ends_with(topic_marker) {
+                                    in_matching_section = true;
+                                    result.push_str(&format!("\n\n{}", section_header));
+                                    result.push('\n');
+                                    result.push_str(&section_body);
+                                    replaced = true;
+                                    continue;
+                                }
+                                if in_matching_section && line.starts_with("## ") {
+                                    in_matching_section = false;
+                                }
+                                if !in_matching_section {
+                                    if !result.is_empty() && !result.ends_with('\n') {
+                                        result.push('\n');
+                                    }
+                                    result.push_str(line);
+                                }
+                            }
+                            if replaced { result } else {
+                                format!("{}\n\n{}\n{}", existing.content, section_header, section_body)
+                            }
+                        } else {
+                            format!("{}\n\n{}\n{}", existing.content, section_header, section_body)
+                        }
+                    };
                     if new_content.chars().count() <= 3000 {
-                        apply_append(&mut existing, &new_content, &topic.tags);
+                        apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
                         if let Err(e) = store.update(&existing, None).await {
                             tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
                         } else {
@@ -1669,9 +1751,9 @@ pub async fn session_ingest(
                         loaded.sort_by_key(|m| m.content.chars().count());
 
                         for mut mem in loaded {
-                            let new_content = format!("{}{}", mem.content, append_section);
+                            let new_content = format!("{}\n\n{}\n{}", mem.content, section_header, section_body);
                             if new_content.chars().count() <= 3000 {
-                                apply_append(&mut mem, &new_content, &topic.tags);
+                                apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
                                 if let Err(e) = store.update(&mem, None).await {
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback WORK memory");
                                     continue;
@@ -1839,6 +1921,14 @@ pub async fn session_ingest(
                 return;
             }
             stored += 1;
+
+            // ── Update existing_* so subsequent topics in same batch can append ──
+            if memory_type == "WORK" {
+                existing_work_memory = Some(memory.clone());
+            }
+            if memory_type == "EMOTIONAL" {
+                existing_emotional = Some(memory.clone());
+            }
 
             // ── Add continued_by reverse relation on parent (bidirectional link) ──
             async fn add_continued_by_relation(

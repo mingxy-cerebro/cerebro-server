@@ -8,10 +8,14 @@ pub fn build_system_prompt(entity_context: Option<&str>) -> String {
     prompt
 }
 
-pub fn build_user_prompt(conversation_text: &str) -> String {
-    format!(
+pub fn build_user_prompt(conversation_text: &str, project_name: Option<&str>) -> String {
+    let mut prompt = format!(
         "Extract all distinct, atomic facts from the following conversation:\n\n{conversation_text}"
-    )
+    );
+    if let Some(name) = project_name {
+        prompt.push_str(&format!("\n\n**Project Prefix Rule**: Each extracted fact's summary MUST be prefixed with [{}]. For example: \"[{}] fix memory leak\". For CJK topics: \"修复内存泄漏\" → \"[{}] 修复内存泄漏\".", name, name, name));
+    }
+    prompt
 }
 
 use crate::domain::memory::Memory;
@@ -775,9 +779,12 @@ When deciding between WORK and PREFERENCE:
 
 ### WORK (scope "public", category auto-detect)
 - Technical decisions, code changes, architecture, project details, business models.
-- **DENOISE**: Keep conclusions, omit verbose intermediate steps.
-- **MERGE**: You MUST group related work topics into one entry. Do NOT split naturally connected topics across multiple entries. Split only when summary would exceed 500 chars.
+- **DENOISE**: Keep conclusions, omit verbose intermediate steps. Drop file line numbers, version numbers, and process trivia.
+- **MERGE**: You MUST group ALL work from the SAME debugging/development session into one entry. "Same session" = same bug investigation, same feature implementation, or same architectural decision chain (diagnose → locate → fix → test → deploy). Do NOT split these into separate entries.
+- **UPSERT**: When "## Existing Memories" section contains a memory about the SAME topic, produce ONE updated entry that merges old + new information. Do NOT create a duplicate.
+- **TIMELINE**: For merged WORK entries, preserve chronological order using `## YYYY-MM-DD HH:MM Title` section headers within the summary.
 - **TAG**: Include project name + sub-topic as tags from the ALLOWED_TAGS list (e.g., "programming", "architecture").
+- **SECTION TITLE REUSE**: When updating an existing memory, if the Existing Memories above already contain a `## YYYY-MM-DD HH:MM [topic]` section about the SAME technical topic, you MUST reuse that exact section title (including the project prefix) as your `topic` field. Do NOT invent a new title for the same topic.
 
 **WORK OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
 For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
@@ -875,14 +882,18 @@ Return ONLY valid JSON array. Each element:
 {
   "topic": string,
   "summary": string,
+  "overview": string,
+  "detail": string,
   "tags": string[],
   "scope": "public"|"private",
   "category": string,
   "memory_type": "EMOTIONAL"|"WORK"|"PREFERENCE"
 }
 
-- "topic": Short title (1 sentence).
-- "summary": WORK and PREFERENCE must use structured Markdown format (## Title + key-value pairs). EMOTIONAL ≤500 chars, WORK ≤500 chars, PREFERENCE ≤500 chars.
+- "topic": Short title (1 sentence) → maps to l0_abstract.
+- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: structured 2-3 line summary with key conclusions. For EMOTIONAL/PREFERENCE: brief gist.
+- "detail": Structured narrative in ≤500 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL/PREFERENCE: expanded narrative.
+- "summary": Full content → maps to content. WORK ≤800 chars, EMOTIONAL ≤500 chars, PREFERENCE ≤500 chars. WORK must use structured Markdown format.
 - "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
 - "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
 - "category": WORK → pick from 6 categories above. PREFERENCE → always "preferences". EMOTIONAL → pick best fit.
@@ -924,10 +935,10 @@ Return [] if no clear preferences found.
 /// Extracts independent facts without referencing old summaries.
 /// Backward-compatible wrapper: calls [`build_session_extract_prompt_with_memories`] with `None`.
 pub fn build_session_extract_prompt(conversation: &str) -> (String, String) {
-    build_session_extract_prompt_with_memories(conversation, None)
+    build_session_extract_prompt_with_memories(conversation, None, None)
 }
 
-/// Build the session extract prompt with optional existing memory summaries.
+/// Build the session extract prompt with optional existing memory summaries and project name.
 ///
 /// When `existing_memories_summary` is provided, includes a `## Existing Memories` section
 /// in the user prompt so the LLM can avoid duplicating or can enrich previously stored facts.
@@ -935,14 +946,28 @@ pub fn build_session_extract_prompt(conversation: &str) -> (String, String) {
 /// # Arguments
 /// * `conversation` - The formatted conversation text to extract from
 /// * `existing_memories_summary` - Optional summary of existing memories (max ~2000 chars recommended)
+/// * `project_name` - Optional project name for prefix injection
 ///
 /// # Returns
 /// A `(system_prompt, user_prompt)` tuple for the LLM call.
 pub fn build_session_extract_prompt_with_memories(
     conversation: &str,
     existing_memories_summary: Option<&str>,
+    project_name: Option<&str>,
 ) -> (String, String) {
-    let system = format!("{SESSION_EXTRACT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}");
+    let project_prefix_instruction = if let Some(name) = project_name {
+        format!(
+            "\n**Project Prefix Rule**: 
+1. The `topic` field MUST be prefixed with [{name}]. Example: \"[{name}] fix memory leak\"
+2. The `overview` field MUST be prefixed with [{name}]. Example: \"[{name}] 修复内存泄漏的摘要\"
+3. The `detail` field MUST be prefixed with [{name}]. Example: \"[{name}] 修复内存泄漏的详细过程\"
+4. The `summary` field's `## Title` line MUST also be prefixed with [{name}]. Example: \"## [{name}] 修复内存泄漏\""
+        )
+    } else {
+        String::new()
+    };
+
+    let system = format!("{SESSION_EXTRACT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}{project_prefix_instruction}");
 
     let existing_section = match existing_memories_summary {
         Some(summary) if !summary.is_empty() => {
@@ -1012,6 +1037,7 @@ mod session_extract_tests {
         let (system, user) = build_session_extract_prompt_with_memories(
             "New conversation",
             Some("旧记忆摘要内容"),
+            None,
         );
         assert!(!system.is_empty());
         assert!(user.contains("## Existing Memories"));
@@ -1026,6 +1052,7 @@ mod session_extract_tests {
         let (system, user) = build_session_extract_prompt_with_memories(
             "Test conversation",
             None,
+            None,
         );
         assert!(!system.is_empty());
         assert!(!user.contains("## Existing Memories"));
@@ -1037,6 +1064,7 @@ mod session_extract_tests {
         let (_, user) = build_session_extract_prompt_with_memories(
             "Test conversation",
             Some(""),
+            None,
         );
         assert!(!user.contains("## Existing Memories"));
     }
@@ -1044,7 +1072,7 @@ mod session_extract_tests {
     #[test]
     fn test_backward_compat_wrapper() {
         let (s1, u1) = build_session_extract_prompt("conversation text");
-        let (s2, u2) = build_session_extract_prompt_with_memories("conversation text", None);
+        let (s2, u2) = build_session_extract_prompt_with_memories("conversation text", None, None);
         assert_eq!(s1, s2);
         assert_eq!(u1, u2);
     }

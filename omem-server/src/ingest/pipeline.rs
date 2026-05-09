@@ -136,6 +136,7 @@ impl IngestPipeline {
         let embed = self.embed.clone();
         let entity_context = request.entity_context.clone();
         let tenant_id = request.tenant_id.clone();
+        let project_name = request.project_name.clone();
         let bg_task_id = task_id.clone();
         let ingest_sem = self.ingest_semaphore.clone();
 
@@ -168,7 +169,7 @@ impl IngestPipeline {
             }
 
             let facts = match extractor
-                .extract(&sanitized, entity_context.as_deref())
+                .extract(&sanitized, entity_context.as_deref(), project_name.as_deref())
                 .await
             {
                 Ok(f) => f,
@@ -558,6 +559,7 @@ mod tests {
             session_id: Some("sess-test".to_string()),
             entity_context: None,
             mode,
+            project_name: None,
         }
     }
 
@@ -740,6 +742,7 @@ mod tests {
             session_id: None,
             entity_context: None,
             mode: IngestMode::Smart,
+            project_name: None,
         };
 
         let result = pipeline.ingest(request).await;
@@ -761,6 +764,7 @@ mod tests {
             session_id: None,
             entity_context: None,
             mode: IngestMode::Raw,
+            project_name: None,
         };
 
         let response = pipeline.ingest(request).await.expect("ingest");

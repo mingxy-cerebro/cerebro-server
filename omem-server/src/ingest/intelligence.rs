@@ -250,7 +250,7 @@ impl IntelligenceTask {
                 content: chunk.to_string(),
             }];
 
-            match self.extractor.extract(&messages, None).await {
+            match self.extractor.extract(&messages, None, None).await {
                 Ok(mut facts) => {
                     for fact in &mut facts {
                         fact.source_text = Some(chunk.to_string());
