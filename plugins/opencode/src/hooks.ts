@@ -304,7 +304,7 @@ export function keywordDetectionHook(_client: OmemClient, _containerTags: string
   };
 }
 
-export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean) {
+export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined) {
   return async (
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
@@ -315,11 +315,15 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
         if (messages.length > 0) {
+          // Use main session ID for sub-agent sessions so memories merge into the main session
+          const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
+          const isSubAgent = getMainSessionId?.() && input.sessionID !== getMainSessionId();
           try {
             const result = await client.ingestMessages(messages, {
               mode: ingestMode,
               tags: [...containerTags, "auto-capture"],
-              sessionId: input.sessionID,
+              sessionId: effectiveSessionId,
+              parentSessionId: isSubAgent ? input.sessionID : undefined,
             });
             if (result === null) {
               showToast(tui, "🔴 Archive Failed", "Session archive blocked · check spiritual realm status", "error");

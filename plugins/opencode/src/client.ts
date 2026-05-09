@@ -18,6 +18,7 @@ export interface IngestOptions {
   mode?: "smart" | "raw";
   agentId?: string;
   sessionId?: string;
+  parentSessionId?: string;
   entityContext?: string;
   tags?: string[];
 }
@@ -238,6 +239,7 @@ export class OmemClient {
       mode: opts.mode ?? "smart",
       agent_id: opts.agentId,
       session_id: opts.sessionId,
+      parent_session_id: opts.parentSessionId,
       entity_context: opts.entityContext,
       tags: opts.tags,
     });
@@ -368,6 +370,7 @@ export class OmemClient {
     agentId?: string,
     sessionTitle?: string,
     projectName?: string,
+    parentSessionId?: string,
   ): Promise<unknown> {
     return this.post("/v1/memories/session-ingest", {
       messages,
@@ -375,6 +378,7 @@ export class OmemClient {
       agent_id: agentId,
       session_title: sessionTitle,
       project_name: projectName,
+      parent_session_id: parentSessionId,
     }, 60000);
   }
 }

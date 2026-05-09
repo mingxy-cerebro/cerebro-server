@@ -228,6 +228,7 @@ fn make_shared_copy(source: &Memory, target_space: &str, user_id: &str, agent_id
         scope: source.scope.clone(),
         agent_id: source.agent_id.clone(),
         session_id: source.session_id.clone(),
+        parent_session_id: source.parent_session_id.clone(),
         tenant_id: source.tenant_id.clone(),
         source: source.source.clone(),
         relations: source.relations.clone(),
