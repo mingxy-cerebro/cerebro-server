@@ -330,7 +330,8 @@ impl LanceStore {
             .flat_map(|idx| idx.columns.clone())
             .collect();
 
-        let btree_cols = ["tenant_id", "session_id", "parent_session_id", "created_at"];
+        // session_recalls table does NOT have parent_session_id — only tenant_id, session_id, created_at
+        let btree_cols = ["tenant_id", "session_id", "created_at"];
         for col in btree_cols {
             if !indexed_columns.contains(col) {
                 table.create_index(&[col], Index::BTree(BTreeIndexBuilder::default()))
