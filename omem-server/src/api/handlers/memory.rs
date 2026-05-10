@@ -1624,15 +1624,35 @@ pub async fn session_ingest(
                 let mut appended = false;
 
                 if let Some(mut existing) = existing_emotional.clone() {
-                    let new_content = format!("{}{}", existing.content, append_section);
-                    if new_content.chars().count() <= 3000 {
-                        apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
-                        if let Err(e) = store.update(&existing, None).await {
-                            tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
+                    // Topic-aware matching: append if same topic OR same session
+                    // (LLM may give different topic names to the same session's content)
+                    let topic_matches = existing.content.lines().any(|line| {
+                        line.starts_with("## ") && line.ends_with(&topic.topic)
+                    }) || existing.l0_abstract == topic.topic
+                      || existing.session_id.as_deref() == session_id.as_deref();
+                    if !topic_matches {
+                        tracing::info!(
+                            existing_id = %existing.id,
+                            existing_topic = %existing.l0_abstract,
+                            new_topic = %topic.topic,
+                            "session_ingest: EMOTIONAL topic mismatch, creating new memory"
+                        );
+                    } else if existing.content.contains(&summary) {
+                            tracing::info!(
+                                memory_id = %existing.id,
+                                "session_ingest: skipping EMOTIONAL append, content already exists"
+                            );
                         } else {
-                            tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing emotional memory");
-                            existing_emotional = Some(existing);
-                            appended = true;
+                        let new_content = format!("{}{}", existing.content, append_section);
+                        if new_content.chars().count() <= 3000 {
+                            apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                            if let Err(e) = store.update(&existing, None).await {
+                                tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
+                            } else {
+                                tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing emotional memory (same topic)");
+                                existing_emotional = Some(existing);
+                                appended = true;
+                            }
                         }
                     }
                 }
@@ -1649,6 +1669,11 @@ pub async fn session_ingest(
                                 loaded.push(mem);
                             }
                         }
+                        loaded.retain(|m| {
+                            m.content.lines().any(|line| line.starts_with("## ") && line.ends_with(&topic.topic))
+                                || m.l0_abstract == topic.topic
+                                || m.session_id.as_deref() == session_id.as_deref()
+                        });
                         loaded.sort_by_key(|m| m.content.chars().count());
 
                         for mut mem in loaded {
@@ -1659,7 +1684,7 @@ pub async fn session_ingest(
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback emotional memory");
                                     continue;
                                 }
-                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback emotional memory (shortest fit)");
+                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback emotional memory (same topic, shortest fit)");
                                 existing_emotional = Some(mem);
                                 appended = true;
                                 break;
@@ -1670,7 +1695,7 @@ pub async fn session_ingest(
                         if emotional_original_parent_id.is_none() {
                             emotional_original_parent_id = existing_emotional.as_ref().map(|m| m.id.clone());
                         }
-                        tracing::info!("session_ingest: all emotional memories exceeded limit, creating new");
+                        tracing::info!(topic = %topic.topic, "session_ingest: no matching emotional memory for topic, creating new");
                     }
                 }
 
@@ -1687,18 +1712,23 @@ pub async fn session_ingest(
                 let mut appended = false;
 
                 if let Some(mut existing) = existing_work_memory.clone() {
-                    // Smart dedup: if same topic header pattern exists, replace it; otherwise append
-                    // Use exact suffix match to avoid substring false positives (e.g. "修复bug" matching "修复bug导致的新问题")
-                    let new_content = {
-                        let topic_marker = &topic.topic;
-                        if existing.content.contains(topic_marker) {
-                            // Find and replace the section that contains this topic
+                    let topic_marker = &topic.topic;
+                    let has_matching_section = existing.content.lines()
+                        .any(|line| line.starts_with("## ") && line.ends_with(topic_marker))
+                        || existing.session_id.as_deref() == session_id.as_deref();
+
+                    if !has_matching_section {
+                        tracing::info!(
+                            existing_id = %existing.id,
+                            new_topic = %topic.topic,
+                            "session_ingest: WORK topic mismatch, creating new memory"
+                        );
+                    } else {
+                        let new_content = {
                             let mut replaced = false;
                             let mut result = String::new();
                             let mut in_matching_section = false;
                             for line in existing.content.lines() {
-                                // Use ends_with for precise match: "## 2025-05-09 修复bug" ends_with "修复bug"
-                                // This avoids false positives like "修复bug导致的新问题"
                                 if line.starts_with("## ") && line.ends_with(topic_marker) {
                                     in_matching_section = true;
                                     result.push_str(&format!("\n\n{}", section_header));
@@ -1717,21 +1747,25 @@ pub async fn session_ingest(
                                     result.push_str(line);
                                 }
                             }
-                            if replaced { result } else {
+                            if replaced { result } else if existing.content.contains(&section_body) {
+                                tracing::info!(
+                                    memory_id = %existing.id,
+                                    "session_ingest: skipping WORK append, content already exists"
+                                );
+                                existing.content.clone()
+                            } else {
                                 format!("{}\n\n{}\n{}", existing.content, section_header, section_body)
                             }
-                        } else {
-                            format!("{}\n\n{}\n{}", existing.content, section_header, section_body)
-                        }
-                    };
-                    if new_content.chars().count() <= 3000 {
-                        apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
-                        if let Err(e) = store.update(&existing, None).await {
-                            tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
-                        } else {
-                            tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing WORK memory");
-                            existing_work_memory = Some(existing);
-                            appended = true;
+                        };
+                        if new_content.chars().count() <= 3000 {
+                            apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                            if let Err(e) = store.update(&existing, None).await {
+                                tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
+                            } else {
+                                tracing::info!(memory_id = %existing.id, "session_ingest: updated WORK memory (same topic)");
+                                existing_work_memory = Some(existing);
+                                appended = true;
+                            }
                         }
                     }
                 }
@@ -1748,6 +1782,12 @@ pub async fn session_ingest(
                                 loaded.push(mem);
                             }
                         }
+                        let topic_marker = &topic.topic;
+                        loaded.retain(|m| {
+                            m.content.lines().any(|line| line.starts_with("## ") && line.ends_with(topic_marker.as_str()))
+                                || m.l0_abstract == *topic_marker
+                                || m.session_id.as_deref() == session_id.as_deref()
+                        });
                         loaded.sort_by_key(|m| m.content.chars().count());
 
                         for mut mem in loaded {
@@ -1758,7 +1798,7 @@ pub async fn session_ingest(
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback WORK memory");
                                     continue;
                                 }
-                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback WORK memory (shortest fit)");
+                                tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback WORK memory (same topic, shortest fit)");
                                 existing_work_memory = Some(mem);
                                 appended = true;
                                 break;
@@ -1769,7 +1809,7 @@ pub async fn session_ingest(
                         if work_original_parent_id.is_none() {
                             work_original_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
                         }
-                        tracing::info!("session_ingest: all WORK memories exceeded limit, creating new");
+                        tracing::info!(topic = %topic.topic, "session_ingest: no matching WORK memory for topic, creating new");
                     }
                 }
 

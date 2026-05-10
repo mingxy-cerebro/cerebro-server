@@ -959,6 +959,25 @@ fn parse_paragraphs(content: &str) -> Vec<Paragraph> {
     paragraphs
 }
 
+/// Strip a leading `YYYY-MM-DD HH:MM ` timestamp prefix from a heading text.
+/// Returns the heading with `## ` prefix removed, then the timestamp prefix removed.
+/// e.g. "## 2025-05-09 14:00 修复bug" → "修复bug"
+fn strip_timestamp_prefix(heading: &str) -> &str {
+    let text = heading.trim_start_matches("## ").trim();
+    // Pattern: YYYY-MM-DD HH:MM followed by a space
+    if text.len() > 16
+        && text.as_bytes().get(4) == Some(&b'-')
+        && text.as_bytes().get(7) == Some(&b'-')
+        && text.as_bytes().get(10) == Some(&b' ')
+        && text.as_bytes().get(13) == Some(&b':')
+        && text.as_bytes().get(16) == Some(&b' ')
+    {
+        &text[17..]
+    } else {
+        text
+    }
+}
+
 fn heading_sort_key(heading: &str) -> String {
     heading
         .get(3..13)
@@ -1006,7 +1025,7 @@ fn paragraph_diff_merge(existing_content: &str, new_content: &str) -> String {
             if p.heading.is_empty() {
                 return false;
             }
-            if p.heading == new_p.heading {
+            if strip_timestamp_prefix(&p.heading) == strip_timestamp_prefix(&new_p.heading) {
                 return true;
             }
             let existing_head = p.heading.trim_start_matches("## ").trim();
@@ -1015,6 +1034,7 @@ fn paragraph_diff_merge(existing_content: &str, new_content: &str) -> String {
         });
 
         if let Some(idx) = match_idx {
+            merged[idx].heading = new_p.heading.clone();
             if new_p.body.len() > merged[idx].body.len() {
                 merged[idx].body = new_p.body.clone();
             }

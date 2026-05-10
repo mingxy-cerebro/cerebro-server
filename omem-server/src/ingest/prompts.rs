@@ -433,7 +433,7 @@ Examples to EXTRACT: "User prefers dark mode", "Project uses Rust+React", "User 
 
 ## Output Format
 Return ONLY valid JSON:
-{"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."],"confidence":N}]}
+{"memories": [{"l0_abstract":"...","l1_overview":"...","l2_content":"...","category":"...","tags":["..."],"confidence":N,"why":"..."}]}
 
 - "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 - `confidence` is REQUIRED for each fact. Rate 1-5:
@@ -443,13 +443,14 @@ Return ONLY valid JSON:
   - 2 = Low value — generic, vague, or likely ephemeral
   - 1 = Trivial — greetings, meta-info, system logs, etc.
 - Facts with confidence < 3 will be discarded. Do not output them.
+- `why`: Brief rationale explaining why this memory is worth preserving and how it connects to existing knowledge.
 
 ## Examples
 
 ### Example 1 — Profile (Chinese Input → Chinese Output)
 User says: "我是Stripe的后端工程师，在支付团队工作。"
 ```json
-{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["business-logic"], "confidence": 4}]}
+{"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["business-logic"], "confidence": 4, "why": "Professional identity is stable and affects future technical context."}]}
 ```
 
 ### Example 2 — Preference (Chinese Input → Chinese Output with PREFERENCE format)
@@ -462,14 +463,22 @@ NOTE: For category="preferences", all three layers use structured Markdown forma
 - **类型**: static
 ```
 ```json
-{"memories": [{"l0_abstract": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l1_overview": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l2_content": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "category": "preferences", "tags": ["programming", "languages"], "confidence": 4}]}
+{"memories": [{"l0_abstract": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l1_overview": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l2_content": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "category": "preferences", "tags": ["programming", "languages"], "confidence": 4, "why": "Stable language preference affects code generation and project setup decisions."}]}
 ```
 
 ### Example 3 — Case with Private Content (Chinese Input → Chinese Output + 私密标签)
 User says: "我的服务器IP是47.93.199.242，root密码是Mengfanbo@0714，部署了omem服务。"
 ```json
-{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["infrastructure", "私密"], "confidence": 3}]}
+{"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["infrastructure", "私密"], "confidence": 3, "why": "Server infrastructure ownership is durable and relevant for future deployment tasks."}]}
 ```
+
+## ACTIONABLE_RULES
+When extracting memories, apply these rules to maximize quality and future utility:
+
+1. **Conflict & Overlap Detection**: If a new fact overlaps with or contradicts a known existing memory, note the difference explicitly in l2_content. Example: "Previously user preferred Vim, now prefers VS Code."
+2. **Time-Sensitive Marking**: Flag information with built-in expiration — version numbers, deadlines, temporary states — by including the time context in l2_content. Example: "Using React 19 (as of 2025-05)".
+3. **Language Fidelity**: Preserve the user's original language exactly. Do not translate, paraphrase across languages, or mix languages in text fields. Chinese input → Chinese output, always.
+4. **Actionable Over Vague**: Prefer specific, actionable details over generic descriptions. "User deploys with Docker Compose on Ubuntu 22.04" > "User uses containers".
 "###;
 
 const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a comprehensive title and summary for a cluster of related memories.
@@ -663,7 +672,7 @@ When ANY of the following appears in the conversation, the entry MUST have scope
 - Role-play or fantasy scenarios with intimate undertones
 When in doubt → scope "private". ONLY use scope "public" for purely technical/academic content.
 ## MARKDOWN FORMAT (MANDATORY): The summary field MUST use Markdown formatting:
-- Use ## headers to organize sections
+- Use ### headers to organize sections (NOTE: the system wraps each section with ## timestamp+topic, so use ### for sub-headings to avoid double ## heading nesting)
 - Use - bullet lists for enumerations
 - Use **bold** for key terms, file paths, function names
 - Use `backticks` for code references
