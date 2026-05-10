@@ -19,7 +19,6 @@ const SESSION_TABLE: &str = "sessions";
 pub struct SessionMessage {
     pub id: String,
     pub session_id: String,
-    pub parent_session_id: Option<String>,
     pub agent_id: String,
     pub role: String,
     pub content: String,
@@ -39,7 +38,6 @@ impl SessionMessage {
         Self {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
-            parent_session_id: None,
             agent_id: agent_id.to_string(),
             role: role.to_string(),
             content: content.to_string(),
@@ -119,7 +117,6 @@ impl SessionStore {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("session_id", DataType::Utf8, false),
-            Field::new("parent_session_id", DataType::Utf8, true),
             Field::new("agent_id", DataType::Utf8, false),
             Field::new("role", DataType::Utf8, false),
             Field::new("content", DataType::Utf8, false),
@@ -163,8 +160,8 @@ impl SessionStore {
     pub async fn count_by_session(&self, session_id: &str) -> Result<usize, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let batches: Vec<RecordBatch> = table
             .query()
@@ -225,8 +222,8 @@ impl SessionStore {
     ) -> Result<Vec<SessionMessage>, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let batches: Vec<RecordBatch> = table
             .query()
@@ -244,8 +241,8 @@ impl SessionStore {
     pub async fn delete_by_session_id(&self, session_id: &str) -> Result<usize, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
 
         let batches: Vec<RecordBatch> = table
@@ -328,14 +325,9 @@ impl SessionStore {
 
             for i in 0..batch.num_rows() {
                 let tags: Vec<String> = serde_json::from_str(tags_col.value(i)).unwrap_or_default();
-                let parent_session_id = batch
-                    .column_by_name("parent_session_id")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-                    .and_then(|arr| if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) });
                 messages.push(SessionMessage {
                     id: ids.value(i).to_string(),
                     session_id: session_ids.value(i).to_string(),
-                    parent_session_id,
                     agent_id: agent_ids.value(i).to_string(),
                     role: roles.value(i).to_string(),
                     content: contents.value(i).to_string(),
@@ -351,7 +343,6 @@ impl SessionStore {
     fn messages_to_batch(messages: &[&SessionMessage]) -> Result<RecordBatch, OmemError> {
         let ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
         let session_ids: Vec<&str> = messages.iter().map(|m| m.session_id.as_str()).collect();
-        let parent_session_ids: Vec<Option<&str>> = messages.iter().map(|m| m.parent_session_id.as_deref()).collect();
         let agent_ids: Vec<&str> = messages.iter().map(|m| m.agent_id.as_str()).collect();
         let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
         let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
@@ -372,7 +363,6 @@ impl SessionStore {
             vec![
                 Arc::new(StringArray::from(ids)),
                 Arc::new(StringArray::from(session_ids)),
-                Arc::new(StringArray::from(parent_session_ids)),
                 Arc::new(StringArray::from(agent_ids)),
                 Arc::new(StringArray::from(roles)),
                 Arc::new(StringArray::from(contents)),
@@ -592,7 +582,6 @@ mod tests {
         let msg_a = SessionMessage {
             id: Uuid::new_v4().to_string(),
             session_id: "import-task-a".to_string(),
-            parent_session_id: None,
             agent_id: String::new(),
             role: "import".to_string(),
             content: "shared content".to_string(),
@@ -604,7 +593,6 @@ mod tests {
         let msg_b = SessionMessage {
             id: Uuid::new_v4().to_string(),
             session_id: "import-task-b".to_string(),
-            parent_session_id: None,
             agent_id: String::new(),
             role: "import".to_string(),
             content: "shared content".to_string(),
@@ -656,7 +644,6 @@ mod tests {
         let msg = SessionMessage {
             id: Uuid::new_v4().to_string(),
             session_id: "import-task-1".to_string(),
-            parent_session_id: None,
             agent_id: String::new(),
             role: "import".to_string(),
             content: "some content".to_string(),

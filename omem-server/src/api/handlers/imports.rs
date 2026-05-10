@@ -162,7 +162,6 @@ pub async fn create_import(
     let session_msg = SessionMessage {
         id: Uuid::new_v4().to_string(),
         session_id: import_session_id,
-        parent_session_id: None,
         agent_id: agent_id.clone().unwrap_or_default(),
         role: "import".to_string(),
         content,

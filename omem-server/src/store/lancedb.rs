@@ -330,7 +330,7 @@ impl LanceStore {
             .flat_map(|idx| idx.columns.clone())
             .collect();
 
-        // session_recalls table does NOT have parent_session_id — only tenant_id, session_id, created_at
+        // session_recalls table — only tenant_id, session_id, created_at
         let btree_cols = ["tenant_id", "session_id", "created_at"];
         for col in btree_cols {
             if !indexed_columns.contains(col) {
@@ -437,7 +437,6 @@ impl LanceStore {
             Field::new("scope", DataType::Utf8, false),
             Field::new("agent_id", DataType::Utf8, true),
             Field::new("session_id", DataType::Utf8, true),
-            Field::new("parent_session_id", DataType::Utf8, true),
             Field::new("tenant_id", DataType::Utf8, false),
             Field::new("source", DataType::Utf8, true),
             Field::new("relations", DataType::Utf8, false),
@@ -746,7 +745,6 @@ impl LanceStore {
                 Arc::new(StringArray::from(vec![memory.scope.as_str()])),
                 Arc::new(StringArray::from(vec![option_str(&memory.agent_id)])),
                 Arc::new(StringArray::from(vec![option_str(&memory.session_id)])),
-                Arc::new(StringArray::from(vec![option_str(&memory.parent_session_id)])),
                 Arc::new(StringArray::from(vec![memory.tenant_id.as_str()])),
                 Arc::new(StringArray::from(vec![option_str(&memory.source)])),
                 Arc::new(StringArray::from(vec![relations_json.as_str()])),
@@ -919,7 +917,6 @@ impl LanceStore {
             scope: get_str("scope")?,
             agent_id: get_opt_str("agent_id")?,
             session_id: get_opt_str("session_id")?,
-            parent_session_id: get_opt_str("parent_session_id")?,
             tenant_id: get_str("tenant_id")?,
             source: get_opt_str("source")?,
             relations,
@@ -984,8 +981,8 @@ impl LanceStore {
     ) -> Result<Vec<Memory>, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let batches: Vec<RecordBatch> = table
             .query()
@@ -1013,8 +1010,8 @@ impl LanceStore {
     ) -> Result<Vec<Memory>, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let batches: Vec<RecordBatch> = table
             .query()
@@ -1046,8 +1043,8 @@ impl LanceStore {
 
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let batches: Vec<RecordBatch> = table
             .query()
@@ -1119,8 +1116,8 @@ impl LanceStore {
     pub async fn count_memories_by_session(&self, session_id: &str) -> Result<usize, OmemError> {
         let table = self.table.clone();
         let filter = format!(
-            "(session_id = '{}' OR parent_session_id = '{}')",
-            escape_sql(session_id), escape_sql(session_id)
+            "session_id = '{}'",
+            escape_sql(session_id)
         );
         let count = table
             .count_rows(Some(filter))
@@ -1312,7 +1309,6 @@ impl LanceStore {
                 .column("scope", sql_str(&mem.scope))
                 .column("agent_id", sql_opt_str(&mem.agent_id))
                 .column("session_id", sql_opt_str(&mem.session_id))
-                .column("parent_session_id", sql_opt_str(&mem.parent_session_id))
                 .column("tenant_id", sql_str(&mem.tenant_id))
                 .column("source", sql_opt_str(&mem.source))
                 .column("relations", sql_str(&relations_json))

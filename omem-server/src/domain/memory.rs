@@ -44,8 +44,6 @@ pub struct Memory {
     pub scope: String,
     pub agent_id: Option<String>,
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub parent_session_id: Option<String>,
     pub tenant_id: String,
     pub source: Option<String>,
     pub relations: Vec<MemoryRelation>,
@@ -97,7 +95,6 @@ impl Memory {
             scope: "global".to_string(),
             agent_id: None,
             session_id: None,
-            parent_session_id: None,
             tenant_id: tenant_id.into(),
             source: None,
             relations: Vec::new(),
