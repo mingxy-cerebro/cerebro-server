@@ -5,6 +5,11 @@ import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 
+const BOUNDARY_SEARCH_RATIO = 0.6;
+const MIN_ITEM_CONTENT_CHARS = 100;
+const MIN_CONTENT_CHARS = 1000;
+const MIN_CONTENT_LENGTH = 50;
+
 const projectNameCache = new Map<string, string>();
 
 async function detectProjectName(rootPath: string): Promise<string | undefined> {
@@ -144,9 +149,25 @@ function formatRelativeAge(isoDate: string): string {
   return `${months}mo ago`;
 }
 
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + "…";
+function truncate(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+
+  // Sentence boundary characters: period, exclamation, question (Latin + CJK)
+  // Also treat newline as a boundary
+  const boundaries = /[.!?。！？\n]/;
+
+  // Search backwards from maxLength for a boundary
+  const searchEnd = Math.min(maxLength, text.length);
+  for (let i = searchEnd - 1; i >= Math.floor(searchEnd * BOUNDARY_SEARCH_RATIO); i--) {
+    if (boundaries.test(text[i])) {
+      return text.slice(0, i + 1).trimEnd() + "…";
+    }
+  }
+
+  let truncated = text.slice(0, maxLength);
+  const lastCode = truncated.charCodeAt(truncated.length - 1);
+  if (lastCode >= 0xD800 && lastCode <= 0xDBFF) truncated = truncated.slice(0, -1);
+  return truncated + "…";
 }
 
 function categorize(results: SearchResult[]): Map<string, SearchResult[]> {
@@ -230,9 +251,10 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
 }
 
 export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}) {
-  const similarityThreshold = config.recall?.similarityThreshold ?? 0.6;
+  const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
   const maxRecallResults = config.recall?.maxRecallResults ?? 10;
-  const maxContentLength = config.content?.maxContentLength ?? 500;
+  const maxContentLength = Math.max(MIN_CONTENT_LENGTH, config.content?.maxContentLength ?? 500);
+  const maxContentChars = Math.max(MIN_CONTENT_CHARS, config.content?.maxContentChars ?? 30000);
   const toastDelayMs = config.ui?.toastDelayMs ?? 7000;
 
   return async (
@@ -266,10 +288,11 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const profile = await client.getProfile();
       let profileInjected = false;
       let profileCountText = "";
+      let profileBlock = "";
       if (profile && !profileInjectedSessions.has(input.sessionID)) {
-        const profileBlock = [
+        profileBlock = [
           "<cerebro-profile>",
-          JSON.stringify(profile, null, 2),
+          JSON.stringify(profile),
           "</cerebro-profile>",
         ].join("\n");
         output.system.push(profileBlock);
@@ -302,9 +325,26 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         return;
       }
 
+      // --- Token Budget Calculation ---
+      const profileChars = profileInjected ? profileBlock.length : 0;
+      const budgetRemaining = maxContentChars - profileChars;
+      if (budgetRemaining < 0) {
+        logDebug("autoRecallHook budget overflow", { profileChars, maxContentChars, deficit: -budgetRemaining });
+      }
+      const itemCount = clustered 
+        ? (clustered.cluster_summaries.length + clustered.standalone_memories.length)
+        : newResults.length;
+      const dynamicMaxContentLength = itemCount > 0
+        ? Math.min(maxContentLength, Math.max(MIN_ITEM_CONTENT_CHARS, Math.floor(budgetRemaining / itemCount)))
+        : maxContentLength;
+      logDebug("autoRecallHook budget", { 
+        maxContentChars, profileChars, budgetRemaining, itemCount, 
+        configuredMax: maxContentLength, dynamicMax: dynamicMaxContentLength 
+      });
+
       const block = clustered 
-        ? buildClusteredContextBlock(clustered, maxContentLength)
-        : buildContextBlock(newResults, maxContentLength);
+        ? buildClusteredContextBlock(clustered, dynamicMaxContentLength)
+        : buildContextBlock(newResults, dynamicMaxContentLength);
       if (block) {
         output.system.push(block);
       }
