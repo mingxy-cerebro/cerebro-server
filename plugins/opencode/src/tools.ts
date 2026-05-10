@@ -24,6 +24,7 @@ function extractMemoryIds(result: unknown): string[] {
 export interface ToolContext {
   agentId?: string;
   getSessionId: () => string | undefined;
+  getAgentName?: () => string;
 }
 
 export function buildTools(client: CerebroClient, containerTags: string[], context: ToolContext) {
@@ -85,12 +86,13 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
       },
       async execute(args) {
         const allTags = [...containerTags, ...(args.tags ?? [])];
+        const effectiveAgentId = context.getAgentName?.() || context.agentId;
         const result = await client.createMemory(
           args.content,
           allTags,
           args.source,
           args.scope ?? "project",
-          context.agentId,
+          effectiveAgentId,
           context.getSessionId(),
           args.visibility,
           args.category,
@@ -241,10 +243,12 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Session ID to associate with the ingestion"),
       },
       async execute(args) {
+        const effectiveAgentId = context.getAgentName?.() || context.agentId;
         const result = await client.ingestMessages(args.messages, {
           mode: args.mode ?? "smart",
           tags: args.tags,
           sessionId: args.session_id,
+          agentId: effectiveAgentId,
         });
         if (result === null) return JSON.stringify({ ok: false, error: "Ingestion failed" });
         if (args.session_id) {

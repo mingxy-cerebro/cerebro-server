@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -144,6 +144,25 @@ function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>)
 
 // ── Load config ──────────────────────────────────────────────────────
 
+/** File-only logger for config.ts (cannot import logger.ts due to circular dependency). */
+function configLog(message: string, fields?: Record<string, unknown>, level: string = "WARN"): void {
+  try {
+    const logDir = join(homedir(), ".config", "cerebro", "logs");
+    const logPath = join(logDir, "plugin.log");
+    const ts = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+    const parts = [`${level.padEnd(5)} ${ts} service=cerebro ${message}`];
+    if (fields) {
+      for (const [k, v] of Object.entries(fields)) {
+        parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
+      }
+    }
+    mkdirSync(logDir, { recursive: true });
+    appendFileSync(logPath, parts.join(" ") + "\n");
+  } catch (writeErr) {
+    process.stderr.write(`[cerebro] configLog write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}\n`);
+  }
+}
+
 export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPluginConfig {
   let config: OmemPluginConfig = structuredClone(DEFAULTS);
 
@@ -157,8 +176,8 @@ export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPlu
 
     // Merge nested groups with defaults for safety
     config = deepMerge(config, parsed);
-  } catch {
-    // Config file doesn't exist or is invalid, use defaults
+  } catch (e) {
+    configLog("config.json load failed, using defaults", { error: String(e) });
   }
 
   // Apply environment variable overrides (flat OMEM_* → nested paths)
@@ -201,7 +220,20 @@ export function resolveAgentPolicy(
   agentName: string,
   config: Partial<OmemPluginConfig>,
 ): AgentPolicy {
-  return config.agentMemoryPolicy?.[agentName] ?? config.defaultPolicy ?? "readwrite";
+  const policies = config.agentMemoryPolicy;
+  if (policies) {
+    const exact = policies[agentName];
+    if (exact) return exact;
+    const lower = agentName.toLowerCase();
+    for (const [key, policy] of Object.entries(policies)) {
+      if (lower.startsWith(key.toLowerCase()) || key.toLowerCase().startsWith(lower)) {
+        return policy;
+      }
+    }
+  }
+  if (config.defaultPolicy) return config.defaultPolicy;
+  configLog("resolveAgentPolicy: defaulting to readwrite", { agentName }, "DEBUG");
+  return "readwrite";
 }
 
 export { DEFAULTS };

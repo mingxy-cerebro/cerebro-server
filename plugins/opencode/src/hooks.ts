@@ -250,7 +250,7 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
   ].join("\n");
 }
 
-export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}) {
+export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string) {
   const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
   const maxRecallResults = config.recall?.maxRecallResults ?? 10;
   const maxContentLength = Math.max(MIN_CONTENT_LENGTH, config.content?.maxContentLength ?? 500);
@@ -264,7 +264,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
     if (!input.sessionID) return;
 
     // 5a: agent memory policy check — skip recall entirely for 'none' agents
-    const agentId = process.env.OMEM_AGENT_ID || "opencode";
+    const agentId = getAgentName?.() || process.env.OMEM_AGENT_ID || "opencode";
     const policy = resolveAgentPolicy(agentId, config);
     if (policy === "none") return;
 
@@ -482,6 +482,15 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
     } catch {
     }
 
+    // Main session gate: sub-agents must not write memories via compacting
+    if (getMainSessionId) {
+      const mainId = getMainSessionId();
+      if (mainId && input.sessionID && input.sessionID !== mainId) {
+        logInfo("compactingHook: non-main session skipped", { sessionID: input.sessionID, mainSessionId: mainId });
+        return;
+      }
+    }
+
     // Policy gate: only readwrite agents can write memories
     const policy = resolveAgentPolicy(effectiveAgentId, config);
     if (policy !== "readwrite") {
@@ -515,12 +524,13 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
           }
 
           try {
-            logInfo("compactingHook ingestMessages called", { msgCount: messages.length, sessionId: effectiveSessionId });
+            logInfo("compactingHook ingestMessages called", { msgCount: messages.length, sessionId: effectiveSessionId, agentId: effectiveAgentId });
             const result = await client.ingestMessages(messages, {
               mode: ingestMode,
               tags: [...containerTags, "auto-capture"],
               sessionId: effectiveSessionId,
               projectName: projectName,
+              agentId: effectiveAgentId,
             });
             logInfo("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
             if (result === null) {
@@ -553,12 +563,15 @@ export function sessionIdleHook(
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
   agentId?: string,
   config: Partial<OmemPluginConfig> = {},
+  onAgentResolved?: (name: string) => void,
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
 
   return async (input: { event: { type: string; properties?: any } }) => {
     if (input.event.type !== "session.idle") return;
+
+    logDebug("sessionIdleHook event.properties dump", { keys: Object.keys(input.event.properties || {}), raw: JSON.stringify(input.event.properties).substring(0, 2000) });
 
     const sessionID = input.event.properties?.sessionID;
     if (!sessionID) return;
@@ -567,7 +580,10 @@ export function sessionIdleHook(
 
     if (getMainSessionId) {
       const mainId = getMainSessionId();
-      if (mainId && sessionID !== mainId) return;
+      if (mainId && sessionID !== mainId) {
+        logInfo("sessionIdleHook: non-main session skipped", { sessionID, mainSessionId: mainId });
+        return;
+      }
     }
 
     if (idleTimeout) clearTimeout(idleTimeout);
@@ -589,8 +605,6 @@ export function sessionIdleHook(
           const msgId = msg.info?.id;
           if (!msgId || processedMessageIds.has(msgId)) continue;
 
-          // Skip messages created before this plugin instance started
-          // (prevents replaying entire session history on restart)
           const msgTime = msg.info?.createdAt ? new Date(msg.info.createdAt).getTime() : 0;
           if (msgTime > 0 && msgTime < pluginStartTime) continue;
 
@@ -614,18 +628,15 @@ export function sessionIdleHook(
           return;
         }
 
-        // Policy gate: only readwrite agents can write memories
-        const policy = resolveAgentPolicy(agentId || "", config);
-        if (policy !== "readwrite") {
-          logInfo("sessionIdleHook blocked by policy", { agentId: agentId || "", policy });
-          return;
-        }
-
         let sessionTitle: string | undefined;
         let projectName: string | undefined;
+        let effectiveAgentId = agentId || "opencode";
         try {
           const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
-          logDebug("sessionIdleHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
+          if ((sessionInfo?.data as any)?.agent) {
+            effectiveAgentId = (sessionInfo.data as any).agent;
+            onAgentResolved?.(effectiveAgentId);
+          }
           sessionTitle = sessionInfo?.data?.title;
           projectName = sessionInfo?.data?.directory
             ? await detectProjectName(sessionInfo.data.directory)
@@ -634,9 +645,17 @@ export function sessionIdleHook(
           logErr("sessionIdleHook detectProjectName failed", { error: String(e) });
         }
 
+        logDebug("sessionIdleHook resolved agentId", { effectiveAgentId, fallbackAgentId: agentId });
+
+        const policy = resolveAgentPolicy(effectiveAgentId, config);
+        if (policy !== "readwrite") {
+          logInfo("sessionIdleHook blocked by policy", { agentId: effectiveAgentId, policy, defaultPolicy: String(config.defaultPolicy ?? "undefined") });
+          return;
+        }
+
         try {
-          logInfo("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, sessionId: sessionID, title: String(sessionTitle) });
-          await cerebroClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
+          logInfo("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, sessionId: sessionID, agentId: effectiveAgentId, title: String(sessionTitle) });
+          await cerebroClient.sessionIngest(conversationMessages, sessionID, effectiveAgentId, sessionTitle, projectName);
           logInfo("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
             processedMessageIds.add(id);
