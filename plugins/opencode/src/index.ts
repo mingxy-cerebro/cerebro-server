@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { OmemClient } from "./client.js";
+import { CerebroClient } from "./client.js";
 import { autoRecallHook, compactingHook, keywordDetectionHook, sessionIdleHook } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
@@ -74,24 +74,24 @@ const OmemPlugin: Plugin = async (input) => {
   let overrides: Record<string, unknown> = {};
   try {
     const ocCfg = JSON.parse(readFileSync(join(directory, "opencode.json"), "utf-8"));
-    const pc = ocCfg?.plugin_config?.["@mingxy/omem"] || ocCfg?.plugin_config?.["@ourmem/opencode"];
+    const pc = ocCfg?.plugin_config?.["@mingxy/cerebro"];
     if (pc) overrides = pc;
   } catch {}
 
   const config = loadPluginConfig(overrides as any);
 
-  const omemClient = new OmemClient(config.apiUrl, config.apiKey, config);
+  const cerebroClient = new CerebroClient(config.connection.apiUrl, config.connection.apiKey, config);
 
   // 启动时检测连接状态
   try {
-    await omemClient.getStats();
+    await cerebroClient.getStats();
     showToast(tui, "🧠 Cerebro · Connected", `Version v${pluginVersion}`, "success", 6000);
-    logInfo(`Connected to ${config.apiUrl}`);
+    logInfo(`Connected to ${config.connection.apiUrl}`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logError(`Connection failed: ${errMsg}`);
-    if (errMsg.includes("[omem]")) {
-      const cleanMsg = errMsg.replace(/^\[omem\]\s*/, "");
+    if (errMsg.includes("[cerebro]")) {
+      const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
       showToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Server Error`,
@@ -103,7 +103,7 @@ const OmemPlugin: Plugin = async (input) => {
       showToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Connection Failed`,
-        `Unable to reach ${config.apiUrl}`,
+        `Unable to reach ${config.connection.apiUrl}`,
         "error",
         8000
       );
@@ -117,7 +117,7 @@ const OmemPlugin: Plugin = async (input) => {
 
   let currentSessionId: string | undefined;
 
-  const recallHook = autoRecallHook(omemClient, containerTags, tui, config);
+  const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config);
 
   return {
     config: async (cfg: any) => {
@@ -131,10 +131,10 @@ const OmemPlugin: Plugin = async (input) => {
       if (input.sessionID) currentSessionId = input.sessionID;
       return recallHook(input, output);
     },
-    "chat.message": keywordDetectionHook(omemClient, containerTags, config.autoCaptureThreshold, tui, config.ingestMode),
-    "experimental.session.compacting": compactingHook(omemClient, containerTags, tui, config.ingestMode, isAutoStoreEnabled, () => currentSessionId, client),
-    tool: buildTools(omemClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
-    event: sessionIdleHook(omemClient, containerTags, tui, client, config.ingestMode, config.autoCaptureThreshold, () => currentSessionId, isAutoStoreEnabled, agentId),
+    "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode),
+    "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => currentSessionId, client),
+    tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
+    event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => currentSessionId, isAutoStoreEnabled, agentId),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;

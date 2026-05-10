@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin";
-import type { OmemClient } from "./client.js";
+import type { CerebroClient } from "./client.js";
 import { isAutoStoreEnabled, setAutoStoreEnabled } from "./index.js";
 
 function extractMemoryIds(result: unknown): string[] {
@@ -26,7 +26,7 @@ export interface ToolContext {
   getSessionId: () => string | undefined;
 }
 
-export function buildTools(client: OmemClient, containerTags: string[], context: ToolContext) {
+export function buildTools(client: CerebroClient, containerTags: string[], context: ToolContext) {
   return {
     memory_store: tool({
       description:
@@ -95,7 +95,7 @@ export function buildTools(client: OmemClient, containerTags: string[], context:
           args.visibility,
           args.category,
         );
-        if (!result) return JSON.stringify({ ok: false, error: "The omem server may be unavailable." });
+        if (!result) return JSON.stringify({ ok: false, error: "The Cerebro server may be unavailable." });
         return JSON.stringify({ ok: true, id: result.id, tags: result.tags });
       },
     }),

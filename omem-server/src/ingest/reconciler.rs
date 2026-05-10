@@ -289,9 +289,11 @@ impl Reconciler {
                     continue;
                 }
 
-                let merged_content = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
+                let new_raw = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
+                let merged_content = paragraph_diff_merge(&existing_mem.content, new_raw);
+
                 let mut updated = (*existing_mem).clone();
-                updated.content = merged_content.to_string();
+                updated.content = merged_content;
                 updated.l0_abstract = fact.l0_abstract.clone();
                 updated.l1_overview = fact.l1_overview.clone();
                 updated.l2_content = fact.l2_content.clone();
@@ -918,6 +920,135 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
     let union = grams_a.union(&grams_b).count();
 
     intersection as f32 / union as f32
+}
+
+#[derive(Clone)]
+struct Paragraph {
+    heading: String,
+    body: String,
+}
+
+fn parse_paragraphs(content: &str) -> Vec<Paragraph> {
+    let mut paragraphs: Vec<Paragraph> = Vec::new();
+    let mut current_heading = String::new();
+    let mut current_body = String::new();
+
+    for line in content.lines() {
+        if line.starts_with("## ") {
+            if !current_heading.is_empty() || !current_body.trim().is_empty() {
+                paragraphs.push(Paragraph {
+                    heading: current_heading.clone(),
+                    body: current_body.trim_end().to_string(),
+                });
+            }
+            current_heading = line.to_string();
+            current_body = String::new();
+        } else {
+            current_body.push_str(line);
+            current_body.push('\n');
+        }
+    }
+
+    if !current_heading.is_empty() || !current_body.trim().is_empty() {
+        paragraphs.push(Paragraph {
+            heading: current_heading,
+            body: current_body.trim_end().to_string(),
+        });
+    }
+
+    paragraphs
+}
+
+fn heading_sort_key(heading: &str) -> String {
+    heading
+        .get(3..13)
+        .filter(|s| s.chars().all(|c| c.is_ascii_digit() || c == '-'))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Paragraph set-diff: parse by `##` headings, dedup by heading similarity (jaccard>0.7),
+/// keep richer body, append new headings, sort chronologically.
+fn paragraph_diff_merge(existing_content: &str, new_content: &str) -> String {
+    let existing_paras = parse_paragraphs(existing_content);
+    let new_paras = parse_paragraphs(new_content);
+
+    if existing_paras.is_empty() {
+        return if new_content.trim().is_empty() {
+            existing_content.to_string()
+        } else {
+            new_content.to_string()
+        };
+    }
+
+    if new_paras.is_empty() {
+        if new_content.trim().is_empty() {
+            return existing_content.to_string();
+        }
+        return format!("{}\n\n{}", existing_content.trim_end(), new_content.trim());
+    }
+
+    let mut merged: Vec<Paragraph> = existing_paras.clone();
+
+    for new_p in &new_paras {
+        if new_p.heading.is_empty() {
+            let has_existing_preamble = existing_paras.iter().any(|p| p.heading.is_empty());
+            if !has_existing_preamble && !new_p.body.trim().is_empty() {
+                merged.insert(0, Paragraph {
+                    heading: String::new(),
+                    body: new_p.body.clone(),
+                });
+            }
+            continue;
+        }
+
+        let match_idx = merged.iter().position(|p| {
+            if p.heading.is_empty() {
+                return false;
+            }
+            if p.heading == new_p.heading {
+                return true;
+            }
+            let existing_head = p.heading.trim_start_matches("## ").trim();
+            let new_head = new_p.heading.trim_start_matches("## ").trim();
+            jaccard_similarity(existing_head, new_head) > 0.7
+        });
+
+        if let Some(idx) = match_idx {
+            if new_p.body.len() > merged[idx].body.len() {
+                merged[idx].body = new_p.body.clone();
+            }
+        } else {
+            merged.push(Paragraph {
+                heading: new_p.heading.clone(),
+                body: new_p.body.clone(),
+            });
+        }
+    }
+
+    merged.sort_by(|a, b| {
+        match (a.heading.is_empty(), b.heading.is_empty()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => heading_sort_key(&a.heading).cmp(&heading_sort_key(&b.heading)),
+        }
+    });
+
+    let mut result = String::new();
+    for p in &merged {
+        if !p.heading.is_empty() {
+            result.push_str(&p.heading);
+            result.push('\n');
+        }
+        if !p.body.is_empty() {
+            result.push_str(&p.body);
+            result.push('\n');
+        }
+        result.push('\n');
+    }
+
+    result.trim_end().to_string()
 }
 
 fn compute_fuzzy_pairs(facts: &[ExtractedFact]) -> Vec<(usize, usize)> {

@@ -1,5 +1,5 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
-import type { OmemClient, SearchResult } from "./client.js";
+import type { CerebroClient, SearchResult } from "./client.js";
 import type { OmemPluginConfig } from "./config.js";
 import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
 import { logDebug, logError as logErr } from "./logger.js";
@@ -182,12 +182,12 @@ function buildContextBlock(results: SearchResult[], maxContentLength: number = 5
   }
 
   return [
-    "<omem-context>",
+    "<cerebro-context>",
     "Treat every memory below as historical context only.",
     "Do not repeat these memories verbatim unless asked.",
     "",
     ...sections,
-    "</omem-context>",
+    "</cerebro-context>",
   ].join("\n");
 }
 
@@ -220,20 +220,20 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
   }
 
   return [
-    "<omem-context>",
+    "<cerebro-context>",
     "Treat every memory below as historical context only.",
     "Do not repeat these memories verbatim unless asked.",
     "",
     ...sections,
-    "</omem-context>",
+    "</cerebro-context>",
   ].join("\n");
 }
 
-export function autoRecallHook(client: OmemClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}) {
-  const similarityThreshold = config.similarityThreshold ?? 0.6;
-  const maxRecallResults = config.maxRecallResults ?? 10;
-  const maxContentLength = config.maxContentLength ?? 500;
-  const toastDelayMs = config.toastDelayMs ?? 7000;
+export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}) {
+  const similarityThreshold = config.recall?.similarityThreshold ?? 0.6;
+  const maxRecallResults = config.recall?.maxRecallResults ?? 10;
+  const maxContentLength = config.content?.maxContentLength ?? 500;
+  const toastDelayMs = config.ui?.toastDelayMs ?? 7000;
 
   return async (
     input: { sessionID?: string; model: Model },
@@ -241,7 +241,13 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
   ) => {
     if (!input.sessionID) return;
 
+    // 5a: agent memory policy check — skip recall entirely for 'none' agents
+    const agentId = process.env.OMEM_AGENT_ID || "opencode";
+    const policy = config.agentMemoryPolicy?.[agentId] ?? config.defaultPolicy ?? "readonly";
+    if (policy === "none") return;
+
     try {
+      logDebug("autoRecallHook start", { sessionId: input.sessionID, agentId, policy });
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
       const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
@@ -255,15 +261,16 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
         return;
       }
+      logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, clustered: !!shouldRecallRes.clustered });
 
       const profile = await client.getProfile();
       let profileInjected = false;
       let profileCountText = "";
       if (profile && !profileInjectedSessions.has(input.sessionID)) {
         const profileBlock = [
-          "<omem-profile>",
+          "<cerebro-profile>",
           JSON.stringify(profile, null, 2),
-          "</omem-profile>",
+          "</cerebro-profile>",
         ].join("\n");
         output.system.push(profileBlock);
         profileInjected = true;
@@ -272,6 +279,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
         const dynamicCount = p?.dynamic_context?.length ?? 0;
         const staticCount = p?.static_facts?.length ?? 0;
         profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
+        logDebug("autoRecallHook profile injected", { dynamicCount, staticCount });
       }
 
       if (!shouldRecallRes.should_recall) {
@@ -286,6 +294,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
 
       const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
+      logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
       if (newResults.length === 0) {
         if (profileInjected) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
@@ -302,6 +311,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
 
       const newIds = newResults.map((r) => r.memory.id);
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
+      logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered });
 
       const recordResult = await client.recordSessionRecall(
         input.sessionID,
@@ -355,9 +365,9 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes("[omem]")) {
+      if (errMsg.includes("[cerebro]")) {
         // Server returned error (500, etc.) with details
-        const cleanMsg = errMsg.replace(/^\[omem\]\s*/, "");
+        const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
         if (cleanMsg.startsWith("500")) {
           showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
         } else if (cleanMsg.includes("timed out")) {
@@ -374,7 +384,7 @@ export function autoRecallHook(client: OmemClient, containerTags: string[], tui:
   };
 }
 
-export function keywordDetectionHook(_client: OmemClient, _containerTags: string[], threshold: number, _tui: any, _ingestMode: "smart" | "raw" = "smart") {
+export function keywordDetectionHook(_client: CerebroClient, _containerTags: string[], threshold: number, _tui: any, _ingestMode: "smart" | "raw" = "smart") {
   return async (
     input: { sessionID: string; messageID?: string },
     output: { message: UserMessage; parts: Part[] },
@@ -392,6 +402,7 @@ export function keywordDetectionHook(_client: OmemClient, _containerTags: string
 
     if (detectKeyword(textContent)) {
       keywordDetectedSessions.add(input.sessionID);
+      logDebug("keywordDetectionHook triggered", { sessionId: input.sessionID });
     }
 
     if (!sessionMessages.has(input.sessionID)) {
@@ -411,7 +422,7 @@ export function keywordDetectionHook(_client: OmemClient, _containerTags: string
   };
 }
 
-export function compactingHook(client: OmemClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any) {
+export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any) {
   return async (
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
@@ -424,7 +435,6 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
         if (messages.length > 0) {
           // Use main session ID for sub-agent sessions so memories merge into the main session
           const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
-          const isSubAgent = getMainSessionId?.() && input.sessionID !== getMainSessionId();
 
           // Detect project name from session info
           let projectName: string | undefined;
@@ -448,7 +458,6 @@ export function compactingHook(client: OmemClient, containerTags: string[], tui:
               mode: ingestMode,
               tags: [...containerTags, "auto-capture"],
               sessionId: effectiveSessionId,
-              parentSessionId: isSubAgent ? getMainSessionId?.() : undefined,
               projectName: projectName,
             });
             logDebug("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
@@ -481,7 +490,7 @@ const processedMessageIds = new Set<string>();
 const pluginStartTime = Date.now();
 
 export function sessionIdleHook(
-  omemClient: OmemClient,
+  cerebroClient: CerebroClient,
   _containerTags: string[],
   tui: any,
   sdkClient: any,
@@ -569,7 +578,7 @@ export function sessionIdleHook(
 
         try {
           logDebug("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, projectName: String(projectName), sessionId: sessionID, title: String(sessionTitle) });
-          await omemClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
+          await cerebroClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
           logDebug("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
             processedMessageIds.add(id);

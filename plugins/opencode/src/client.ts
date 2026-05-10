@@ -18,7 +18,6 @@ export interface IngestOptions {
   mode?: "smart" | "raw";
   agentId?: string;
   sessionId?: string;
-  parentSessionId?: string;
   entityContext?: string;
   tags?: string[];
   projectName?: string;
@@ -91,7 +90,7 @@ export interface MemoryDto {
   updated_at: string;
 }
 
-export class OmemClient {
+export class CerebroClient {
   constructor(
     private baseUrl: string,
     private apiKey: string,
@@ -100,8 +99,11 @@ export class OmemClient {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
-  private getCfg<K extends keyof OmemPluginConfig>(key: K, fallback: OmemPluginConfig[K]): OmemPluginConfig[K] {
-    return this.config?.[key] ?? fallback;
+  private getCfg<S extends keyof OmemPluginConfig, K extends string & keyof OmemPluginConfig[S]>(
+    section: S, key: K, fallback: OmemPluginConfig[S][K],
+  ): OmemPluginConfig[S][K] {
+    const sec = this.config?.[section] as Record<string, unknown> | undefined;
+    return (sec?.[key] ?? fallback) as OmemPluginConfig[S][K];
   }
 
   private async request<T>(
@@ -113,7 +115,7 @@ export class OmemClient {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      timeoutMs ?? this.getCfg("requestTimeoutMs", 15000),
+      timeoutMs ?? this.getCfg("connection", "requestTimeoutMs", 15000),
     );
 
     try {
@@ -130,7 +132,7 @@ export class OmemClient {
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
         logWarn("HTTP error", { method: init.method ?? "GET", path, status: res.status, statusText: res.statusText, errorBody });
-        throw new Error(`[omem] ${res.status} ${res.statusText}${errorBody ? ": " + errorBody : ""}`);
+        throw new Error(`[cerebro] ${res.status} ${res.statusText}${errorBody ? ": " + errorBody : ""}`);
       }
 
       if (res.status === 204) return null;
@@ -138,8 +140,8 @@ export class OmemClient {
       return (await res.json()) as T;
     } catch (err) {
       if ((err as Error).name === "AbortError") {
-        logWarn("Request timed out", { method: init.method ?? "GET", path, timeoutMs: timeoutMs ?? this.getCfg("requestTimeoutMs", 15000) });
-        throw new Error(`[omem] Request timed out (${timeoutMs ?? this.getCfg("requestTimeoutMs", 15000)}ms)`);
+        logWarn("Request timed out", { method: init.method ?? "GET", path, timeoutMs: timeoutMs ?? this.getCfg("connection", "requestTimeoutMs", 15000) });
+        throw new Error(`[cerebro] Request timed out (${timeoutMs ?? this.getCfg("connection", "requestTimeoutMs", 15000)}ms)`);
       } else {
         logError("Request failed", { method: init.method ?? "GET", path, error: String(err) });
         throw err;
@@ -177,7 +179,7 @@ export class OmemClient {
     visibility?: string,
     category?: string,
   ): Promise<MemoryDto | null> {
-    const safeContent = sanitizeContent(content, this.getCfg("maxContentChars", 30000));
+    const safeContent = sanitizeContent(content, this.getCfg("content", "maxContentChars", 30000));
     return this.post<MemoryDto>("/v1/memories", {
       content: safeContent,
       tags,
@@ -196,7 +198,7 @@ export class OmemClient {
     scope?: string,
     tags?: string[],
   ): Promise<SearchResult[]> {
-    const safeQ = truncateQuery(query, this.getCfg("maxQueryLength", 200));
+    const safeQ = truncateQuery(query, this.getCfg("content", "maxQueryLength", 200));
     const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
     if (scope) params.set("scope", scope);
     if (tags && tags.length > 0) params.set("tags", tags.join(","));
@@ -233,14 +235,13 @@ export class OmemClient {
   ): Promise<unknown> {
     const safeMessages = messages.map(m => ({
       role: m.role,
-      content: sanitizeContent(m.content, this.getCfg("maxContentChars", 30000)),
+      content: sanitizeContent(m.content, this.getCfg("content", "maxContentChars", 30000)),
     }));
     return this.post("/v1/memories", {
       messages: safeMessages,
       mode: opts.mode ?? "smart",
       agent_id: opts.agentId,
       session_id: opts.sessionId,
-      parent_session_id: opts.parentSessionId,
       entity_context: opts.entityContext,
       tags: opts.tags,
       project_name: opts.projectName,
@@ -372,7 +373,6 @@ export class OmemClient {
     agentId?: string,
     sessionTitle?: string,
     projectName?: string,
-    parentSessionId?: string,
   ): Promise<unknown> {
     return this.post("/v1/memories/session-ingest", {
       messages,
@@ -380,7 +380,6 @@ export class OmemClient {
       agent_id: agentId,
       session_title: sessionTitle,
       project_name: projectName,
-      parent_session_id: parentSessionId,
     }, 60000);
   }
 }

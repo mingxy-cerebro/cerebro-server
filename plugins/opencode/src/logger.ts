@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadPluginConfig } from "./config.js";
 
 const LEVEL_MAP: Record<string, number> = {
   DEBUG: 0,
@@ -9,12 +9,13 @@ const LEVEL_MAP: Record<string, number> = {
   ERROR: 3,
 };
 
-const MIN_LEVEL = LEVEL_MAP[process.env.OMEM_LOG_LEVEL?.toUpperCase() ?? ""] ?? LEVEL_MAP.INFO;
-
-const LOG_DIR = join(homedir(), ".config", "ourmem");
+const cfg = loadPluginConfig();
+const MIN_LEVEL = LEVEL_MAP[cfg.logging.logLevel] ?? LEVEL_MAP.INFO;
+const LOG_DIR = cfg.logging.logDir;
 const LOG_FILE = join(LOG_DIR, "plugin.log");
+const LOG_ENABLED = cfg.logging.logEnabled;
 
-const START_TIME = Date.now();
+let lastLogTime = Date.now();
 
 function ensureLogDir(): void {
   if (!existsSync(LOG_DIR)) {
@@ -25,13 +26,16 @@ function ensureLogDir(): void {
 }
 
 function writeLog(level: string, message: string, fields?: Record<string, unknown>): void {
+  if (!LOG_ENABLED) return;
   const lvl = LEVEL_MAP[level] ?? 0;
   if (lvl < MIN_LEVEL) return;
   ensureLogDir();
   const now = new Date();
+  const nowMs = now.getTime();
+  const delta = ((nowMs - lastLogTime) / 1000).toFixed(2);
+  lastLogTime = nowMs;
   const ts = now.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
-  const offset = Date.now() - START_TIME;
-  const parts = [`${level.padEnd(5)} ${ts} +${offset}ms service=cerebro`];
+  const parts = [`${level.padEnd(5)} ${ts} +${delta}s service=cerebro`];
   if (fields) {
     for (const [k, v] of Object.entries(fields)) {
       const val = typeof v === "string" ? v : JSON.stringify(v);

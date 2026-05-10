@@ -145,7 +145,10 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 ## Operations
 
 - **CREATE**: The fact contains genuinely new information not covered by any existing memory. Creates a new memory.
-- **MERGE**: The fact adds detail, clarification, or refinement to an existing memory. The existing memory's content should be enriched. Provide `merged_content` — the combined text.
+- **MERGE**: The fact adds detail, clarification, or refinement to an existing memory. The existing memory's content should be enriched. Provide `merged_content` — the combined text. MERGE uses one of three merge strategies (specify in `merge_strategy` field):
+  - **UNION** (default): Combine both memories' content, keeping all unique information from old and new. Use for complementary facts about the same topic.
+  - **SUBTRACT**: Remove overlapping or outdated content from the existing memory based on the new fact. Use when the new fact indicates something is no longer true or relevant.
+  - **PRESERVE**: Keep the existing memory's content as-is, but update metadata (tags, confidence, etc.). Use when the new fact merely reinforces or slightly rephrases the existing content without adding substantive new information.
 - **SKIP**: The fact is a duplicate or contains less information than an existing memory. No action needed.
 - **SUPERSEDE**: The fact contradicts or updates an existing memory on the same topic (e.g., changed preference, updated status). The old memory is archived and a new one is created. Use when time-sensitive facts have changed.
 - **SUPPORT**: The candidate reinforces or confirms an existing memory, possibly in a specific context. No new memory is created — the existing memory's confidence is boosted. Include `context_label` (one of: general, morning, evening, work, leisure, seasonal, weekday, weekend).
@@ -155,7 +158,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 ## Category-Aware Rules
 
 1. **profile** category: always use MERGE when a matching memory exists (never SUPERSEDE or CONTRADICT for profile).
-2. **events** and **cases** categories: only CREATE or SKIP. Never MERGE, SUPERSEDE, SUPPORT, CONTEXTUALIZE, or CONTRADICT.
+2. **events** and **cases** categories: prefer CREATE or SKIP. MERGE is allowed when the new fact adds meaningful detail to an existing event or case (e.g., resolution of an open case, outcome of an ongoing event). Never SUPERSEDE, SUPPORT, CONTEXTUALIZE, or CONTRADICT.
 3. **preferences** and **entities** categories: support all 7 operations including SUPERSEDE and CONTRADICT.
 4. **preferences**, **entities**, **patterns** categories: support MERGE.
 5. **profile** category: same topic but with new details or different perspective → MERGE into the best matching existing memory. Do not CREATE a new profile fact for a topic already covered.
@@ -164,7 +167,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 
 1. Each fact MUST receive exactly one decision.
 2. Use `match_index` to reference existing memories by their integer ID (shown in brackets).
-3. For MERGE: `match_index` is required. Provide `merged_content` combining both old and new info.
+3. For MERGE: `match_index` is required. Provide `merged_content` combining both old and new info. Include `merge_strategy` (one of: UNION, SUBTRACT, PRESERVE; default: UNION).
 4. For SUPERSEDE: `match_index` is required. The old memory will be archived.
 5. For SUPPORT: `match_index` is required. Include `context_label`.
 6. For CONTEXTUALIZE: `match_index` is required. Include `context_label`.
@@ -177,7 +180,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 
 ## Output Format
 Return ONLY valid JSON:
-{"decisions": [{"action": "CREATE", "fact_index": 0, "reason": "new info"}, {"action": "MERGE", "fact_index": 1, "match_index": 3, "merged_content": "combined text", "reason": "adds detail"}, {"action": "SKIP", "fact_index": 2, "match_index": 0, "reason": "duplicate"}, {"action": "SUPERSEDE", "fact_index": 3, "match_index": 1, "reason": "updated preference"}, {"action": "SUPPORT", "fact_index": 4, "match_index": 2, "context_label": "work", "reason": "reinforces existing"}, {"action": "CONTEXTUALIZE", "fact_index": 5, "match_index": 4, "context_label": "evening", "reason": "adds situational nuance"}, {"action": "CONTRADICT", "fact_index": 6, "match_index": 5, "reason": "directly contradicts"}]}
+{"decisions": [{"action": "CREATE", "fact_index": 0, "reason": "new info"}, {"action": "MERGE", "fact_index": 1, "match_index": 3, "merge_strategy": "UNION", "merged_content": "combined text", "reason": "adds detail"}, {"action": "SKIP", "fact_index": 2, "match_index": 0, "reason": "duplicate"}, {"action": "SUPERSEDE", "fact_index": 3, "match_index": 1, "reason": "updated preference"}, {"action": "SUPPORT", "fact_index": 4, "match_index": 2, "context_label": "work", "reason": "reinforces existing"}, {"action": "CONTEXTUALIZE", "fact_index": 5, "match_index": 4, "context_label": "evening", "reason": "adds situational nuance"}, {"action": "CONTRADICT", "fact_index": 6, "match_index": 5, "reason": "directly contradicts"}]}
 "#;
 
 pub fn build_batch_dedup_prompt(facts: &[ExtractedFact]) -> (String, String) {
@@ -383,9 +386,9 @@ For each fact, produce three layers of detail:
 For facts classified as "preferences", ALL three layers (l0_abstract, l1_overview, l2_content) MUST use this structured Markdown format:
 ```
 ## {偏好主题}
-- 偏好: {具体偏好描述}
-- 置信度: {0.0-1.0}
-- 类型: static | evolving
+- **偏好**: {具体偏好描述}
+- **置信度**: {0.0-1.0}
+- **类型**: static | evolving
 ```
 - Each preference gets its own `## Title` section. Multiple preferences separated by blank lines.
 - `type`: static = stable preference; evolving = may change over time.
@@ -395,9 +398,9 @@ For facts classified as "preferences", ALL three layers (l0_abstract, l1_overvie
 For facts classified as technical/work categories (cases, entities, events, patterns), ALL three layers MUST use this structured Markdown format:
 ```
 ## {工作主题/技术决策}
-- 内容: {简要描述做了什么、为什么、结果如何}
-- 影响范围: {影响的模块/文件/系统}
-- 结论: {最终结论或决策}
+- **内容**: {简要描述做了什么、为什么、结果如何}
+- **影响范围**: {影响的模块/文件/系统}
+- **结论**: {最终结论或决策}
 ```
 - Each independent technical topic gets its own `## Title` section.
 - Keep 内容 concise — conclusions only, not step-by-step process.
@@ -454,9 +457,9 @@ User says: "我习惯用Rust做系统编程，比C++安全多了。"
 NOTE: For category="preferences", all three layers use structured Markdown format.
 ```
 ## 编程语言偏好
-- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全
-- 置信度: 0.8
-- 类型: static
+- **偏好**: 习惯使用Rust进行系统编程，认为比C++更安全
+- **置信度**: 0.8
+- **类型**: static
 ```
 ```json
 {"memories": [{"l0_abstract": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l1_overview": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l2_content": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "category": "preferences", "tags": ["programming", "languages"], "confidence": 4}]}
@@ -790,9 +793,9 @@ When deciding between WORK and PREFERENCE:
 For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
 ```
 ## {工作主题/技术决策}
-- 内容: {简要描述做了什么、为什么、结果如何}
-- 影响范围: {影响的模块/文件/系统}
-- 结论: {最终结论或决策}
+- **内容**: {简要描述做了什么、为什么、结果如何}
+- **影响范围**: {影响的模块/文件/系统}
+- **结论**: {最终结论或决策}
 ```
 - Each independent technical topic gets its own `## Title` section.
 - Related topics MUST be merged into one entry (MERGE rule still applies).
@@ -800,16 +803,16 @@ For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this st
 - Example (Chinese input):
 ```
 ## API认证中间件重构
-- 内容: 将auth middleware从layer改为from_fn_with_state模式，支持多租户隔离
-- 影响范围: api/middleware.rs, api/router.rs, 所有需要认证的handler
-- 结论: 使用Extension(tenant_id)注入租户ID，性能提升且代码更简洁
+- **内容**: 将auth middleware从layer改为from_fn_with_state模式，支持多租户隔离
+- **影响范围**: api/middleware.rs, api/router.rs, 所有需要认证的handler
+- **结论**: 使用Extension(tenant_id)注入租户ID，性能提升且代码更简洁
 ```
 - Example (English input):
 ```
 ## Database Migration to LanceDB 0.27
-- Content: Migrated vector storage from custom implementation to LanceDB 0.27 with per-tenant LRU cache
-- Scope: store/manager.rs, store/lancedb.rs, ingest pipeline
-- Decision: LRU cache with max 20 entries balances memory and latency
+- **Content**: Migrated vector storage from custom implementation to LanceDB 0.27 with per-tenant LRU cache
+- **Scope**: store/manager.rs, store/lancedb.rs, ingest pipeline
+- **Decision**: LRU cache with max 20 entries balances memory and latency
 
 ### PREFERENCE (scope "public", category "preferences")
 - Stable user traits: personality, communication style, coding style (e.g., "prefers functional over OOP"), cross-session tool/workflow habits.
@@ -822,9 +825,9 @@ For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this st
 For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
 ```
 ## {偏好主题}
-- 偏好: {具体偏好描述}
-- 置信度: {0.0-1.0}
-- 类型: static | evolving
+- **偏好**: {具体偏好描述}
+- **置信度**: {0.0-1.0}
+- **类型**: static | evolving
 ```
 - Each preference gets its own `## Title` section.
 - Multiple preferences are separated by blank lines.
@@ -832,21 +835,21 @@ For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use t
 - Example (Chinese input):
 ```
 ## 编程语言偏好
-- 偏好: 喜欢Java和TypeScript，不喜欢Rust和Go
-- 置信度: 0.8
-- 类型: evolving
+- **偏好**: 喜欢Java和TypeScript，不喜欢Rust和Go
+- **置信度**: 0.8
+- **类型**: evolving
 
 ## 代码质量
-- 偏好: 要求通过团队评审保证质量
-- 置信度: 0.9
-- 类型: static
+- **偏好**: 要求通过团队评审保证质量
+- **置信度**: 0.9
+- **类型**: static
 ```
 - Example (English input):
 ```
 ## Communication Style
-- Preference: Prefers concise answers over verbose explanations
-- Confidence: 0.9
-- Type: static
+- **Preference**: Prefers concise answers over verbose explanations
+- **Confidence**: 0.9
+- **Type**: static
 ```
 
 ## CATEGORY VALUES (for WORK and EMOTIONAL)

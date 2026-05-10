@@ -2,88 +2,206 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// ── Nested config interface ──────────────────────────────────────────
+
 export interface OmemPluginConfig {
-  // Connection
-  apiUrl: string;
-  apiKey: string;
-  // Timeouts (milliseconds)
-  requestTimeoutMs: number;
-  // Content limits
-  maxQueryLength: number;
-  maxContentChars: number;
-  maxContentLength: number;
-  // Auto capture
-  autoCaptureThreshold: number;
-  ingestMode: "smart" | "raw";
-  // Recall settings
-  similarityThreshold: number;
-  maxRecallResults: number;
-  // UI settings
-  toastDelayMs: number;
+  connection: {
+    apiUrl: string;
+    apiKey: string;
+    requestTimeoutMs: number;
+  };
+  content: {
+    maxQueryLength: number;
+    maxContentChars: number;
+    maxContentLength: number;
+  };
+  ingest: {
+    autoCaptureThreshold: number;
+    ingestMode: "smart" | "raw";
+  };
+  recall: {
+    similarityThreshold: number;
+    maxRecallResults: number;
+  };
+  logging: {
+    logEnabled: boolean;
+    logLevel: "DEBUG" | "INFO" | "WARN" | "ERROR";
+    logDir: string;
+  };
+  ui: {
+    toastDelayMs: number;
+  };
+  agentMemoryPolicy?: Record<string, "none" | "readonly" | "readwrite">;
+  defaultPolicy?: "none" | "readonly" | "readwrite";
 }
 
+// ── Defaults ─────────────────────────────────────────────────────────
+
 const DEFAULTS: OmemPluginConfig = {
-  apiUrl: "https://www.mengxy.cc",
-  apiKey: "",
-  requestTimeoutMs: 15000,
-  maxQueryLength: 200,
-  maxContentChars: 30000,
-  maxContentLength: 500,
-  autoCaptureThreshold: 5,
-  ingestMode: "smart",
-  similarityThreshold: 0.4,
-  maxRecallResults: 10,
-  toastDelayMs: 7000,
+  connection: {
+    apiUrl: "https://www.mengxy.cc",
+    apiKey: "",
+    requestTimeoutMs: 15000,
+  },
+  content: {
+    maxQueryLength: 200,
+    maxContentChars: 30000,
+    maxContentLength: 500,
+  },
+  ingest: {
+    autoCaptureThreshold: 5,
+    ingestMode: "smart",
+  },
+  recall: {
+    similarityThreshold: 0.4,
+    maxRecallResults: 10,
+  },
+  logging: {
+    logEnabled: true,
+    logLevel: "INFO",
+    logDir: join(homedir(), ".config", "cerebro"),
+  },
+  ui: {
+    toastDelayMs: 7000,
+  },
 };
 
+// ── Flat-to-nested migration ─────────────────────────────────────────
+
+/** Shape of legacy flat config (pre-nesting). */
+interface FlatConfig {
+  apiUrl?: string;
+  apiKey?: string;
+  requestTimeoutMs?: number;
+  maxQueryLength?: number;
+  maxContentChars?: number;
+  maxContentLength?: number;
+  autoCaptureThreshold?: number;
+  ingestMode?: "smart" | "raw";
+  similarityThreshold?: number;
+  maxRecallResults?: number;
+  toastDelayMs?: number;
+  logEnabled?: boolean;
+  logLevel?: "DEBUG" | "INFO" | "WARN" | "ERROR";
+  logDir?: string;
+  // Nested fields that would indicate new format
+  connection?: unknown;
+}
+
+function isFlatConfig(cfg: Record<string, unknown>): boolean {
+  return "apiUrl" in cfg && !("connection" in cfg);
+}
+
+function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
+  return {
+    connection: {
+      apiUrl: flat.apiUrl ?? DEFAULTS.connection.apiUrl,
+      apiKey: flat.apiKey ?? DEFAULTS.connection.apiKey,
+      requestTimeoutMs: flat.requestTimeoutMs ?? DEFAULTS.connection.requestTimeoutMs,
+    },
+    content: {
+      maxQueryLength: flat.maxQueryLength ?? DEFAULTS.content.maxQueryLength,
+      maxContentChars: flat.maxContentChars ?? DEFAULTS.content.maxContentChars,
+      maxContentLength: flat.maxContentLength ?? DEFAULTS.content.maxContentLength,
+    },
+    ingest: {
+      autoCaptureThreshold: flat.autoCaptureThreshold ?? DEFAULTS.ingest.autoCaptureThreshold,
+      ingestMode: flat.ingestMode ?? DEFAULTS.ingest.ingestMode,
+    },
+    recall: {
+      similarityThreshold: flat.similarityThreshold ?? DEFAULTS.recall.similarityThreshold,
+      maxRecallResults: flat.maxRecallResults ?? DEFAULTS.recall.maxRecallResults,
+    },
+    logging: {
+      logEnabled: flat.logEnabled ?? DEFAULTS.logging.logEnabled,
+      logLevel: flat.logLevel ?? DEFAULTS.logging.logLevel,
+      logDir: flat.logDir ?? DEFAULTS.logging.logDir,
+    },
+    ui: {
+      toastDelayMs: flat.toastDelayMs ?? DEFAULTS.ui.toastDelayMs,
+    },
+  };
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+type IngestMode = "smart" | "raw";
+const INGEST_MODES: ReadonlySet<string> = new Set<IngestMode>(["smart", "raw"]);
+
+function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>): OmemPluginConfig {
+  const result: OmemPluginConfig = {
+    connection: { ...base.connection, ...overrides.connection },
+    content: { ...base.content, ...overrides.content },
+    ingest: { ...base.ingest, ...overrides.ingest },
+    recall: { ...base.recall, ...overrides.recall },
+    logging: { ...base.logging, ...overrides.logging },
+    ui: { ...base.ui, ...overrides.ui },
+  };
+  if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
+  if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
+  return result;
+}
+
+// ── Load config ──────────────────────────────────────────────────────
+
 export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPluginConfig {
-  const config: Partial<OmemPluginConfig> = { ...DEFAULTS };
+  let config: OmemPluginConfig = structuredClone(DEFAULTS);
 
   // Try loading from config file
   try {
-    const cfgPath = join(homedir(), ".config", "ourmem", "config.json");
-    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    const cfgPath = join(homedir(), ".config", "cerebro", "config.json");
+    const raw = JSON.parse(readFileSync(cfgPath, "utf-8")) as Record<string, unknown>;
 
-    if (cfg.apiUrl) config.apiUrl = cfg.apiUrl;
-    if (cfg.apiKey) config.apiKey = cfg.apiKey;
-    if (typeof cfg.requestTimeoutMs === "number") config.requestTimeoutMs = cfg.requestTimeoutMs;
-    if (typeof cfg.maxQueryLength === "number") config.maxQueryLength = cfg.maxQueryLength;
-    if (typeof cfg.maxContentChars === "number") config.maxContentChars = cfg.maxContentChars;
-    if (typeof cfg.maxContentLength === "number") config.maxContentLength = cfg.maxContentLength;
-    if (typeof cfg.autoCaptureThreshold === "number") config.autoCaptureThreshold = cfg.autoCaptureThreshold;
-    if (cfg.ingestMode === "raw" || cfg.ingestMode === "smart") config.ingestMode = cfg.ingestMode;
-    if (typeof cfg.similarityThreshold === "number") config.similarityThreshold = cfg.similarityThreshold;
-    if (typeof cfg.maxRecallResults === "number") config.maxRecallResults = cfg.maxRecallResults;
-    if (typeof cfg.toastDelayMs === "number") config.toastDelayMs = cfg.toastDelayMs;
+    // Auto-migrate flat format
+    const parsed: OmemPluginConfig = isFlatConfig(raw) ? migrateFlatToNested(raw as FlatConfig) : raw as unknown as OmemPluginConfig;
+
+    // Merge nested groups with defaults for safety
+    config = deepMerge(config, parsed);
   } catch {
     // Config file doesn't exist or is invalid, use defaults
   }
 
-  // Apply environment variable overrides
-  if (process.env.OMEM_API_URL) config.apiUrl = process.env.OMEM_API_URL;
-  if (process.env.OMEM_API_KEY) config.apiKey = process.env.OMEM_API_KEY;
+  // Apply environment variable overrides (flat OMEM_* → nested paths)
+  if (process.env.OMEM_API_URL) config.connection.apiUrl = process.env.OMEM_API_URL;
+  if (process.env.OMEM_API_KEY) config.connection.apiKey = process.env.OMEM_API_KEY;
   if (process.env.OMEM_REQUEST_TIMEOUT_MS) {
-    config.requestTimeoutMs = parseInt(process.env.OMEM_REQUEST_TIMEOUT_MS, 10) || DEFAULTS.requestTimeoutMs;
+    config.connection.requestTimeoutMs = parseInt(process.env.OMEM_REQUEST_TIMEOUT_MS, 10) || DEFAULTS.connection.requestTimeoutMs;
   }
   if (process.env.OMEM_AUTO_CAPTURE_THRESHOLD) {
-    config.autoCaptureThreshold = parseInt(process.env.OMEM_AUTO_CAPTURE_THRESHOLD, 10) || DEFAULTS.autoCaptureThreshold;
+    config.ingest.autoCaptureThreshold = parseInt(process.env.OMEM_AUTO_CAPTURE_THRESHOLD, 10) || DEFAULTS.ingest.autoCaptureThreshold;
   }
-  if (process.env.OMEM_INGEST_MODE === "raw" || process.env.OMEM_INGEST_MODE === "smart") {
-    config.ingestMode = process.env.OMEM_INGEST_MODE;
+  if (INGEST_MODES.has(process.env.OMEM_INGEST_MODE ?? "")) {
+    config.ingest.ingestMode = process.env.OMEM_INGEST_MODE as IngestMode;
   }
   if (process.env.OMEM_SIMILARITY_THRESHOLD) {
-    config.similarityThreshold = parseFloat(process.env.OMEM_SIMILARITY_THRESHOLD) || DEFAULTS.similarityThreshold;
+    config.recall.similarityThreshold = parseFloat(process.env.OMEM_SIMILARITY_THRESHOLD) || DEFAULTS.recall.similarityThreshold;
   }
   if (process.env.OMEM_MAX_RECALL_RESULTS) {
-    config.maxRecallResults = parseInt(process.env.OMEM_MAX_RECALL_RESULTS, 10) || DEFAULTS.maxRecallResults;
+    config.recall.maxRecallResults = parseInt(process.env.OMEM_MAX_RECALL_RESULTS, 10) || DEFAULTS.recall.maxRecallResults;
   }
 
   // Apply explicit overrides (from opencode.json)
   if (overrides) {
-    Object.assign(config, overrides);
+    config = deepMerge(config, overrides);
   }
 
-  return config as OmemPluginConfig;
+  // Expand ~ to home directory in logDir
+  if (config.logging.logDir?.startsWith("~")) {
+    config.logging.logDir = config.logging.logDir.replace(/^~/, homedir());
+  }
+
+  return config;
+}
+
+// ── Agent policy resolver ────────────────────────────────────────────
+
+export type AgentPolicy = "none" | "readonly" | "readwrite";
+
+export function resolveAgentPolicy(
+  agentName: string,
+  config: OmemPluginConfig,
+): AgentPolicy {
+  return config.agentMemoryPolicy?.[agentName] ?? config.defaultPolicy ?? "readonly";
 }
 
 export { DEFAULTS };

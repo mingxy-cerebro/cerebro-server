@@ -1,0 +1,71 @@
+{
+  // ── Connection ───────────────────────────────────────────────
+  // API endpoint and authentication for the Cerebro server.
+  "connection": {
+    // Cerebro server URL (env: OMEM_API_URL takes priority)
+    "apiUrl": "https://www.mengxy.cc",
+    // Your tenant API key (env: OMEM_API_KEY takes priority)
+    "apiKey": "",
+    // HTTP request timeout in milliseconds
+    "requestTimeoutMs": 15000
+  },
+
+  // ── Content ──────────────────────────────────────────────────
+  // Limits for content processing and ingestion.
+  "content": {
+    // Max characters for recall queries
+    "maxQueryLength": 200,
+    // Max content chars sent to the server per ingestion
+    "maxContentChars": 30000,
+    // Max single content item length for auto-capture
+    "maxContentLength": 500
+  },
+
+  // ── Ingest ───────────────────────────────────────────────────
+  // Controls how memories are captured and stored.
+  "ingest": {
+    // Minimum number of messages before auto-capture triggers
+    "autoCaptureThreshold": 5,
+    // "smart" = LLM-powered extraction | "raw" = store as-is
+    "ingestMode": "smart"
+  },
+
+  // ── Recall ───────────────────────────────────────────────────
+  // Tuning for memory retrieval relevance.
+  "recall": {
+    // Minimum cosine similarity to include a result (0.0–1.0)
+    "similarityThreshold": 0.4,
+    // Maximum number of memories returned per recall
+    "maxRecallResults": 10
+  },
+
+  // ── Logging ──────────────────────────────────────────────────
+  // Diagnostic logging for debugging plugin behavior.
+  "logging": {
+    // Enable/disable file logging
+    "logEnabled": true,
+    // Log verbosity: "DEBUG" | "INFO" | "WARN" | "ERROR"
+    "logLevel": "INFO",
+    // Directory for log files (default: ~/.config/cerebro)
+    "logDir": "~/.config/cerebro"
+  },
+
+  // ── UI ───────────────────────────────────────────────────────
+  // Terminal UI behavior tuning.
+  "ui": {
+    // Delay in ms before toast notifications auto-dismiss
+    "toastDelayMs": 7000
+  },
+
+  // ── Agent Memory Policy ──────────────────────────────────────
+  // Control which sub-agents can read/write memories.
+  // Values: "none" | "readonly" | "readwrite"
+  "agentMemoryPolicy": {
+    // Examples: restrict exploration agents to read-only
+    // "explore": "readonly",
+    // "librarian": "readonly"
+  },
+
+  // Default policy for agents not listed above.
+  // "defaultPolicy": "readonly"
+}
