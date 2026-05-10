@@ -131,10 +131,10 @@ const OmemPlugin: Plugin = async (input) => {
       if (input.sessionID) currentSessionId = input.sessionID;
       return recallHook(input, output);
     },
-    "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode),
-    "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => currentSessionId, client),
+    "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId),
+    "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => currentSessionId, client, config, agentId),
     tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => currentSessionId }),
-    event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => currentSessionId, isAutoStoreEnabled, agentId),
+    event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => currentSessionId, isAutoStoreEnabled, agentId, config),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;

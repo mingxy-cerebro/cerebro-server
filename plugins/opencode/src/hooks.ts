@@ -1,8 +1,8 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
 import type { CerebroClient, SearchResult } from "./client.js";
-import type { OmemPluginConfig } from "./config.js";
+import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
 import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
-import { logDebug, logError as logErr } from "./logger.js";
+import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 
 const projectNameCache = new Map<string, string>();
@@ -243,7 +243,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
 
     // 5a: agent memory policy check — skip recall entirely for 'none' agents
     const agentId = process.env.OMEM_AGENT_ID || "opencode";
-    const policy = config.agentMemoryPolicy?.[agentId] ?? config.defaultPolicy ?? "readonly";
+    const policy = resolveAgentPolicy(agentId, config);
     if (policy === "none") return;
 
     try {
@@ -384,7 +384,8 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
   };
 }
 
-export function keywordDetectionHook(_client: CerebroClient, _containerTags: string[], threshold: number, _tui: any, _ingestMode: "smart" | "raw" = "smart") {
+export function keywordDetectionHook(_client: CerebroClient, _containerTags: string[], threshold: number, _tui: any, _ingestMode: "smart" | "raw" = "smart", config: Partial<OmemPluginConfig> = {}, agentId?: string) {
+  const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
     input: { sessionID: string; messageID?: string },
     output: { message: UserMessage; parts: Part[] },
@@ -405,6 +406,11 @@ export function keywordDetectionHook(_client: CerebroClient, _containerTags: str
       logDebug("keywordDetectionHook triggered", { sessionId: input.sessionID });
     }
 
+    const policy = resolveAgentPolicy(effectiveAgentId, config);
+    if (policy === "none") {
+      return;
+    }
+
     if (!sessionMessages.has(input.sessionID)) {
       sessionMessages.set(input.sessionID, []);
     }
@@ -414,25 +420,43 @@ export function keywordDetectionHook(_client: CerebroClient, _containerTags: str
     });
 
     const messages = sessionMessages.get(input.sessionID)!;
-    // Ingest is now handled by sessionIdleHook (session.idle → sessionIngest API).
-    // This hook only collects messages and detects keywords for recall.
     if (messages.length >= threshold) {
       // Threshold reached — messages will be processed on next session.idle
     }
   };
 }
 
-export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any) {
+export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<OmemPluginConfig> = {}, agentId?: string) {
+  const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
   ) => {
+    // Search (read) always runs — even readonly agents need context during compacting
+    try {
+      const results = await client.searchMemories("*", 20, undefined, containerTags);
+      const block = buildContextBlock(results);
+      if (block) {
+        output.context.push(block);
+      }
+    } catch {
+    }
+
+    // Policy gate: only readwrite agents can write memories
+    const policy = resolveAgentPolicy(effectiveAgentId, config);
+    if (policy !== "readwrite") {
+      logInfo("compactingHook blocked by policy", { agentId: effectiveAgentId, policy });
+      if (input.sessionID) sessionMessages.delete(input.sessionID);
+      return;
+    }
+
     if (input.sessionID && sessionMessages.has(input.sessionID)) {
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
         if (messages.length > 0) {
+
           // Use main session ID for sub-agent sessions so memories merge into the main session
           const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
 
@@ -441,26 +465,24 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
           try {
             if (sdkClient && input.sessionID) {
               const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
-              logDebug("compactingHook sessionInfo", { sessionInfo: JSON.stringify(sessionInfo) });
               logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
               projectName = sessionInfo?.data?.directory
                 ? await detectProjectName(sessionInfo.data.directory)
                 : undefined;
-              logDebug("compactingHook projectName", { projectName: String(projectName) });
             }
           } catch (e) {
             logErr("compactingHook detectProjectName failed", { error: String(e) });
           }
 
           try {
-            logDebug("compactingHook ingestMessages called", { msgCount: messages.length, projectName: String(projectName), sessionId: effectiveSessionId });
+            logInfo("compactingHook ingestMessages called", { msgCount: messages.length, sessionId: effectiveSessionId });
             const result = await client.ingestMessages(messages, {
               mode: ingestMode,
               tags: [...containerTags, "auto-capture"],
               sessionId: effectiveSessionId,
               projectName: projectName,
             });
-            logDebug("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
+            logInfo("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
             if (result === null) {
               showToast(tui, "🔴 Archive Failed", "Session archive blocked · check spiritual realm status", "error");
             } else {
@@ -473,15 +495,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
           sessionMessages.delete(input.sessionID);
         }
       }
-    }
-
-    try {
-      const results = await client.searchMemories("*", 20, undefined, containerTags);
-      const block = buildContextBlock(results);
-      if (block) {
-        output.context.push(block);
-      }
-    } catch {
     }
   };
 }
@@ -499,6 +512,7 @@ export function sessionIdleHook(
   getMainSessionId?: () => string | undefined,
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
   agentId?: string,
+  config: Partial<OmemPluginConfig> = {},
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
@@ -557,7 +571,13 @@ export function sessionIdleHook(
         if (!hasNewMessages || conversationMessages.length === 0) return;
 
         if (threshold > 1 && conversationMessages.length < threshold) {
-          // Log that we're waiting for more messages
+          return;
+        }
+
+        // Policy gate: only readwrite agents can write memories
+        const policy = resolveAgentPolicy(agentId || "", config);
+        if (policy !== "readwrite") {
+          logInfo("sessionIdleHook blocked by policy", { agentId: agentId || "", policy });
           return;
         }
 
@@ -565,21 +585,19 @@ export function sessionIdleHook(
         let projectName: string | undefined;
         try {
           const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
-          logDebug("sessionIdleHook sessionInfo", { sessionInfo: JSON.stringify(sessionInfo) });
           logDebug("sessionIdleHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
           sessionTitle = sessionInfo?.data?.title;
           projectName = sessionInfo?.data?.directory
             ? await detectProjectName(sessionInfo.data.directory)
             : undefined;
-          logDebug("sessionIdleHook projectName", { projectName: String(projectName) });
         } catch (e) {
           logErr("sessionIdleHook detectProjectName failed", { error: String(e) });
         }
 
         try {
-          logDebug("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, projectName: String(projectName), sessionId: sessionID, title: String(sessionTitle) });
+          logInfo("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, sessionId: sessionID, title: String(sessionTitle) });
           await cerebroClient.sessionIngest(conversationMessages, sessionID, agentId, sessionTitle, projectName);
-          logDebug("sessionIdleHook sessionIngest ok");
+          logInfo("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
             processedMessageIds.add(id);
           }

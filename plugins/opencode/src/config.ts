@@ -199,9 +199,9 @@ export type AgentPolicy = "none" | "readonly" | "readwrite";
 
 export function resolveAgentPolicy(
   agentName: string,
-  config: OmemPluginConfig,
+  config: Partial<OmemPluginConfig>,
 ): AgentPolicy {
-  return config.agentMemoryPolicy?.[agentName] ?? config.defaultPolicy ?? "readonly";
+  return config.agentMemoryPolicy?.[agentName] ?? config.defaultPolicy ?? "readwrite";
 }
 
 export { DEFAULTS };
