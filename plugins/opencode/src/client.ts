@@ -63,6 +63,7 @@ export interface ShouldRecallResponse {
   confidence?: number;
   memories?: SearchResult[];
   clustered?: ClusteredRecallResult;
+  event_id?: string;
 }
 
 export interface SessionRecallRecord {
@@ -172,6 +173,13 @@ export class CerebroClient {
       method: "PUT",
       body: JSON.stringify(body),
     });
+  }
+
+  private patch<T>(path: string, body: unknown, timeoutMs?: number): Promise<T | null> {
+    return this.request<T>(path, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }, timeoutMs);
   }
 
   private del<T>(path: string): Promise<T | null> {
@@ -348,23 +356,15 @@ export class CerebroClient {
     return res;
   }
 
-  async recordSessionRecall(
-    session_id: string,
-    memory_ids: string[],
-    recall_type: string,
-    query_text?: string,
-    similarity_score?: number,
-    llm_confidence?: number,
+  async updateProfileInjected(
+    event_id: string,
+    profile_injected: boolean,
   ): Promise<unknown | null> {
-    const body = {
-      session_id,
-      memory_ids,
-      recall_type,
-      query_text: query_text ?? "",
-      similarity_score: similarity_score ?? 0,
-      llm_confidence: llm_confidence ?? 0,
-    };
-    const res = await this.post("/v1/session-recalls", body, 20_000);
+    const res = await this.patch(
+      `/v1/recall-events/${event_id}/profile-injected`,
+      { profile_injected },
+      10_000,
+    );
     return res;
   }
 

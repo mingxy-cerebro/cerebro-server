@@ -127,9 +127,35 @@ function showToast(tui: any, title: string, message: string, variant: string = "
   }, delayMs);
 }
 
+const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
+  /^\[search-mode\]/,
+  /^\[analyze-mode\]/,
+  /<!--\s*OMO_INTERNAL_INITIATOR\s*-->/,
+  /^\[SYSTEM DIRECTIVE:/,
+  /^\[restore checkpointed/,
+  /^\[session recovered/,
+  /^<system-reminder>/,
+  /^<EXTREMELY_IMPORTANT>/,
+  /^\[CONTEXT\]/,
+  /^\[GOAL\]/,
+  /^## 任务[：:]/,
+  /^## 改动/,
+  /^## 任务：/,
+  /^Analyze the attached file/,
+  /^Provide ONLY the extracted/,
+  /^Called the Read tool/,
+  /^MANDATORY delegate_task/,
+];
+
 function extractUserRequest(content: string): string {
   const match = content.match(/<user-request>([\s\S]*?)<\/user-request>/);
-  return match ? match[1].trim() : content;
+  let text = match ? match[1].trim() : content;
+
+  for (const pattern of SYSTEM_INJECTION_PATTERNS) {
+    if (pattern.test(text)) return "";
+  }
+
+  return text;
 }
 
 const keywordDetectedSessions = new Set<string>();
@@ -292,8 +318,20 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       logDebug("autoRecallHook start", { sessionId: input.sessionID, agentId, policy });
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
+
+      // After compacting, sessionMessages is cleared but firstMessages gets repopulated
+      // by keywordDetectionHook with compact summary — skip recall in this transient state
+      if (userMessages.length === 0) {
+        logDebug("autoRecallHook skipped: no user messages in session (post-compacting?)", { sessionId: input.sessionID });
+        return;
+      }
+
       const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
       const query_text = extractUserRequest(rawQuery);
+      if (!query_text) {
+        logDebug("autoRecallHook filtered system injection", { rawQueryPrefix: rawQuery.slice(0, 60) });
+        return;
+      }
       const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
 
       const projectTags = containerTags.filter(t => t.startsWith("omem_project_"));
@@ -409,14 +447,9 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
       logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered });
 
-      const recordResult = await client.recordSessionRecall(
-        input.sessionID,
-        newIds,
-        "auto",
-        query_text,
-        shouldRecallRes?.memories?.[0]?.score,
-        shouldRecallRes?.confidence,
-      );
+      if (profileInjected && shouldRecallRes?.event_id) {
+        await client.updateProfileInjected(shouldRecallRes.event_id, true);
+      }
 
       const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
       const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;
@@ -450,10 +483,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       }
 
       showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
-
-      if (!recordResult) {
-        showToast(tui, "🔴 Recall Record Failed", `Memories injected but save failed · check API connection`, "warning", toastDelayMs);
-      }
 
       if (keywordDetectedSessions.has(input.sessionID)) {
         output.system.push(KEYWORD_NUDGE);
@@ -528,6 +557,8 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
     input: { sessionID?: string },
     output: { context: string[]; prompt?: string },
   ) => {
+    logInfo("compactingHook triggered", { sessionId: input.sessionID, hasSessionMessages: sessionMessages.has(input.sessionID || "") });
+
     // Search (read) always runs — even readonly agents need context during compacting
     try {
       const results = await client.searchMemories("*", 20, undefined, containerTags);
@@ -561,6 +592,23 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       return;
     }
 
+    const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
+
+    // Resolve project name (shared by ingest + poll)
+    let projectName: string | undefined;
+    try {
+      if (sdkClient && input.sessionID) {
+        const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
+        logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
+        projectName = sessionInfo?.data?.directory
+          ? await detectProjectName(sessionInfo.data.directory)
+          : undefined;
+      }
+    } catch (e) {
+      logErr("compactingHook detectProjectName failed", { error: String(e) });
+    }
+
+    // --- Phase 1: Ingest tracked messages from sessionMessages (if available) ---
     if (input.sessionID && sessionMessages.has(input.sessionID)) {
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
@@ -570,24 +618,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
         if (messages.length > 0) {
-
-          // Use main session ID for sub-agent sessions so memories merge into the main session
-          const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
-
-          // Detect project name from session info
-          let projectName: string | undefined;
-          try {
-            if (sdkClient && input.sessionID) {
-              const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
-              logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
-              projectName = sessionInfo?.data?.directory
-                ? await detectProjectName(sessionInfo.data.directory)
-                : undefined;
-            }
-          } catch (e) {
-            logErr("compactingHook detectProjectName failed", { error: String(e) });
-          }
-
           try {
             logInfo("compactingHook ingestMessages called", { msgCount: messages.length, sessionId: effectiveSessionId, agentId: effectiveAgentId });
             const result = await client.ingestMessages(messages, {
@@ -607,12 +637,256 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
             logErr("compactingHook ingestMessages failed", { error: String(e) });
             showToast(tui, "🔴 Archive Failed", "Session archive blocked · spiritual pulse anomaly", "error");
           }
-          sessionMessages.delete(input.sessionID);
-          profileInjectedSessions.delete(input.sessionID);
-          injectedMemoryIds.delete(input.sessionID);
-          firstMessages.delete(input.sessionID);
         }
       }
+      // Cleanup tracked messages regardless of ingest result
+      sessionMessages.delete(input.sessionID);
+      profileInjectedSessions.delete(input.sessionID);
+      injectedMemoryIds.delete(input.sessionID);
+      firstMessages.delete(input.sessionID);
+    }
+
+    // Phase 2: compact inserts "[restore checkpointed" user message — poll for that marker
+    if (sdkClient && input.sessionID) {
+      const pollSessionId = input.sessionID;
+      const pollEffectiveSessionId = effectiveSessionId;
+      const pollProjectName = projectName;
+      const pollAgentId = effectiveAgentId;
+
+      let baselineMsgIds: Set<string> = new Set();
+      try {
+        const preResp = await sdkClient.session.messages({ path: { id: pollSessionId } });
+        if (preResp?.data) {
+          baselineMsgIds = new Set(preResp.data.map((m: any) => m.info?.id).filter(Boolean));
+        }
+        logInfo("compactingHook: summary poll starting", { baselineCount: baselineMsgIds.size, sessionId: pollSessionId });
+      } catch (e) {
+        logErr("compactingHook: baseline snapshot failed", { error: String(e) });
+      }
+
+      if (baselineMsgIds.size > 0) {
+        const maxAttempts = 12;
+        const pollInterval = 5000;
+        const COMPACT_MARKER = "[restore checkpointed";
+
+        (async () => {
+          for (let i = 0; i < maxAttempts; i++) {
+            await new Promise(r => setTimeout(r, pollInterval));
+            try {
+              const resp = await sdkClient.session.messages({ path: { id: pollSessionId } });
+              if (!resp?.data) continue;
+
+              const currentCount = resp.data.length;
+              logDebug("compactingHook: summary poll tick", {
+                attempt: i + 1, currentCount, baselineCount: baselineMsgIds.size,
+              });
+
+              const compactMsg = resp.data.find((m: any) => {
+                if (m.info?.role !== "user") return false;
+                if (baselineMsgIds.has(m.info?.id)) return false;
+                const textParts = (m.parts || [])
+                  .filter((p: any) => p.type === "text" && p.text)
+                  .map((p: any) => p.text);
+                return textParts.join("\n").includes(COMPACT_MARKER);
+              });
+
+              if (compactMsg) {
+                const compactIdx = resp.data.findIndex((m: any) => m.info?.id === compactMsg.info?.id);
+                const userTextParts = (compactMsg.parts || [])
+                  .filter((p: any) => p.type === "text" && p.text)
+                  .map((p: any) => p.text);
+                const userFullText = userTextParts.join("\n").trim();
+
+                logInfo("compactingHook: compact completed detected", {
+                  attempt: i + 1, msgId: compactMsg.info?.id,
+                  compactIdx, userTextLen: userFullText.length,
+                  partsCount: (compactMsg.parts || []).length,
+                  partTypes: (compactMsg.parts || []).map((p: any) => p.type),
+                  firstPartLen: userTextParts[0]?.length ?? 0,
+                  msgsAfterCompact: resp.data.length - compactIdx - 1,
+                });
+
+                if (userFullText.length > 0) {
+                  logDebug("compactingHook: compact msg full text", {
+                    text: userFullText.substring(0, 500),
+                  });
+                }
+
+                let summaryText: string | undefined;
+
+                const markerLineIdx = userFullText.indexOf(COMPACT_MARKER);
+                if (markerLineIdx >= 0) {
+                  const afterMarker = userFullText.substring(markerLineIdx);
+                  const firstNewline = afterMarker.indexOf("\n");
+                  const candidate = firstNewline >= 0 ? afterMarker.substring(firstNewline + 1).trim() : "";
+                  if (candidate.length > 100) {
+                    summaryText = candidate;
+                  }
+                }
+
+                if (!summaryText && compactIdx >= 0) {
+                  for (let j = compactIdx + 1; j < resp.data.length; j++) {
+                    const msg = resp.data[j];
+                    if (msg.info?.role !== "assistant") continue;
+                    const assistParts = (msg.parts || [])
+                      .filter((p: any) => p.type === "text" && p.text)
+                      .map((p: any) => p.text);
+                    const assistText = assistParts.join("\n").trim();
+                    logDebug("compactingHook: assistant msg after compact", {
+                      idx: j, textLen: assistText.length, partTypes: (msg.parts || []).map((p: any) => p.type),
+                      preview: assistText.substring(0, 200),
+                    });
+                    if (assistText.length > 200) {
+                      summaryText = assistText;
+                      break;
+                    }
+                  }
+                }
+
+                if (!summaryText && userFullText.length > 100) {
+                  summaryText = userFullText;
+                }
+
+                if (summaryText) {
+                  logInfo("compactingHook: storing compact summary", {
+                    summaryLen: summaryText.length, msgId: compactMsg.info?.id,
+                  });
+                  try {
+                    const result = await client.ingestMessages(
+                      [{ role: "user" as const, content: summaryText }],
+                      {
+                        mode: ingestMode,
+                        tags: [...containerTags, "auto-capture", "compact-summary"],
+                        sessionId: pollEffectiveSessionId,
+                        projectName: pollProjectName,
+                        agentId: pollAgentId,
+                      },
+                    );
+                    logInfo("compactingHook: compact summary store result", {
+                      result: result === null ? "null(blocked)" : "ok",
+                    });
+                    if (result !== null) {
+                      showToast(tui, "📦 Compact Summary Stored", "Session summary archived to memory", "success");
+                    }
+                  } catch (e) {
+                    logErr("compactingHook: compact summary store failed", { error: String(e) });
+                  }
+                } else {
+                  logInfo("compactingHook: no summary text found after compact marker", {
+                    userTextLen: userFullText.length, compactIdx,
+                  });
+                }
+                break;
+              }
+            } catch (e) {
+              logErr("compactingHook: summary poll error", { error: String(e), attempt: i + 1 });
+            }
+          }
+        })();
+      }
+    }
+  };
+}
+
+export function autocontinueHook(
+  client: CerebroClient,
+  containerTags: string[],
+  tui: any,
+  ingestMode: "smart" | "raw" = "smart",
+  isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
+  getMainSessionId?: () => string | undefined,
+  sdkClient?: any,
+  config: Partial<OmemPluginConfig> = {},
+  agentId?: string,
+) {
+  const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
+  return async (
+    input: {
+      sessionID: string;
+      agent: string;
+      model: Model;
+      message: UserMessage;
+      overflow: boolean;
+    },
+    _output: { enabled: boolean },
+  ) => {
+    try {
+      const policy = resolveAgentPolicy(effectiveAgentId, config);
+      if (policy !== "readwrite") {
+        logInfo("autocontinueHook blocked by policy", { agentId: effectiveAgentId, policy });
+        return;
+      }
+
+      if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
+        logInfo("autocontinueHook skipped: auto-store disabled", { sessionId: input.sessionID });
+        return;
+      }
+
+      const effectiveSessionId = getMainSessionId?.() || input.sessionID;
+
+      if (!sdkClient) {
+        logInfo("autocontinueHook skipped: no sdkClient", { sessionId: input.sessionID });
+        return;
+      }
+
+      let summaryText: string | undefined;
+      try {
+        const response = await sdkClient.session.messages({ path: { id: input.sessionID } });
+        if (response?.data) {
+          const targetMsg = response.data.find(
+            (msg: any) => msg.info?.id === input.message.id,
+          );
+          if (targetMsg?.parts) {
+            const textParts = (targetMsg.parts as any[])
+              .filter((p: any) => p.type === "text" && p.text)
+              .map((p: any) => p.text);
+            summaryText = textParts.join("\n").trim();
+          }
+        }
+      } catch (e) {
+        logErr("autocontinueHook failed to fetch message parts", { error: String(e) });
+      }
+
+      if (!summaryText) {
+        logInfo("autocontinueHook skipped: no summary text found", { sessionId: input.sessionID, messageId: input.message.id });
+        return;
+      }
+
+      let projectName: string | undefined;
+      try {
+        const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
+        projectName = sessionInfo?.data?.directory
+          ? await detectProjectName(sessionInfo.data.directory)
+          : undefined;
+      } catch (e) {
+        logErr("autocontinueHook detectProjectName failed", { error: String(e) });
+      }
+
+      const messages = [{ role: "user" as const, content: summaryText }];
+      logInfo("autocontinueHook storing compact summary", {
+        summaryLen: summaryText.length,
+        sessionId: effectiveSessionId,
+        agentId: effectiveAgentId,
+        overflow: input.overflow,
+        projectName,
+      });
+
+      const result = await client.ingestMessages(messages, {
+        mode: ingestMode,
+        tags: [...containerTags, "auto-capture", "compact-summary"],
+        sessionId: effectiveSessionId,
+        projectName: projectName,
+        agentId: effectiveAgentId,
+      });
+
+      logInfo("autocontinueHook store result", { result: result === null ? "null(blocked)" : "ok" });
+      if (result === null) {
+        showToast(tui, "🔴 Compact Summary Failed", "Storage blocked · check server status", "error");
+      } else {
+        showToast(tui, "📦 Compact Summary Stored", "Session summary archived to memory", "success");
+      }
+    } catch (e) {
+      logErr("autocontinueHook failed", { error: String(e) });
     }
   };
 }

@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.mengxy.cc/schemas/cerebro-plugin-config.json",
+  "title": "Cerebro Plugin Configuration",
+  "description": "Configuration schema for @mingxy/cerebro OpenCode plugin",
+  "type": "object",
+  "properties": {
+    "connection": {
+      "type": "object",
+      "description": "API endpoint and authentication for the Cerebro server",
+      "properties": {
+        "apiUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Cerebro server URL (env: OMEM_API_URL takes priority)",
+          "default": "https://www.mengxy.cc"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "Your tenant API key (env: OMEM_API_KEY takes priority)",
+          "default": ""
+        },
+        "requestTimeoutMs": {
+          "type": "number",
+          "description": "HTTP request timeout in milliseconds",
+          "default": 15000,
+          "minimum": 1000,
+          "maximum": 120000
+        }
+      },
+      "additionalProperties": false,
+      "required": ["apiUrl", "apiKey"]
+    },
+    "content": {
+      "type": "object",
+      "description": "Limits for content processing and ingestion",
+      "properties": {
+        "maxQueryLength": {
+          "type": "number",
+          "description": "Max characters for recall queries",
+          "default": 200,
+          "minimum": 50,
+          "maximum": 1000
+        },
+        "maxContentChars": {
+          "type": "number",
+          "description": "Max content chars sent to the server per ingestion",
+          "default": 30000,
+          "minimum": 1000,
+          "maximum": 100000
+        },
+        "maxContentLength": {
+          "type": "number",
+          "description": "Max single content item length for auto-capture",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 5000
+        }
+      },
+      "additionalProperties": false
+    },
+    "ingest": {
+      "type": "object",
+      "description": "Controls how memories are captured and stored",
+      "properties": {
+        "autoCaptureThreshold": {
+          "type": "number",
+          "description": "Minimum number of messages before auto-capture triggers",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 100
+        },
+        "ingestMode": {
+          "type": "string",
+          "description": "Ingestion mode: smart = LLM-powered extraction, raw = store as-is",
+          "enum": ["smart", "raw"],
+          "default": "smart"
+        }
+      },
+      "additionalProperties": false
+    },
+    "recall": {
+      "type": "object",
+      "description": "Tuning for memory retrieval relevance",
+      "properties": {
+        "similarityThreshold": {
+          "type": "number",
+          "description": "Minimum cosine similarity to include a result (0.0-1.0)",
+          "default": 0.4,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "maxRecallResults": {
+          "type": "number",
+          "description": "Maximum number of memories returned per recall",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "additionalProperties": false
+    },
+    "logging": {
+      "type": "object",
+      "description": "Diagnostic logging for debugging plugin behavior",
+      "properties": {
+        "logEnabled": {
+          "type": "boolean",
+          "description": "Enable/disable file logging",
+          "default": true
+        },
+        "logLevel": {
+          "type": "string",
+          "description": "Log verbosity",
+          "enum": ["DEBUG", "INFO", "WARN", "ERROR"],
+          "default": "INFO"
+        },
+        "logDir": {
+          "type": "string",
+          "description": "Directory for log files",
+          "default": "~/.config/cerebro"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ui": {
+      "type": "object",
+      "description": "Terminal UI behavior tuning",
+      "properties": {
+        "toastDelayMs": {
+          "type": "number",
+          "description": "Delay in ms before toast notifications auto-dismiss",
+          "default": 7000,
+          "minimum": 1000,
+          "maximum": 30000
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentMemoryPolicy": {
+      "type": "object",
+      "description": "Control which sub-agents can read/write memories",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["none", "readonly", "readwrite"],
+        "description": "Policy for this agent name"
+      },
+      "examples": [
+        {
+          "explore": "readonly",
+          "librarian": "readonly"
+        }
+      ]
+    },
+    "defaultPolicy": {
+      "type": "string",
+      "description": "Default policy for agents not listed in agentMemoryPolicy",
+      "enum": ["none", "readonly", "readwrite"],
+      "default": "readwrite"
+    }
+  },
+  "additionalProperties": false
+}

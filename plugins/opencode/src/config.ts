@@ -144,8 +144,27 @@ function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>)
 
 // ── Load config ──────────────────────────────────────────────────────
 
+const LEVEL_MAP: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+
+function readConfiguredLogLevel(): number {
+  try {
+    const cfgPath = join(homedir(), ".config", "cerebro", "config.json");
+    const raw = JSON.parse(readFileSync(cfgPath, "utf-8")) as Record<string, unknown>;
+    const nested = (raw?.logging as Record<string, unknown>)?.logLevel as string | undefined;
+    const flat = raw?.logLevel as string | undefined;
+    const level = nested ?? flat ?? "INFO";
+    return LEVEL_MAP[level] ?? LEVEL_MAP.INFO;
+  } catch {
+    return LEVEL_MAP.INFO;
+  }
+}
+
+const CONFIGURED_MIN_LEVEL = readConfiguredLogLevel();
+
 /** File-only logger for config.ts (cannot import logger.ts due to circular dependency). */
 function configLog(message: string, fields?: Record<string, unknown>, level: string = "WARN"): void {
+  const lvl = LEVEL_MAP[level] ?? 0;
+  if (lvl < CONFIGURED_MIN_LEVEL) return;
   try {
     const logDir = join(homedir(), ".config", "cerebro", "logs");
     const logPath = join(logDir, "plugin.log");

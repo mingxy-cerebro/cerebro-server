@@ -34,7 +34,8 @@ function writeLog(level: string, message: string, fields?: Record<string, unknow
   const nowMs = now.getTime();
   const delta = ((nowMs - lastLogTime) / 1000).toFixed(2);
   lastLogTime = nowMs;
-  const ts = now.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const ts = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
   const parts = [`${level.padEnd(5)} ${ts} +${delta}s service=cerebro`];
   if (fields) {
     for (const [k, v] of Object.entries(fields)) {

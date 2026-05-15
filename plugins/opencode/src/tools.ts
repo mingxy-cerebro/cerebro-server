@@ -2,25 +2,6 @@ import { tool } from "@opencode-ai/plugin";
 import type { CerebroClient } from "./client.js";
 import { isAutoStoreEnabled, setAutoStoreEnabled } from "./index.js";
 
-function extractMemoryIds(result: unknown): string[] {
-  if (!result) return [];
-  if (Array.isArray(result)) {
-    return (result as Array<{ id?: string }>).map((m) => m.id).filter(Boolean) as string[];
-  }
-  if (typeof result === "object" && result !== null) {
-    const r = result as Record<string, unknown>;
-    if (Array.isArray(r.memories)) {
-      return (r.memories as Array<{ id?: string }>).map((m) => m.id).filter(Boolean) as string[];
-    }
-    if (Array.isArray(r.results)) {
-      return (r.results as Array<{ id?: string; memory?: { id?: string } }>)
-        .map((m) => m.id ?? m.memory?.id)
-        .filter(Boolean) as string[];
-    }
-  }
-  return [];
-}
-
 export interface ToolContext {
   agentId?: string;
   getSessionId: () => string | undefined;
@@ -255,19 +236,6 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           agentId: effectiveAgentId,
         });
         if (result === null) return JSON.stringify({ ok: false, error: "Ingestion failed" });
-        if (args.session_id) {
-          const memoryIds = extractMemoryIds(result);
-          if (memoryIds.length > 0) {
-            await client.recordSessionRecall(
-              args.session_id,
-              memoryIds,
-              "manual",
-              args.messages.map((m) => m.content).join("\n").slice(0, 200),
-              0,
-              0,
-            ).catch(() => {});
-          }
-        }
         return JSON.stringify({ ok: true, result });
       },
     }),

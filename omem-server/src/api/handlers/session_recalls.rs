@@ -66,31 +66,8 @@ pub struct ShouldRecallResponse {
     pub similarity_score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clustered: Option<crate::cluster::aggregator::ClusteredResult>,
-}
-
-#[derive(Deserialize)]
-pub struct CreateSessionRecallRequest {
-    pub session_id: String,
-    pub memory_ids: Vec<String>,
-    pub recall_type: String,
-    #[serde(default)]
-    pub query_text: String,
-    #[serde(default)]
-    pub similarity_score: f32,
-    #[serde(default)]
-    pub llm_confidence: f32,
-    #[serde(default)]
-    pub profile_injected: bool,
-}
-
-#[derive(Deserialize)]
-pub struct ListSessionRecallsQuery {
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub offset: usize,
-    pub session_id: Option<String>,
-    pub expand: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -123,15 +100,6 @@ pub struct ListSessionGroupsResponse {
     pub offset: usize,
 }
 
-#[derive(Serialize)]
-pub struct ListSessionRecallsResponse {
-    pub recalls: Vec<serde_json::Value>,
-    pub limit: usize,
-    pub offset: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memories: Option<Vec<Memory>>,
-}
-
 pub async fn should_recall(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -153,6 +121,7 @@ pub async fn should_recall(
             confidence: None,
             similarity_score: None,
             clustered: None,
+            event_id: None,
         }));
     }
 
@@ -177,6 +146,7 @@ pub async fn should_recall(
                     confidence: None,
                     similarity_score: None,
                     clustered: None,
+                    event_id: None,
                 }));
             }
         }
@@ -202,6 +172,7 @@ pub async fn should_recall(
                         confidence: None,
                         similarity_score: Some(sim),
                         clustered: None,
+                        event_id: None,
                     }));
                 }
                 Some(sim)
@@ -396,8 +367,9 @@ pub async fn should_recall(
         memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32
     };
 
+    let event_id = uuid::Uuid::new_v4().to_string();
+
     if !memories.is_empty() || !all_discarded.is_empty() {
-        let event_id = uuid::Uuid::new_v4().to_string();
         let kept_count = memories.len() as u32;
         let discarded_count = all_discarded.len() as u32;
 
@@ -454,6 +426,23 @@ pub async fn should_recall(
                 tracing::warn!(error = %e, "failed_to_save_recall_items");
             }
         }
+    } else {
+        let event = RecallEvent {
+            id: event_id.clone(),
+            session_id: body.session_id.clone(),
+            recall_type: "auto".to_string(),
+            query_text: body.query_text.clone(),
+            max_score: 0.0,
+            llm_confidence: 0.0,
+            profile_injected: false,
+            kept_count: 0,
+            discarded_count: 0,
+            tenant_id: auth.tenant_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = store.create_recall_event(&event).await {
+            tracing::warn!(error = %e, "failed_to_save_recall_event");
+        }
     }
 
     let clustered = if !memories.is_empty() {
@@ -484,6 +473,7 @@ pub async fn should_recall(
             confidence: None,
             similarity_score,
             clustered: None,
+            event_id: Some(event_id.clone()),
         }));
     }
 
@@ -501,44 +491,8 @@ pub async fn should_recall(
         confidence: Some(confidence),
         similarity_score,
         clustered,
+        event_id: Some(event_id.clone()),
     }))
-}
-
-pub async fn create_session_recall(
-    State(_state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthInfo>,
-    Json(_body): Json<CreateSessionRecallRequest>,
-) -> Result<Json<Vec<serde_json::Value>>, OmemError> {
-    Ok(Json(vec![]))
-}
-
-pub async fn list_session_recalls(
-    State(_state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthInfo>,
-    Query(params): Query<ListSessionRecallsQuery>,
-) -> Result<Json<ListSessionRecallsResponse>, OmemError> {
-    Ok(Json(ListSessionRecallsResponse {
-        recalls: vec![],
-        limit: params.limit,
-        offset: params.offset,
-        memories: None,
-    }))
-}
-
-pub async fn get_session_recall(
-    State(_state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthInfo>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, OmemError> {
-    Err(OmemError::NotFound(format!("session_recall {id}")))
-}
-
-pub async fn delete_session_recall(
-    State(_state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthInfo>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, OmemError> {
-    Err(OmemError::NotFound(format!("session_recall {id}")))
 }
 
 pub async fn list_session_groups(
@@ -713,4 +667,25 @@ pub async fn list_recall_event_items(
         .list_recall_items_by_event(&auth.tenant_id, &event_id)
         .await?;
     Ok(Json(items))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProfileInjectedBody {
+    pub profile_injected: bool,
+}
+
+pub async fn update_recall_event_profile(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(event_id): Path<String>,
+    Json(body): Json<UpdateProfileInjectedBody>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+    store
+        .update_recall_event_profile(&event_id, body.profile_injected)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -889,6 +889,40 @@ impl LanceStore {
         Ok(map)
     }
 
+    pub async fn update_recall_event_profile(
+        &self,
+        event_id: &str,
+        profile_injected: bool,
+    ) -> Result<(), OmemError> {
+        let table = self.recall_events_table.clone();
+        let filter = format!("id = '{}'", escape_sql(event_id));
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("query recall_event for update failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+            return Err(OmemError::NotFound(format!("recall_event {event_id}")));
+        }
+
+        let val = if profile_injected { "true" } else { "false" };
+        let sql_exprs = vec![("profile_injected".to_string(), val.to_string())];
+        table
+            .add_columns(
+                lancedb::table::NewColumnTransform::SqlExpressions(sql_exprs),
+                Some(vec![filter]),
+            )
+            .await
+            .map_err(|e| OmemError::Storage(format!("update recall_event profile_injected failed: {e}")))?;
+
+        Ok(())
+    }
+
     pub async fn delete_recall_events_by_session(
         &self,
         tenant_id: &str,

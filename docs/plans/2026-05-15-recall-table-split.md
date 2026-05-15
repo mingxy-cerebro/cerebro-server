@@ -222,25 +222,62 @@ store.batch_create_recall_items(&items).await?;
 
 ## 四、数据迁移
 
-**旧 `session_recalls` 表不删除，保持向后兼容。**
+**旧 `session_recalls` 表直接删除，不做向后兼容。**
 
-新数据写入两张新表，旧数据不动。web端列表页优先查新表，fallback查旧表。
+新数据全部写入两张新表。旧 `session_recalls` 的历史数据不做迁移（历史数据价值低，不值得花时间）。
 
-**迁移时机：** 不强制迁移，新旧并存。如果需要统一，可以写一个一次性脚本：
-1. 读旧表所有记录
-2. 按 batch_id 分组 → 每组创建1个event + N个item
-3. 写入新表
+**清理范围：**
+- 删除 `session_recalls` 表常量及相关schema/CRUD代码
+- 删除 `SessionRecall` struct
+- 删除 `session_recalls_table` 字段从 `LanceStore`
 
 ---
 
 ## 五、web端适配（omem-web）
 
-### 新增页面/组件
+### 页面结构设计（师尊钦定）
 
-1. **召回事件列表** — `GET /v1/recall-events` → 按时间线展示每次召回
-2. **事件详情** — `GET /v1/recall-events/{id}/items` → 展示该次召回的所有记忆
-3. **精炼前后对比** — 用颜色/徽章区分 is_kept=true(绿) vs false(红)
-4. **refine_reasoning展示** — hover或展开显示LLM为什么判定irrelevant
+```
+时间线（垂直）
+├── 召回事件卡片（可点击展开/折叠）
+│   ├── 头部：触发词（query_text，超过N字截断，hover显示全部）
+│   ├── 展开/折叠
+│   └── 展开后：
+│       ├── 记忆内容展示（Tab切换：精炼 / 原始）
+│       │   ├── Tab「精炼」：显示refine_relevance等级 + refine_reasoning推理说明
+│       │   └── Tab「原始」：显示记忆的原始content（Markdown渲染）
+│       ├── 精炼等级颜色区分（保留）
+│       │   ├── 🟢 高相关（is_kept=true, relevance=high）
+│       │   ├── 🟡 中相关（is_kept=true, relevance=medium）
+│       │   └── 🔴 被精炼掉（is_kept=false, relevance=irrelevant）
+│       ├── 私密记忆处理
+│       │   ├── visibility=private → 默认隐藏，显示🔒图标
+│       │   └── 点击🔒 → 输入Vault密码 → 解锁显示内容
+│       └── 底部统计
+│           ├── similarity_score 进度条（0~100%）
+│           └── llm_confidence 进度条（0~100%）
+```
+
+### 交互细节
+
+| 组件 | 行为 |
+|------|------|
+| 触发词 | 超过80字截断，鼠标hover显示tooltip完整内容 |
+| 展开/折叠 | 点击卡片头部切换，默认折叠 |
+| 精炼/原始 | Tab切换，默认显示「精炼」tab（refine_relevance + reasoning），点击切换到「原始」tab（记忆原始content） |
+| 精炼等级 | 用颜色Badge区分（🟢=high / 🟡=medium / 🔴=irrelevant），配合Tab一起展示 |
+| 私密记忆 | 默认隐藏内容，显示🔒+「私密记忆」，需输入Vault密码解锁 |
+| 进度条 | similarity_score和llm_confidence各一个百分比进度条 |
+| 记忆内容 | Markdown渲染，私密内容解锁后才显示 |
+
+### 新增API调用
+
+| 端点 | 用途 |
+|------|------|
+| `GET /v1/recall-events` | 事件列表（时间线） |
+| `GET /v1/recall-events/{id}/items` | 事件下所有items（含discarded） |
+| `GET /v1/memories/{id}` | 展开原始记忆详情（已有） |
+| `POST /v1/vault/verify` | 私密记忆密码验证（已有） |
 
 ### TypeScript 类型定义
 

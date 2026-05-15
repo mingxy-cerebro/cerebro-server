@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -112,16 +112,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/session-recalls/session/{session_id}",
             delete(handlers::delete_session_recalls_by_session),
         )
-        .route(
-            "/v1/session-recalls",
-            get(handlers::list_session_recalls).post(handlers::create_session_recall),
-        )
-        .route(
-            "/v1/session-recalls/{id}",
-            get(handlers::get_session_recall).delete(handlers::delete_session_recall),
-        )
-        .route("/v1/recall-events", get(handlers::list_recall_events))
-        .route("/v1/recall-events/{id}/items", get(handlers::list_recall_event_items))
+.route("/v1/recall-events", get(handlers::list_recall_events))
+.route("/v1/recall-events/{id}/items", get(handlers::list_recall_event_items))
+.route("/v1/recall-events/{id}/profile-injected", patch(handlers::update_recall_event_profile))
         .route("/v1/clusters", get(handlers::list_clusters))
         .route("/v1/clusters/batch-delete", post(handlers::batch_delete_clusters))
         .route("/v1/clusters/all", delete(handlers::delete_all_clusters))
