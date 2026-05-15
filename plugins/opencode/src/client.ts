@@ -66,17 +66,6 @@ export interface ShouldRecallResponse {
   event_id?: string;
 }
 
-export interface SessionRecallRecord {
-  session_id: string;
-  memory_ids: string[];
-  recall_type: string;
-  created_at: string;
-}
-
-export interface SessionRecallListResponse {
-  recalls: SessionRecallRecord[];
-}
-
 export interface MemoryRelation {
   relation_type: string;
   target_id: string;
@@ -366,16 +355,6 @@ export class CerebroClient {
       10_000,
     );
     return res;
-  }
-
-  async listSessionRecalls(
-    session_id: string,
-  ): Promise<SessionRecallRecord[]> {
-    const params = new URLSearchParams({ session_id });
-    const res = await this.request<SessionRecallListResponse>(
-      `/v1/session-recalls?${params}`,
-    );
-    return res?.recalls ?? [];
   }
 
   async sessionIngest(

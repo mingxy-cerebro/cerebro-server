@@ -187,21 +187,6 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
       },
     }),
 
-    session_recalls: tool({
-      description:
-        "List the injection records for a session. Use to see what memories have been recalled into the current session.",
-      args: {
-        session_id: tool.schema
-          .string()
-          .describe("Session ID to query recall records for"),
-      },
-      async execute(args) {
-        const recalls = await client.listSessionRecalls(args.session_id);
-        if (recalls.length === 0) return JSON.stringify({ ok: true, count: 0, recalls: [] });
-        return JSON.stringify({ ok: true, count: recalls.length, recalls });
-      },
-    }),
-
     memory_ingest: tool({
       description:
         "Ingest conversation messages for intelligent extraction. The system extracts atomic facts, deduplicates, and reconciles with existing memories.",
