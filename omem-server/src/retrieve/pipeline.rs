@@ -37,6 +37,7 @@ pub struct SearchResult {
 
 pub struct SearchResults {
     pub results: Vec<SearchResult>,
+    pub discarded: Vec<SearchResult>,
     pub trace: RetrievalTrace,
 }
 
@@ -150,6 +151,7 @@ impl RetrievalPipeline {
             trace.finalize(0, pipeline_start.elapsed().as_millis() as u64);
             return Ok(SearchResults {
                 results: Vec::new(),
+                discarded: Vec::new(),
                 trace,
             });
         }
@@ -206,7 +208,7 @@ impl RetrievalPipeline {
             })
             .collect();
 
-        let (refined, stage_llm) = self
+        let (refined, discarded, stage_llm) = self
             .stage_llm_refine(
                 results,
                 &request.query,
@@ -220,6 +222,7 @@ impl RetrievalPipeline {
 
         Ok(SearchResults {
             results: refined,
+            discarded,
             trace,
         })
     }
@@ -865,7 +868,7 @@ impl RetrievalPipeline {
         candidates: Vec<SearchResult>,
         query: &str,
         conversation_context: Option<&[String]>,
-    ) -> (Vec<SearchResult>, StageTrace) {
+    ) -> (Vec<SearchResult>, Vec<SearchResult>, StageTrace) {
         let stage_start = Instant::now();
         let input_count = candidates.len();
 
@@ -880,12 +883,11 @@ impl RetrievalPipeline {
                     score_range: search_result_score_range(&candidates),
                     duration_ms: stage_start.elapsed().as_millis() as u64,
                 };
-                return (candidates, stage);
+                return (candidates, Vec::new(), stage);
             }
         };
 
         /// Maximum number of candidates sent to LLM for relevance evaluation.
-        /// Beyond this limit, extra candidates pass through as-is without evaluation.
         /// With default max_results=5, this threshold is never approached under normal operation.
         const LLM_REFINE_MAX_EVAL: usize = 15;
 
@@ -939,10 +941,10 @@ impl RetrievalPipeline {
                     score_range: search_result_score_range(&candidates),
                     duration_ms: stage_start.elapsed().as_millis() as u64,
                 };
-                return (candidates, stage);
+                return (candidates, Vec::new(), stage);
             }
             Err(_) => {
-                warn!("LLM refine timed out (5s)");
+                warn!("LLM refine timed out (15s)");
                 let stage = StageTrace {
                     name: "llm_refine".to_string(),
                     input_count,
@@ -951,7 +953,7 @@ impl RetrievalPipeline {
                     score_range: search_result_score_range(&candidates),
                     duration_ms: stage_start.elapsed().as_millis() as u64,
                 };
-                return (candidates, stage);
+                return (candidates, Vec::new(), stage);
             }
         };
 
@@ -1020,6 +1022,23 @@ impl RetrievalPipeline {
             .filter(|r| !kept_ids.contains(r.memory.id.as_str()))
             .map(|r| r.memory.id.clone())
             .collect();
+        let eval_count = eval_candidates.len();
+        let discard_ref_map: HashMap<&str, &str> = refined
+            .items
+            .iter()
+            .filter(|i| i.relevance == "irrelevant")
+            .map(|i| (i.id.as_str(), i.relevance.as_str()))
+            .collect();
+        let mut discarded: Vec<SearchResult> = eval_candidates
+            .into_iter()
+            .filter(|r| discard_ref_map.contains_key(r.memory.id.as_str()))
+            .collect();
+        for r in &mut discarded {
+            if let Some(item) = refined.items.iter().find(|i| i.id == r.memory.id) {
+                r.refine_relevance = Some(item.relevance.clone());
+                r.refine_reasoning = Some(item.reasoning.clone());
+            }
+        }
 
         let output_count = kept.len();
         let score_range = search_result_score_range(&kept);
@@ -1029,7 +1048,7 @@ impl RetrievalPipeline {
         let irrelevant_count = refined.items.iter().filter(|i| i.relevance == "irrelevant").count();
         tracing::info!(
             input = input_count,
-            evaluated = eval_candidates.len(),
+            evaluated = eval_count,
             high = high_count,
             medium = medium_count,
             irrelevant = irrelevant_count,
@@ -1047,7 +1066,7 @@ impl RetrievalPipeline {
             duration_ms: stage_start.elapsed().as_millis() as u64,
         };
 
-        (kept, stage)
+        (kept, discarded, stage)
     }
 
     fn compute_score_range(

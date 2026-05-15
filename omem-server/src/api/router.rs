@@ -120,6 +120,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/session-recalls/{id}",
             get(handlers::get_session_recall).delete(handlers::delete_session_recall),
         )
+        .route("/v1/recall-events", get(handlers::list_recall_events))
+        .route("/v1/recall-events/{id}/items", get(handlers::list_recall_event_items))
         .route("/v1/clusters", get(handlers::list_clusters))
         .route("/v1/clusters/batch-delete", post(handlers::batch_delete_clusters))
         .route("/v1/clusters/all", delete(handlers::delete_all_clusters))

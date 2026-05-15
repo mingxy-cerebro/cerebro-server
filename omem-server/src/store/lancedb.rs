@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, RecordBatchIterator,
-    StringArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int32Array, RecordBatch,
+    RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
@@ -24,7 +24,8 @@ use crate::domain::types::{MemoryState, MemoryType, Tier};
 
 pub const VECTOR_DIM: i32 = 1024;
 const TABLE_NAME: &str = "memories";
-const SESSION_RECALLS_TABLE: &str = "session_recalls";
+const RECALL_EVENTS_TABLE: &str = "recall_events";
+const RECALL_ITEMS_TABLE: &str = "recall_items";
 
 pub struct ListFilter {
     pub q: Option<String>,
@@ -55,14 +56,29 @@ impl Default for ListFilter {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionRecall {
+pub struct RecallEvent {
     pub id: String,
     pub session_id: String,
-    pub memory_id: String,
     pub recall_type: String,
     pub query_text: String,
-    pub similarity_score: f32,
+    pub max_score: f32,
     pub llm_confidence: f32,
+    pub profile_injected: bool,
+    pub kept_count: u32,
+    pub discarded_count: u32,
+    pub tenant_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecallItem {
+    pub id: String,
+    pub event_id: String,
+    pub memory_id: String,
+    pub score: f32,
+    pub refine_relevance: Option<String>,
+    pub refine_reasoning: Option<String>,
+    pub is_kept: bool,
     pub tenant_id: String,
     pub created_at: String,
 }
@@ -80,7 +96,8 @@ pub struct SessionGroupRaw {
 pub struct LanceStore {
     db: Connection,
     table: Table,
-    session_recalls_table: Table,
+    recall_events_table: Table,
+    recall_items_table: Table,
     fts_indexed: AtomicBool,
     uri: String,
     write_count: Arc<AtomicU32>,
@@ -96,8 +113,12 @@ impl LanceStore {
         TABLE_NAME
     }
 
-    pub fn session_recalls_table_name(&self) -> &str {
-        "session_recalls"
+    pub fn recall_events_table_name(&self) -> &str {
+        RECALL_EVENTS_TABLE
+    }
+
+    pub fn recall_items_table_name(&self) -> &str {
+        RECALL_ITEMS_TABLE
     }
 }
 
@@ -105,11 +126,13 @@ impl LanceStore {
     pub async fn new(uri: &str) -> Result<Self, OmemError> {
         let db = Self::connect(uri).await?;
         let table_name = TABLE_NAME.to_string();
-        let session_recalls_table_name = SESSION_RECALLS_TABLE.to_string();
+        let recall_events_table_name = RECALL_EVENTS_TABLE.to_string();
+        let recall_items_table_name = RECALL_ITEMS_TABLE.to_string();
 
         // Create tables if not exist
         Self::create_table_if_not_exists(&db, &table_name).await?;
-        Self::create_session_recalls_table_if_not_exists(&db, &session_recalls_table_name).await?;
+        Self::create_recall_table_if_not_exists(&db, &recall_events_table_name, Self::recall_events_schema()).await?;
+        Self::create_recall_table_if_not_exists(&db, &recall_items_table_name, Self::recall_items_schema()).await?;
 
         // Open tables once and cache
         let table = db
@@ -117,16 +140,22 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to open table: {e}")))?;
-        let session_recalls_table = db
-            .open_table(&session_recalls_table_name)
+        let recall_events_table = db
+            .open_table(&recall_events_table_name)
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("failed to open session_recalls table: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("failed to open recall_events table: {e}")))?;
+        let recall_items_table = db
+            .open_table(&recall_items_table_name)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to open recall_items table: {e}")))?;
 
         Ok(Self {
             db,
             table,
-            session_recalls_table,
+            recall_events_table,
+            recall_items_table,
             fts_indexed: AtomicBool::new(false),
             uri: uri.to_string(),
             write_count: Arc::new(AtomicU32::new(0)),
@@ -167,9 +196,10 @@ impl LanceStore {
         Ok(())
     }
 
-    async fn create_session_recalls_table_if_not_exists(
+    async fn create_recall_table_if_not_exists(
         db: &Connection,
         name: &str,
+        schema: Arc<Schema>,
     ) -> Result<(), OmemError> {
         let existing = db
             .table_names()
@@ -177,11 +207,11 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("failed to list tables: {e}")))?;
         if !existing.contains(&name.to_string()) {
-            db.create_empty_table(name, Self::session_recalls_schema())
+            db.create_empty_table(name, schema)
                 .execute()
                 .await
                 .map_err(|e| {
-                    OmemError::Storage(format!("failed to create session_recalls table: {e}"))
+                    OmemError::Storage(format!("failed to create {name} table: {e}"))
                 })?;
         }
         Ok(())
@@ -230,22 +260,23 @@ impl LanceStore {
             Self::fix_null_columns(&self.table, &current_schema, &Self::schema()).await?;
         }
 
-        if !existing.contains(&self.session_recalls_table_name().to_string()) {
+        // Recall events table: schema evolution
+        if !existing.contains(&self.recall_events_table_name().to_string()) {
             self.db
-                .create_empty_table(self.session_recalls_table_name(), Self::session_recalls_schema())
+                .create_empty_table(self.recall_events_table_name(), Self::recall_events_schema())
                 .execute()
                 .await
                 .map_err(|e| {
-                    OmemError::Storage(format!("failed to create session_recalls table: {e}"))
+                    OmemError::Storage(format!("failed to create recall_events table: {e}"))
                 })?;
         } else {
-            let current_schema = self.session_recalls_table
+            let current_schema = self.recall_events_table
                 .schema()
                 .await
                 .map_err(|e| {
-                    OmemError::Storage(format!("failed to get session_recalls schema: {e}"))
+                    OmemError::Storage(format!("failed to get recall_events schema: {e}"))
                 })?;
-            let expected_schema = Self::session_recalls_schema();
+            let expected_schema = Self::recall_events_schema();
 
             let missing_fields: Vec<Field> = expected_schema
                 .fields()
@@ -256,19 +287,62 @@ impl LanceStore {
 
             if !missing_fields.is_empty() {
                 let missing_schema = Arc::new(Schema::new(missing_fields));
-                self.session_recalls_table
+                self.recall_events_table
                     .add_columns(NewColumnTransform::AllNulls(missing_schema), None)
                     .await
                     .map_err(|e| {
                         OmemError::Storage(format!(
-                            "failed to add missing columns to session_recalls: {e}"
+                            "failed to add missing columns to recall_events: {e}"
                         ))
                     })?;
             }
+
+            Self::fix_null_columns(&self.recall_events_table, &current_schema, &expected_schema).await?;
+        }
+
+        // Recall items table: schema evolution
+        if !existing.contains(&self.recall_items_table_name().to_string()) {
+            self.db
+                .create_empty_table(self.recall_items_table_name(), Self::recall_items_schema())
+                .execute()
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to create recall_items table: {e}"))
+                })?;
+        } else {
+            let current_schema = self.recall_items_table
+                .schema()
+                .await
+                .map_err(|e| {
+                    OmemError::Storage(format!("failed to get recall_items schema: {e}"))
+                })?;
+            let expected_schema = Self::recall_items_schema();
+
+            let missing_fields: Vec<Field> = expected_schema
+                .fields()
+                .iter()
+                .filter(|f| current_schema.field_with_name(f.name()).is_err())
+                .map(|f| f.as_ref().clone())
+                .collect();
+
+            if !missing_fields.is_empty() {
+                let missing_schema = Arc::new(Schema::new(missing_fields));
+                self.recall_items_table
+                    .add_columns(NewColumnTransform::AllNulls(missing_schema), None)
+                    .await
+                    .map_err(|e| {
+                        OmemError::Storage(format!(
+                            "failed to add missing columns to recall_items: {e}"
+                        ))
+                    })?;
+            }
+
+            Self::fix_null_columns(&self.recall_items_table, &current_schema, &expected_schema).await?;
         }
 
         self.ensure_scalar_indexes().await?;
-        self.ensure_session_recalls_indexes().await?;
+        self.ensure_recall_events_indexes().await?;
+        self.ensure_recall_items_indexes().await?;
 
         // One-time purge of previously soft-deleted data
         match self.table.delete("state = 'deleted'").await {
@@ -321,23 +395,44 @@ impl LanceStore {
         Ok(())
     }
 
-    pub async fn ensure_session_recalls_indexes(&self) -> Result<(), OmemError> {
-        let table = self.session_recalls_table.clone();
+    pub async fn ensure_recall_events_indexes(&self) -> Result<(), OmemError> {
+        let table = self.recall_events_table.clone();
 
         let existing = table.list_indices().await
-            .map_err(|e| OmemError::Storage(format!("list session_recalls indices failed: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("list recall_events indices failed: {e}")))?;
         let indexed_columns: std::collections::HashSet<String> = existing.iter()
             .flat_map(|idx| idx.columns.clone())
             .collect();
 
-        // session_recalls table — only tenant_id, session_id, created_at
         let btree_cols = ["tenant_id", "session_id", "created_at"];
         for col in btree_cols {
             if !indexed_columns.contains(col) {
                 table.create_index(&[col], Index::BTree(BTreeIndexBuilder::default()))
                     .execute()
                     .await
-                    .map_err(|e| OmemError::Storage(format!("create session_recalls {col} btree index failed: {e}")))?;
+                    .map_err(|e| OmemError::Storage(format!("create recall_events {col} btree index failed: {e}")))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn ensure_recall_items_indexes(&self) -> Result<(), OmemError> {
+        let table = self.recall_items_table.clone();
+
+        let existing = table.list_indices().await
+            .map_err(|e| OmemError::Storage(format!("list recall_items indices failed: {e}")))?;
+        let indexed_columns: std::collections::HashSet<String> = existing.iter()
+            .flat_map(|idx| idx.columns.clone())
+            .collect();
+
+        let btree_cols = ["event_id", "tenant_id"];
+        for col in btree_cols {
+            if !indexed_columns.contains(col) {
+                table.create_index(&[col], Index::BTree(BTreeIndexBuilder::default()))
+                    .execute()
+                    .await
+                    .map_err(|e| OmemError::Storage(format!("create recall_items {col} btree index failed: {e}")))?;
             }
         }
 
@@ -458,154 +553,357 @@ impl LanceStore {
         ]))
     }
 
-    fn session_recalls_schema() -> Arc<Schema> {
+    fn recall_events_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("session_id", DataType::Utf8, false),
-            Field::new("memory_id", DataType::Utf8, false),
             Field::new("recall_type", DataType::Utf8, false),
             Field::new("query_text", DataType::Utf8, false),
-            Field::new("similarity_score", DataType::Float32, false),
+            Field::new("max_score", DataType::Float32, false),
             Field::new("llm_confidence", DataType::Float32, false),
+            Field::new("profile_injected", DataType::Boolean, false),
+            Field::new("kept_count", DataType::UInt32, false),
+            Field::new("discarded_count", DataType::UInt32, false),
             Field::new("tenant_id", DataType::Utf8, false),
             Field::new("created_at", DataType::Utf8, false),
         ]))
     }
 
-    fn session_recall_to_batch(recall: &SessionRecall) -> Result<RecordBatch, OmemError> {
+    fn recall_items_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("event_id", DataType::Utf8, false),
+            Field::new("memory_id", DataType::Utf8, false),
+            Field::new("score", DataType::Float32, false),
+            Field::new("refine_relevance", DataType::Utf8, true),
+            Field::new("refine_reasoning", DataType::Utf8, true),
+            Field::new("is_kept", DataType::Boolean, false),
+            Field::new("tenant_id", DataType::Utf8, false),
+            Field::new("created_at", DataType::Utf8, false),
+        ]))
+    }
+
+    fn recall_event_to_batch(event: &RecallEvent) -> Result<RecordBatch, OmemError> {
         RecordBatch::try_new(
-            Self::session_recalls_schema(),
+            Self::recall_events_schema(),
             vec![
-                Arc::new(StringArray::from(vec![recall.id.as_str()])),
-                Arc::new(StringArray::from(vec![recall.session_id.as_str()])),
-                Arc::new(StringArray::from(vec![recall.memory_id.as_str()])),
-                Arc::new(StringArray::from(vec![recall.recall_type.as_str()])),
-                Arc::new(StringArray::from(vec![recall.query_text.as_str()])),
-                Arc::new(Float32Array::from(vec![recall.similarity_score])),
-                Arc::new(Float32Array::from(vec![recall.llm_confidence])),
-                Arc::new(StringArray::from(vec![recall.tenant_id.as_str()])),
-                Arc::new(StringArray::from(vec![recall.created_at.as_str()])),
+                Arc::new(StringArray::from(vec![event.id.as_str()])),
+                Arc::new(StringArray::from(vec![event.session_id.as_str()])),
+                Arc::new(StringArray::from(vec![event.recall_type.as_str()])),
+                Arc::new(StringArray::from(vec![event.query_text.as_str()])),
+                Arc::new(Float32Array::from(vec![event.max_score])),
+                Arc::new(Float32Array::from(vec![event.llm_confidence])),
+                Arc::new(BooleanArray::from(vec![event.profile_injected])),
+                Arc::new(UInt32Array::from(vec![event.kept_count])),
+                Arc::new(UInt32Array::from(vec![event.discarded_count])),
+                Arc::new(StringArray::from(vec![event.tenant_id.as_str()])),
+                Arc::new(StringArray::from(vec![event.created_at.as_str()])),
             ],
         )
-        .map_err(|e| OmemError::Storage(format!("failed to build session_recalls batch: {e}")))
+        .map_err(|e| OmemError::Storage(format!("failed to build recall_event batch: {e}")))
     }
 
-    fn batch_to_session_recalls(batches: &[RecordBatch]) -> Result<Vec<SessionRecall>, OmemError> {
-        let mut recalls = Vec::new();
+    fn batch_to_recall_events(batches: &[RecordBatch]) -> Result<Vec<RecallEvent>, OmemError> {
+        let mut events = Vec::new();
         for batch in batches {
             for i in 0..batch.num_rows() {
-                recalls.push(Self::row_to_session_recall(batch, i)?);
+                let get_str = |name: &str| -> Result<String, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Utf8")))?;
+                    Ok(arr.value(i).to_string())
+                };
+
+                let get_f32 = |name: &str| -> Result<f32, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Float32")))?;
+                    Ok(arr.value(i))
+                };
+
+                let get_bool = |name: &str| -> Result<bool, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Boolean")))?;
+                    Ok(arr.value(i))
+                };
+
+                let get_u32 = |name: &str| -> Result<u32, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not UInt32")))?;
+                    Ok(arr.value(i))
+                };
+
+                events.push(RecallEvent {
+                    id: get_str("id")?,
+                    session_id: get_str("session_id")?,
+                    recall_type: get_str("recall_type")?,
+                    query_text: get_str("query_text")?,
+                    max_score: get_f32("max_score")?,
+                    llm_confidence: get_f32("llm_confidence")?,
+                    profile_injected: get_bool("profile_injected")?,
+                    kept_count: get_u32("kept_count")?,
+                    discarded_count: get_u32("discarded_count")?,
+                    tenant_id: get_str("tenant_id")?,
+                    created_at: get_str("created_at")?,
+                });
             }
         }
-        Ok(recalls)
+        Ok(events)
     }
 
-    fn row_to_session_recall(batch: &RecordBatch, row: usize) -> Result<SessionRecall, OmemError> {
-        let get_str = |name: &str| -> Result<String, OmemError> {
-            let col = batch
-                .column_by_name(name)
-                .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
-            let arr = col
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| OmemError::Storage(format!("column {name} is not Utf8")))?;
-            Ok(arr.value(row).to_string())
-        };
+    fn batch_to_recall_items(batches: &[RecordBatch]) -> Result<Vec<RecallItem>, OmemError> {
+        let mut items = Vec::new();
+        for batch in batches {
+            for i in 0..batch.num_rows() {
+                let get_str = |name: &str| -> Result<String, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Utf8")))?;
+                    Ok(arr.value(i).to_string())
+                };
 
-        let get_f32 = |name: &str| -> Result<f32, OmemError> {
-            let col = batch
-                .column_by_name(name)
-                .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
-            let arr = col
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| OmemError::Storage(format!("column {name} is not Float32")))?;
-            Ok(arr.value(row))
-        };
+                let get_opt_str = |name: &str| -> Result<Option<String>, OmemError> {
+                    let col = batch.column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Utf8")))?;
+                    if arr.is_null(i) {
+                        Ok(None)
+                    } else {
+                        Ok(Some(arr.value(i).to_string()))
+                    }
+                };
 
-        Ok(SessionRecall {
-            id: get_str("id")?,
-            session_id: get_str("session_id")?,
-            memory_id: get_str("memory_id")?,
-            recall_type: get_str("recall_type")?,
-            query_text: get_str("query_text")?,
-            similarity_score: get_f32("similarity_score")?,
-            llm_confidence: get_f32("llm_confidence")?,
-            tenant_id: get_str("tenant_id")?,
-            created_at: get_str("created_at")?,
-        })
+                let get_f32 = |name: &str| -> Result<f32, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Float32")))?;
+                    Ok(arr.value(i))
+                };
+
+                let get_bool = |name: &str| -> Result<bool, OmemError> {
+                    let col = batch
+                        .column_by_name(name)
+                        .ok_or_else(|| OmemError::Storage(format!("missing column: {name}")))?;
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| OmemError::Storage(format!("column {name} is not Boolean")))?;
+                    Ok(arr.value(i))
+                };
+
+                items.push(RecallItem {
+                    id: get_str("id")?,
+                    event_id: get_str("event_id")?,
+                    memory_id: get_str("memory_id")?,
+                    score: get_f32("score")?,
+                    refine_relevance: get_opt_str("refine_relevance")?,
+                    refine_reasoning: get_opt_str("refine_reasoning")?,
+                    is_kept: get_bool("is_kept")?,
+                    tenant_id: get_str("tenant_id")?,
+                    created_at: get_str("created_at")?,
+                });
+            }
+        }
+        Ok(items)
     }
 
-    pub async fn create_session_recall(&self, recall: &SessionRecall) -> Result<(), OmemError> {
-        let batch = Self::session_recall_to_batch(recall)?;
-        let table = self.session_recalls_table.clone();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::session_recalls_schema());
+    pub async fn create_recall_event(&self, event: &RecallEvent) -> Result<(), OmemError> {
+        let batch = Self::recall_event_to_batch(event)?;
+        let table = self.recall_events_table.clone();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], Self::recall_events_schema());
         table
             .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("failed to insert session_recall: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("failed to insert recall_event: {e}")))?;
         Ok(())
     }
 
-    pub async fn get_session_recall_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<SessionRecall>, OmemError> {
-        let table = self.session_recalls_table.clone();
-        let batches: Vec<RecordBatch> = table
-            .query()
-            .only_if(format!("id = '{}'", escape_sql(id)))
-            .limit(1)
+    pub async fn batch_create_recall_items(&self, items: &[RecallItem]) -> Result<(), OmemError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let schema = Self::recall_items_schema();
+        let mut ids = Vec::with_capacity(items.len());
+        let mut event_ids = Vec::with_capacity(items.len());
+        let mut memory_ids = Vec::with_capacity(items.len());
+        let mut scores = Vec::with_capacity(items.len());
+        let mut refine_relevances = Vec::with_capacity(items.len());
+        let mut refine_reasonings = Vec::with_capacity(items.len());
+        let mut is_kepts = Vec::with_capacity(items.len());
+        let mut tenant_ids = Vec::with_capacity(items.len());
+        let mut created_ats = Vec::with_capacity(items.len());
+
+        for item in items {
+            ids.push(item.id.as_str());
+            event_ids.push(item.event_id.as_str());
+            memory_ids.push(item.memory_id.as_str());
+            scores.push(item.score);
+            refine_relevances.push(item.refine_relevance.as_deref());
+            refine_reasonings.push(item.refine_reasoning.as_deref());
+            is_kepts.push(item.is_kept);
+            tenant_ids.push(item.tenant_id.as_str());
+            created_ats.push(item.created_at.as_str());
+        }
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(ids)),
+                Arc::new(StringArray::from(event_ids)),
+                Arc::new(StringArray::from(memory_ids)),
+                Arc::new(Float32Array::from(scores)),
+                Arc::new(StringArray::from(refine_relevances)),
+                Arc::new(StringArray::from(refine_reasonings)),
+                Arc::new(BooleanArray::from(is_kepts)),
+                Arc::new(StringArray::from(tenant_ids)),
+                Arc::new(StringArray::from(created_ats)),
+            ],
+        )
+        .map_err(|e| OmemError::Storage(format!("failed to build recall_items batch: {e}")))?;
+
+        let table = self.recall_items_table.clone();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        table
+            .add(Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>)
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("session_recall query failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
-
-        let recalls = Self::batch_to_session_recalls(&batches)?;
-        Ok(recalls.into_iter().next())
+            .map_err(|e| OmemError::Storage(format!("failed to batch insert recall_items: {e}")))?;
+        Ok(())
     }
 
-    pub async fn list_session_recalls(
+    pub async fn list_recall_events(
         &self,
         tenant_id: &str,
         session_id: Option<&str>,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<SessionRecall>, OmemError> {
-        let table = self.session_recalls_table.clone();
-        
+    ) -> Result<Vec<RecallEvent>, OmemError> {
+        let table = self.recall_events_table.clone();
+
         let mut filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
         if let Some(sid) = session_id {
             filter.push_str(&format!(" AND session_id = '{}'", escape_sql(sid)));
         }
-        
+
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .limit(offset + limit)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("list recall_events query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut events = Self::batch_to_recall_events(&batches)?;
+        events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(events.into_iter().skip(offset).take(limit).collect())
+    }
+
+    pub async fn list_recall_items_by_event(
+        &self,
+        tenant_id: &str,
+        event_id: &str,
+    ) -> Result<Vec<RecallItem>, OmemError> {
+        let table = self.recall_items_table.clone();
+        let filter = format!(
+            "tenant_id = '{}' AND event_id = '{}'",
+            escape_sql(tenant_id),
+            escape_sql(event_id)
+        );
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(&filter)
             .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("list session_recalls query failed: {e}")))?
+            .map_err(|e| OmemError::Storage(format!("list recall_items query failed: {e}")))?
             .try_collect()
             .await
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
-        let mut recalls = Self::batch_to_session_recalls(&batches)?;
-        recalls.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(recalls.into_iter().skip(offset).take(limit).collect())
+        Self::batch_to_recall_items(&batches)
     }
 
-    pub async fn delete_session_recall(
+    pub async fn delete_recall_events_by_session(
         &self,
-        id: &str,
+        tenant_id: &str,
+        session_id: &str,
     ) -> Result<(), OmemError> {
-        let table = self.session_recalls_table.clone();
-        table
-            .delete(format!("id = '{}'", escape_sql(id)).as_str())
+        let filter = format!(
+            "tenant_id = '{}' AND session_id = '{}'",
+            escape_sql(tenant_id),
+            escape_sql(session_id)
+        );
+
+        let events_table = self.recall_events_table.clone();
+        let event_batches: Vec<RecordBatch> = events_table
+            .query()
+            .only_if(&filter)
+            .select(Select::columns(&["id"]))
+            .execute()
             .await
-            .map_err(|e| OmemError::Storage(format!("failed to delete session_recall: {e}")))?;
+            .map_err(|e| OmemError::Storage(format!("query recall_events for cascade delete failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let event_ids: Vec<String> = event_batches.iter()
+            .filter_map(|b| b.column_by_name("id"))
+            .filter_map(|c| c.as_any().downcast_ref::<StringArray>())
+            .flat_map(|arr| (0..arr.len()).map(|i| arr.value(i).to_string()))
+            .collect();
+
+        if !event_ids.is_empty() {
+            let id_list: Vec<String> = event_ids.iter()
+                .map(|eid| format!("'{}'", escape_sql(eid)))
+                .collect();
+            let items_filter = format!(
+                "tenant_id = '{}' AND event_id IN ({})",
+                escape_sql(tenant_id),
+                id_list.join(", ")
+            );
+            let items_table = self.recall_items_table.clone();
+            items_table
+                .delete(&items_filter)
+                .await
+                .map_err(|e| OmemError::Storage(format!("failed to delete recall_items by session: {e}")))?;
+        }
+
+        events_table
+            .delete(&filter)
+            .await
+            .map_err(|e| OmemError::Storage(format!("failed to delete recall_events by session: {e}")))?;
         Ok(())
     }
 
@@ -613,9 +911,8 @@ impl LanceStore {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<SessionGroupRaw>, OmemError> {
-        let table = self.session_recalls_table.clone();
+        let table = self.recall_events_table.clone();
         let filter = format!("tenant_id = '{}'", escape_sql(tenant_id));
-        // Only select lightweight columns needed for grouping — skip memories_json
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(&filter)
@@ -672,24 +969,6 @@ impl LanceStore {
         let mut result: Vec<SessionGroupRaw> = groups.into_values().collect();
         result.sort_by(|a, b| b.last_injected_at.cmp(&a.last_injected_at));
         Ok(result)
-    }
-
-    pub async fn delete_session_recalls_by_session(
-        &self,
-        tenant_id: &str,
-        session_id: &str,
-    ) -> Result<(), OmemError> {
-        let table = self.session_recalls_table.clone();
-        let filter = format!(
-            "tenant_id = '{}' AND session_id = '{}'",
-            escape_sql(tenant_id),
-            escape_sql(session_id)
-        );
-        table
-            .delete(&filter)
-            .await
-            .map_err(|e| OmemError::Storage(format!("failed to delete session_recalls by session: {e}")))?;
-        Ok(())
     }
 
     fn memory_to_batch(memory: &Memory, vector: Option<&[f32]>) -> Result<RecordBatch, OmemError> {
@@ -2026,19 +2305,21 @@ impl LanceStore {
             .map_err(|e| OmemError::Storage(format!("optimize index failed: {e}")))?;
         tracing::info!("optimize: index merge completed");
 
-        // Session recalls table — compact + prune only (no vector index), but only if bloated
-        let sr_table = self.session_recalls_table.clone();
-        {
-            let sr_count = self.version_count(&sr_table).await;
-            if sr_count > 20 {
-                tracing::info!(version_count = sr_count, "optimize: session_recalls version count high, compacting");
-                let _ = sr_table
+        // Recall tables — compact + prune only if bloated
+        for (table_name, tbl) in [
+            ("recall_events", self.recall_events_table.clone()),
+            ("recall_items", self.recall_items_table.clone()),
+        ] {
+            let vcount = self.version_count(&tbl).await;
+            if vcount > 20 {
+                tracing::info!(table = table_name, version_count = vcount, "optimize: compacting");
+                let _ = tbl
                     .optimize(OptimizeAction::Compact {
                         options: CompactionOptions::default(),
                         remap_options: None,
                     })
                     .await;
-                let _ = sr_table
+                let _ = tbl
                     .optimize(OptimizeAction::Prune {
                         older_than: Some(
                             chrono::Duration::try_minutes(10)
@@ -2679,14 +2960,19 @@ mod tests {
             .execute()
             .await
             .unwrap();
-        db.create_empty_table(SESSION_RECALLS_TABLE, LanceStore::session_recalls_schema())
+        db.create_empty_table(RECALL_EVENTS_TABLE, LanceStore::recall_events_schema())
+            .execute()
+            .await
+            .unwrap();
+        db.create_empty_table(RECALL_ITEMS_TABLE, LanceStore::recall_items_schema())
             .execute()
             .await
             .unwrap();
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
-        let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
+        let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
+        let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -2735,14 +3021,19 @@ mod tests {
             .execute()
             .await
             .unwrap();
-        db.create_empty_table(SESSION_RECALLS_TABLE, LanceStore::session_recalls_schema())
+        db.create_empty_table(RECALL_EVENTS_TABLE, LanceStore::recall_events_schema())
+            .execute()
+            .await
+            .unwrap();
+        db.create_empty_table(RECALL_ITEMS_TABLE, LanceStore::recall_items_schema())
             .execute()
             .await
             .unwrap();
 
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
-        let session_recalls_table = db.open_table(SESSION_RECALLS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, session_recalls_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
+        let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
+        let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();

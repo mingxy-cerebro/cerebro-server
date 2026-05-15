@@ -10,7 +10,7 @@ use crate::api::server::{personal_space_id, AppState};
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
-use crate::store::lancedb::SessionRecall;
+use crate::store::lancedb::{RecallEvent, RecallItem};
 use crate::retrieve::pipeline::{RetrievalPipeline, SearchRequest, SearchResult};
 
 type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
@@ -79,6 +79,8 @@ pub struct CreateSessionRecallRequest {
     pub similarity_score: f32,
     #[serde(default)]
     pub llm_confidence: f32,
+    #[serde(default)]
+    pub profile_injected: bool,
 }
 
 #[derive(Deserialize)]
@@ -123,7 +125,7 @@ pub struct ListSessionGroupsResponse {
 
 #[derive(Serialize)]
 pub struct ListSessionRecallsResponse {
-    pub recalls: Vec<SessionRecall>,
+    pub recalls: Vec<serde_json::Value>,
     pub limit: usize,
     pub offset: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +141,19 @@ pub async fn should_recall(
         return Err(OmemError::Validation(
             "query_text cannot be empty".to_string(),
         ));
+    }
+
+    // Sanitize query_text: strip system injection artifacts (server-side fallback)
+    let sanitized_query = crate::api::handlers::memory::clean_message_content(&body.query_text);
+    if sanitized_query.is_empty() {
+        return Ok(Json(ShouldRecallResponse {
+            should_recall: false,
+            reason: Some("system_injection_filtered".to_string()),
+            memories: None,
+            confidence: None,
+            similarity_score: None,
+            clustered: None,
+        }));
     }
 
     // Per-session rate limiting
@@ -261,7 +276,9 @@ pub async fn should_recall(
 
     // Two-phase search: project-first, then global fallback
     let mut all_results: Vec<SearchResult> = Vec::new();
+    let mut all_discarded: Vec<SearchResult> = Vec::new();
     let mut seen_ids = HashSet::new();
+    let mut seen_ids_for_discarded = HashSet::new();
     let project_tags_slice = body.project_tags.as_deref();
 
     // Phase 1: Search within project scope (using project_tags filter)
@@ -283,6 +300,12 @@ pub async fn should_recall(
             };
             match pipeline.search(&search_req).await {
                 Ok(results) => {
+                    for d in results.discarded {
+                        if seen_ids_for_discarded.insert(d.memory.id.clone()) {
+                            all_discarded.push(d);
+                        }
+                    }
+                    let discarded = all_discarded.len();
                     for r in results.results {
                         if seen_ids.insert(r.memory.id.clone()) {
                             all_results.push(r);
@@ -292,6 +315,7 @@ pub async fn should_recall(
                         query = %body.query_text,
                         project_results = all_results.len(),
                         project_tags = ?tags,
+                        discarded,
                         "should_recall_phase1_project"
                     );
                 }
@@ -321,6 +345,12 @@ pub async fn should_recall(
         };
         match pipeline.search(&global_search_req).await {
             Ok(results) => {
+                for d in results.discarded {
+                    if seen_ids_for_discarded.insert(d.memory.id.clone()) {
+                        all_discarded.push(d);
+                    }
+                }
+                let discarded_count = all_discarded.len();
                 let remaining = if need_global { max_results.saturating_sub(all_results.len()) } else { max_results };
                 let mut global_count = 0;
                 for r in results.results {
@@ -336,6 +366,7 @@ pub async fn should_recall(
                     query = %body.query_text,
                     global_supplement = global_count,
                     total_results = all_results.len(),
+                    discarded = discarded_count,
                     "should_recall_phase2_global"
                 );
             }
@@ -357,7 +388,73 @@ pub async fn should_recall(
         })
         .collect();
 
-    tracing::info!(query = %body.query_text, result_count = memories.len(), should_recall = !memories.is_empty(), "should_recall_result");
+    tracing::info!(query = %body.query_text, result_count = memories.len(), discarded_count = all_discarded.len(), should_recall = !memories.is_empty(), "should_recall_result");
+
+    let confidence = if memories.is_empty() {
+        0.0
+    } else {
+        memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32
+    };
+
+    if !memories.is_empty() || !all_discarded.is_empty() {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let kept_count = memories.len() as u32;
+        let discarded_count = all_discarded.len() as u32;
+
+        let max_score = memories.iter().map(|m| m.score).fold(0.0_f32, f32::max);
+
+        let event = RecallEvent {
+            id: event_id.clone(),
+            session_id: body.session_id.clone(),
+            recall_type: "auto".to_string(),
+            query_text: body.query_text.clone(),
+            max_score,
+            llm_confidence: confidence,
+            profile_injected: false,
+            kept_count,
+            discarded_count,
+            tenant_id: auth.tenant_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        if let Err(e) = store.create_recall_event(&event).await {
+            tracing::warn!(error = %e, "failed_to_save_recall_event");
+        }
+
+        let mut items = Vec::new();
+        let now = chrono::Utc::now().to_rfc3339();
+        for m in &memories {
+            items.push(RecallItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                event_id: event_id.clone(),
+                memory_id: m.memory.id.clone(),
+                score: m.score,
+                refine_relevance: m.refine_relevance.clone(),
+                refine_reasoning: m.refine_reasoning.clone(),
+                is_kept: true,
+                tenant_id: auth.tenant_id.clone(),
+                created_at: now.clone(),
+            });
+        }
+        for d in &all_discarded {
+            items.push(RecallItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                event_id: event_id.clone(),
+                memory_id: d.memory.id.clone(),
+                score: d.score,
+                refine_relevance: d.refine_relevance.clone(),
+                refine_reasoning: d.refine_reasoning.clone(),
+                is_kept: false,
+                tenant_id: auth.tenant_id.clone(),
+                created_at: now.clone(),
+            });
+        }
+        if !items.is_empty() {
+            if let Err(e) = store.batch_create_recall_items(&items).await {
+                tracing::warn!(error = %e, "failed_to_save_recall_items");
+            }
+        }
+    }
 
     let clustered = if !memories.is_empty() {
         let aggregator = crate::cluster::aggregator::ClusterAggregator::new(state.cluster_store.clone());
@@ -390,8 +487,6 @@ pub async fn should_recall(
         }));
     }
 
-    let confidence = memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32;
-
     let recalled_ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
     if !recalled_ids.is_empty() {
         if let Err(e) = store.batch_bump_access_count(&recalled_ids).await {
@@ -410,131 +505,40 @@ pub async fn should_recall(
 }
 
 pub async fn create_session_recall(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
-    Json(body): Json<CreateSessionRecallRequest>,
-) -> Result<Json<Vec<SessionRecall>>, OmemError> {
-    if body.session_id.is_empty() {
-        return Err(OmemError::Validation(
-            "session_id cannot be empty".to_string(),
-        ));
-    }
-    if body.memory_ids.is_empty() {
-        return Err(OmemError::Validation(
-            "memory_ids cannot be empty".to_string(),
-        ));
-    }
-    if body.recall_type != "auto" && body.recall_type != "manual" {
-        return Err(OmemError::Validation(
-            "recall_type must be 'auto' or 'manual'".to_string(),
-        ));
-    }
-
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
-
-    let mut recalls = Vec::new();
-    for memory_id in body.memory_ids {
-        let recall = SessionRecall {
-            id: uuid::Uuid::new_v4().to_string(),
-            session_id: body.session_id.clone(),
-            memory_id,
-            recall_type: body.recall_type.clone(),
-            query_text: body.query_text.clone(),
-            similarity_score: body.similarity_score,
-            llm_confidence: body.llm_confidence,
-            tenant_id: auth.tenant_id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        store.create_session_recall(&recall).await?;
-        recalls.push(recall);
-    }
-
-    Ok(Json(recalls))
+    State(_state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
+    Json(_body): Json<CreateSessionRecallRequest>,
+) -> Result<Json<Vec<serde_json::Value>>, OmemError> {
+    Ok(Json(vec![]))
 }
 
 pub async fn list_session_recalls(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
+    State(_state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
     Query(params): Query<ListSessionRecallsQuery>,
 ) -> Result<Json<ListSessionRecallsResponse>, OmemError> {
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
-    let recalls = store
-        .list_session_recalls(
-            &auth.tenant_id,
-            params.session_id.as_deref(),
-            params.limit,
-            params.offset,
-        )
-        .await?;
-
-    let memories = if params.expand.as_deref() == Some("memories") {
-        let memory_ids: Vec<String> = recalls.iter().map(|r| r.memory_id.clone()).collect();
-        if memory_ids.is_empty() {
-            Some(vec![])
-        } else {
-            Some(store.get_memories_by_ids(&memory_ids).await?)
-        }
-    } else {
-        None
-    };
-
     Ok(Json(ListSessionRecallsResponse {
-        recalls,
+        recalls: vec![],
         limit: params.limit,
         offset: params.offset,
-        memories,
+        memories: None,
     }))
 }
 
 pub async fn get_session_recall(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
+    State(_state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
     Path(id): Path<String>,
-) -> Result<Json<SessionRecall>, OmemError> {
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
-    let recall = store
-        .get_session_recall_by_id(&id)
-        .await?
-        .ok_or_else(|| OmemError::NotFound(format!("session_recall {id}")))?;
-
-    if recall.tenant_id != auth.tenant_id {
-        return Err(OmemError::Unauthorized("access denied".to_string()));
-    }
-
-    Ok(Json(recall))
+) -> Result<Json<serde_json::Value>, OmemError> {
+    Err(OmemError::NotFound(format!("session_recall {id}")))
 }
 
 pub async fn delete_session_recall(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
+    State(_state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
-
-    let recall = store
-        .get_session_recall_by_id(&id)
-        .await?
-        .ok_or_else(|| OmemError::NotFound(format!("session_recall {id}")))?;
-
-    if recall.tenant_id != auth.tenant_id {
-        return Err(OmemError::Unauthorized("access denied".to_string()));
-    }
-
-    store.delete_session_recall(&id).await?;
-
-    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+    Err(OmemError::NotFound(format!("session_recall {id}")))
 }
 
 pub async fn list_session_groups(
@@ -586,7 +590,7 @@ pub async fn delete_session_recalls_by_session(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
-    store.delete_session_recalls_by_session(&auth.tenant_id, &session_id).await?;
+    store.delete_recall_events_by_session(&auth.tenant_id, &session_id).await?;
 
     Ok(Json(serde_json::json!({"success": true})))
 }
@@ -623,4 +627,60 @@ fn denoise_for_recall(text: &str) -> String {
     } else {
         cleaned
     }
+}
+
+#[derive(Deserialize)]
+pub struct ListRecallEventsQuery {
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    pub session_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ListRecallEventsResponse {
+    pub events: Vec<RecallEvent>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+pub async fn list_recall_events(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Query(params): Query<ListRecallEventsQuery>,
+) -> Result<Json<ListRecallEventsResponse>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+    let events = store
+        .list_recall_events(
+            &auth.tenant_id,
+            params.session_id.as_deref(),
+            params.limit,
+            params.offset,
+        )
+        .await?;
+
+    Ok(Json(ListRecallEventsResponse {
+        events,
+        limit: params.limit,
+        offset: params.offset,
+    }))
+}
+
+pub async fn list_recall_event_items(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(event_id): Path<String>,
+) -> Result<Json<Vec<RecallItem>>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+    let items = store
+        .list_recall_items_by_event(&auth.tenant_id, &event_id)
+        .await?;
+    Ok(Json(items))
 }

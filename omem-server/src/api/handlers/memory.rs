@@ -476,7 +476,7 @@ pub async fn search_memories(
         });
     }
 
-    let mut all_results: Vec<(Memory, f32, String)> = Vec::new();
+    let mut all_results: Vec<(Memory, f32, String, Option<String>, Option<String>)> = Vec::new();
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
             Ok((space_id, weight, Ok(search_results))) => {
@@ -493,7 +493,7 @@ pub async fn search_memories(
                         0.0
                     };
                     let weighted = normalized * weight;
-                    all_results.push((r.memory, weighted, space_id.clone()));
+                    all_results.push((r.memory, weighted, space_id.clone(), r.refine_relevance, r.refine_reasoning));
                 }
             }
             Ok((space_id, _, Err(e))) => {
@@ -510,12 +510,12 @@ pub async fn search_memories(
 
     let mut results: Vec<SearchResultDto> = all_results
         .into_iter()
-        .map(|(memory, score, _space_id)| SearchResultDto {
+        .map(|(memory, score, _space_id, refine_relevance, refine_reasoning)| SearchResultDto {
             memory,
             score,
             stale_info: None,
-            refine_relevance: None,
-            refine_reasoning: None,
+            refine_relevance,
+            refine_reasoning,
         })
         .collect();
 
@@ -2168,7 +2168,7 @@ fn format_conversation_truncated(messages: &[MessageDto], max_chars: usize) -> S
     }
 }
 
-fn clean_message_content(content: &str) -> String {
+pub fn clean_message_content(content: &str) -> String {
     let mut cleaned = content.to_string();
 
     // Remove XML-like system tags and their content
@@ -2178,6 +2178,14 @@ fn clean_message_content(content: &str) -> String {
         "<thinking>",
         "< omoc:",
         "<analysis>",
+        "<ultrawork-mode>",
+        "<cerebro-context>",
+        "<cerebro-profile>",
+        "<cerebro-fetch-policy>",
+        "<EXTREMELY_IMPORTANT>",
+        "<SUBAGENT-STOP>",
+        "<team_mode_status>",
+        "<dcp_message>",
     ];
     for pattern in xml_patterns {
         while let Some(start) = cleaned.find(pattern) {
@@ -2214,6 +2222,9 @@ fn clean_message_content(content: &str) -> String {
         "OH-MY-OPENCODE",
         "Incomplete tasks",
         "OMO_INTERNAL_INITIATOR",
+        "[restore checkpointed session agent configuration after compaction]",
+        "[session recovered - continuing previous task]",
+        "<!-- OMO_INTERNAL_INITIATOR -->",
     ];
     for pattern in noise_patterns {
         cleaned = cleaned.replace(pattern, "");
