@@ -194,7 +194,7 @@ function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
   const relTag = r.memory.relations && r.memory.relations.length > 0
     ? ` [rel:${r.memory.relations.map((rel) => rel.target_id).join(",")}]`
     : "";
-  const refineTag = r.refine_relevance ? ` [${r.refine_relevance}]` : "";
+  const refineTag = r.refine_relevance?.trim() ? ` [${r.refine_relevance.trim()}]` : "";
   const content = truncate(r.memory.content, maxContentLength);
   return `  - (${age}${idTag}${relTag}${refineTag}${tags}) ${content}`;
 }
@@ -327,12 +327,15 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const isFirstInjection = !lastInjected;
       if (profile && ttlExpired) {
         const prefs = ((profile as any)?.static_facts ?? [])
-          .filter((sf: any) => sf.tags?.includes("preferences"))
+          .filter((sf: any) => {
+            const t: string[] = sf.tags ?? [];
+            return t.includes("preferences") || t.includes("preference_extract") || t.some((tag: string) => tag.includes("偏好"));
+          })
           .map((sf: any) => sf.l2_content ?? sf.content ?? "")
           .filter(Boolean);
         const profileLines = prefs.length > 0
           ? prefs.map((c: string) => `  · ${c}`).join("\n")
-          : "  · (no preferences extracted)";
+          : "  · (preferences queuing, will populate on next refresh)";
         profileBlock = [
           "<cerebro-profile>",
           profileLines,

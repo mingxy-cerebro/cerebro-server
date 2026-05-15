@@ -11,7 +11,7 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
 use crate::store::lancedb::SessionRecall;
-use crate::retrieve::pipeline::{RetrievalPipeline, SearchRequest};
+use crate::retrieve::pipeline::{RetrievalPipeline, SearchRequest, SearchResult};
 
 type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
@@ -260,7 +260,7 @@ pub async fn should_recall(
     }
 
     // Two-phase search: project-first, then global fallback
-    let mut all_results: Vec<(Memory, f32)> = Vec::new();
+    let mut all_results: Vec<SearchResult> = Vec::new();
     let mut seen_ids = HashSet::new();
     let project_tags_slice = body.project_tags.as_deref();
 
@@ -285,7 +285,7 @@ pub async fn should_recall(
                 Ok(results) => {
                     for r in results.results {
                         if seen_ids.insert(r.memory.id.clone()) {
-                            all_results.push((r.memory, r.score));
+                            all_results.push(r);
                         }
                     }
                     tracing::info!(
@@ -325,7 +325,7 @@ pub async fn should_recall(
                 let mut global_count = 0;
                 for r in results.results {
                     if seen_ids.insert(r.memory.id.clone()) {
-                        all_results.push((r.memory, r.score));
+                        all_results.push(r);
                         global_count += 1;
                         if global_count >= remaining {
                             break;
@@ -349,11 +349,11 @@ pub async fn should_recall(
 
     let memories: Vec<MemoryWithScore> = results
         .into_iter()
-        .map(|(memory, score)| MemoryWithScore {
-            memory,
-            score,
-            refine_relevance: None,
-            refine_reasoning: None,
+        .map(|r| MemoryWithScore {
+            memory: r.memory,
+            score: r.score,
+            refine_relevance: r.refine_relevance,
+            refine_reasoning: r.refine_reasoning,
         })
         .collect();
 
