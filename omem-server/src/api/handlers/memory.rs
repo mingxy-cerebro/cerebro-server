@@ -118,6 +118,10 @@ pub struct SearchResultDto {
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_info: Option<StaleInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_relevance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_reasoning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -373,6 +377,8 @@ pub async fn search_memories(
                 memory: r.memory,
                 score: r.score,
                 stale_info: None,
+                refine_relevance: r.refine_relevance,
+                refine_reasoning: r.refine_reasoning,
             })
             .collect();
 
@@ -508,6 +514,8 @@ pub async fn search_memories(
             memory,
             score,
             stale_info: None,
+            refine_relevance: None,
+            refine_reasoning: None,
         })
         .collect();
 
