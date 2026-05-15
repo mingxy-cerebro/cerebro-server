@@ -135,7 +135,11 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
     }),
 
     memory_get: tool({
-      description: "Retrieve a specific memory by its ID.",
+      description:
+        "Retrieve a specific memory by its ID. " +
+        "Use when a recalled memory's content was truncated (e.g. medium relevance summary) " +
+        "and you need the full details, or when you see [rel:<id>] markers in injected context " +
+        "and want to fetch related memories.",
       args: {
         id: tool.schema.string().describe("Memory ID"),
       },
