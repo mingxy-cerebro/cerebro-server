@@ -27,7 +27,8 @@ For each memory, output exactly one relevance level with a brief reasoning.
 2. Do NOT judge based on general topic similarity — be specific about whether the memory helps answer THIS question.
 3. Preserve the user's original language — respond in the same language as the user's question.
 4. Keep reasoning to ONE short sentence.
-5. Output valid JSON only, no markdown fences.
+5. Do NOT reason or think step by step. Respond directly and concisely.
+6. Output valid JSON only, no markdown fences.
 
 ## Output Format
 {"items": [{"id": "<memory_id>", "relevance": "high|medium|irrelevant", "reasoning": "<one sentence>"}]}

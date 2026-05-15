@@ -914,7 +914,7 @@ impl RetrievalPipeline {
         let system_prompt = super::prompts::REFINE_SYSTEM_PROMPT;
 
         let refine_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(15),
             crate::llm::complete_json::<super::prompts::RefineResponse>(
                 llm.as_ref(),
                 system_prompt,

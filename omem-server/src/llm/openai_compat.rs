@@ -20,7 +20,7 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    enable_thinking: Option<bool>,
+    thinking: Option<Thinking>,
 }
 
 #[derive(Serialize, Clone)]
@@ -33,6 +33,12 @@ struct ChatMessage {
 struct ResponseFormat {
     #[serde(rename = "type")]
     format_type: String,
+}
+
+#[derive(Serialize, Clone)]
+struct Thinking {
+    #[serde(rename = "type")]
+    thinking_type: String,
 }
 
 #[derive(Deserialize)]
@@ -182,7 +188,10 @@ impl OpenAICompatLlm {
             ],
             temperature: 0.1,
             response_format: self.response_format.clone(),
-            enable_thinking: self.enable_thinking,
+            thinking: self.enable_thinking.map(|v| {
+                let thinking_type = if v { "enabled".to_string() } else { "disabled".to_string() };
+                Thinking { thinking_type }
+            }),
         }
     }
 }
