@@ -127,7 +127,12 @@ impl ProfileService {
                 Some(
                     results
                         .into_iter()
-                        .map(|(memory, score)| SearchResult { memory, score })
+                        .map(|(memory, score)| SearchResult {
+                memory,
+                score,
+                refine_relevance: None,
+                refine_reasoning: None,
+            })
                         .collect(),
                 )
             }

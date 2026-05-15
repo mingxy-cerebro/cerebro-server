@@ -26,6 +26,8 @@ export interface IngestOptions {
 export interface SearchResult {
   memory: MemoryDto;
   score: number;
+  refine_relevance?: string;
+  refine_reasoning?: string;
 }
 
 export interface SearchResponse {

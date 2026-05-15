@@ -194,8 +194,9 @@ function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
   const relTag = r.memory.relations && r.memory.relations.length > 0
     ? ` [rel:${r.memory.relations.map((rel) => rel.target_id).join(",")}]`
     : "";
+  const refineTag = r.refine_relevance ? ` [${r.refine_relevance}]` : "";
   const content = truncate(r.memory.content, maxContentLength);
-  return `  - (${age}${idTag}${relTag}${tags}) ${content}`;
+  return `  - (${age}${idTag}${relTag}${refineTag}${tags}) ${content}`;
 }
 
 const FETCH_POLICY = [
@@ -325,9 +326,16 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const ttlExpired = !lastInjected || (Date.now() - lastInjected > 5 * 60 * 1000);
       const isFirstInjection = !lastInjected;
       if (profile && ttlExpired) {
+        const prefs = ((profile as any)?.static_facts ?? [])
+          .filter((sf: any) => sf.tags?.includes("preferences"))
+          .map((sf: any) => sf.l2_content ?? sf.content ?? "")
+          .filter(Boolean);
+        const profileLines = prefs.length > 0
+          ? prefs.map((c: string) => `  · ${c}`).join("\n")
+          : "  · (no preferences extracted)";
         profileBlock = [
           "<cerebro-profile>",
-          JSON.stringify(profile),
+          profileLines,
           "</cerebro-profile>",
         ].join("\n");
         const existingIdx = output.system.findIndex((s) => s.includes("<cerebro-profile>"));

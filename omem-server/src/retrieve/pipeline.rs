@@ -31,6 +31,8 @@ pub struct SearchRequest {
 pub struct SearchResult {
     pub memory: Memory,
     pub score: f32,
+    pub refine_relevance: Option<String>,
+    pub refine_reasoning: Option<String>,
 }
 
 pub struct SearchResults {
@@ -199,6 +201,8 @@ impl RetrievalPipeline {
             .map(|e| SearchResult {
                 memory: e.memory,
                 score: e.rrf_score,
+                refine_relevance: None,
+                refine_reasoning: None,
             })
             .collect();
 
@@ -960,6 +964,16 @@ impl RetrievalPipeline {
             .map(|item| (item.id.as_str(), item.relevance.as_str()))
             .collect();
 
+        // Log each memory's refine judgment so we can audit what LLM decided
+        for item in &refined.items {
+            tracing::info!(
+                memory_id = %item.id,
+                relevance = %item.relevance,
+                reasoning = %item.reasoning,
+                "llm_refine_judgment"
+            );
+        }
+
         let relevant_ids: HashSet<&str> = refined
             .items
             .iter()
@@ -981,6 +995,10 @@ impl RetrievalPipeline {
         // Apply medium relevance downgrade: replace content with l1_overview (or first 200 chars)
         for r in &mut kept {
             if let Some(&relevance) = relevance_map.get(r.memory.id.as_str()) {
+                r.refine_relevance = Some(relevance.to_string());
+                if let Some(item) = refined.items.iter().find(|i| i.id == r.memory.id) {
+                    r.refine_reasoning = Some(item.reasoning.clone());
+                }
                 if relevance == "medium" {
                 r.memory.content = if !r.memory.l1_overview.is_empty() {
                     std::mem::take(&mut r.memory.l1_overview)
@@ -1005,6 +1023,20 @@ impl RetrievalPipeline {
 
         let output_count = kept.len();
         let score_range = search_result_score_range(&kept);
+
+        let high_count = refined.items.iter().filter(|i| i.relevance == "high").count();
+        let medium_count = refined.items.iter().filter(|i| i.relevance == "medium").count();
+        let irrelevant_count = refined.items.iter().filter(|i| i.relevance == "irrelevant").count();
+        tracing::info!(
+            input = input_count,
+            evaluated = eval_candidates.len(),
+            high = high_count,
+            medium = medium_count,
+            irrelevant = irrelevant_count,
+            kept = output_count,
+            dropped = dropped_ids.len(),
+            "llm_refine_summary"
+        );
 
         let stage = StageTrace {
             name: "llm_refine".to_string(),

@@ -47,6 +47,10 @@ pub struct ShouldRecallRequest {
 pub struct MemoryWithScore {
     pub memory: Memory,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_relevance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_reasoning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -345,7 +349,12 @@ pub async fn should_recall(
 
     let memories: Vec<MemoryWithScore> = results
         .into_iter()
-        .map(|(memory, score)| MemoryWithScore { memory, score })
+        .map(|(memory, score)| MemoryWithScore {
+            memory,
+            score,
+            refine_relevance: None,
+            refine_reasoning: None,
+        })
         .collect();
 
     tracing::info!(query = %body.query_text, result_count = memories.len(), should_recall = !memories.is_empty(), "should_recall_result");
