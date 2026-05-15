@@ -1,4 +1,5 @@
 pub mod pipeline;
+pub mod prompts;
 pub mod reranker;
 pub mod trace;
 

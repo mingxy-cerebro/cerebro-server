@@ -356,6 +356,7 @@ pub async fn search_memories(
             source_filter: params.source.clone(),
             agent_id_filter: params.agent_id.clone(),
             accessible_spaces: accessible_space_ids.clone(),
+            conversation_context: None,
         };
 
         let mut retrieval_pipeline = RetrievalPipeline::new(store.clone())
@@ -458,6 +459,7 @@ pub async fn search_memories(
                 source_filter,
                 agent_id_filter,
                 accessible_spaces: accessible_spaces_clone,
+                conversation_context: None,
             };
             let mut pipeline = RetrievalPipeline::new(store).with_decay_config(decay_cfg);
             if let Some(reranker) = reranker_clone {

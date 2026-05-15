@@ -24,6 +24,7 @@ pub struct SearchRequest {
     pub source_filter: Option<String>,
     pub agent_id_filter: Option<String>,
     pub accessible_spaces: Vec<String>,
+    pub conversation_context: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,9 +46,11 @@ pub struct RetrievalPipeline {
     rrf_k: f32,
     vector_weight: f32,
     bm25_weight: f32,
+    tag_weight: f32,
     min_score: f32,
     hard_cutoff: f32,
     default_limit: usize,
+    llm: Option<Arc<dyn crate::llm::LlmService>>,
 }
 
 struct FusionEntry {
@@ -67,9 +70,11 @@ impl RetrievalPipeline {
             rrf_k: 60.0,
             vector_weight: 0.7,
             bm25_weight: 0.3,
+            tag_weight: 0.2,
             min_score: 0.15,
             hard_cutoff: 0.005,
             default_limit: 20,
+            llm: None,
         }
     }
 
@@ -119,6 +124,16 @@ impl RetrievalPipeline {
         self
     }
 
+    pub fn with_tag_weight(mut self, weight: f32) -> Self {
+        self.tag_weight = weight;
+        self
+    }
+
+    pub fn with_llm(mut self, llm: Arc<dyn crate::llm::LlmService>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResults, OmemError> {
         let pipeline_start = Instant::now();
         let mut trace = RetrievalTrace::new();
@@ -137,7 +152,11 @@ impl RetrievalPipeline {
             });
         }
 
-        let (fused, stage2) = self.stage_rrf_fusion(candidates);
+        let (tag_ranks, stage_tag) =
+            self.stage_tag_boost(&candidates, request.tags_filter.as_deref());
+        trace.add_stage(stage_tag);
+
+        let (fused, stage2) = self.stage_rrf_fusion(candidates, &tag_ranks);
         trace.add_stage(stage2);
 
         let (normalized_rrf, stage3) = Self::stage_rrf_normalize(fused);
@@ -149,8 +168,11 @@ impl RetrievalPipeline {
         let (capped, stage5) = Self::stage_topk_cap(filtered, limit * 2);
         trace.add_stage(stage5);
 
+        let (expanded, stage_expand) = self.stage_expand_relations(capped).await;
+        trace.add_stage(stage_expand);
+
         let (reranked, stage6) = self
-            .stage_cross_encoder_rerank(capped, &request.query)
+            .stage_cross_encoder_rerank(expanded, &request.query)
             .await;
         trace.add_stage(stage6);
 
@@ -180,10 +202,22 @@ impl RetrievalPipeline {
             })
             .collect();
 
-        let count = results.len();
+        let (refined, stage_llm) = self
+            .stage_llm_refine(
+                results,
+                &request.query,
+                request.conversation_context.as_deref(),
+            )
+            .await;
+        trace.add_stage(stage_llm);
+
+        let count = refined.len();
         trace.finalize(count, pipeline_start.elapsed().as_millis() as u64);
 
-        Ok(SearchResults { results, trace })
+        Ok(SearchResults {
+            results: refined,
+            trace,
+        })
     }
 
     async fn stage_parallel_search(
@@ -255,14 +289,85 @@ impl RetrievalPipeline {
         ))
     }
 
-    fn stage_rrf_fusion(&self, candidates: ParallelResults) -> (Vec<FusionEntry>, StageTrace) {
+    fn stage_tag_boost(
+        &self,
+        candidates: &ParallelResults,
+        tags_filter: Option<&[String]>,
+    ) -> (Vec<(String, usize)>, StageTrace) {
         let stage_start = Instant::now();
         let input_count = candidates.vector.len() + candidates.bm25.len();
+
+        let tags = match tags_filter {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                let stage = StageTrace {
+                    name: "tag_boost".to_string(),
+                    input_count,
+                    output_count: 0,
+                    dropped_ids: Vec::new(),
+                    score_range: None,
+                    duration_ms: stage_start.elapsed().as_millis() as u64,
+                };
+                return (Vec::new(), stage);
+            }
+        };
+
+        let tag_set: HashSet<&str> = tags.iter().map(|s| s.as_str()).collect();
+
+        let mut seen = HashSet::new();
+        let mut scored: Vec<(String, usize)> = Vec::new();
+
+        for (memory, _score) in candidates.vector.iter().chain(candidates.bm25.iter()) {
+            if seen.insert(memory.id.clone()) {
+                let overlap = memory
+                    .tags
+                    .iter()
+                    .filter(|t| tag_set.contains(t.as_str()))
+                    .count();
+                if overlap > 0 {
+                    scored.push((memory.id.clone(), overlap));
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let ranked: Vec<(String, usize)> = scored
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id, _overlap))| (id, rank))
+            .collect();
+
+        let output_count = ranked.len();
+        let stage = StageTrace {
+            name: "tag_boost".to_string(),
+            input_count,
+            output_count,
+            dropped_ids: Vec::new(),
+            score_range: None,
+            duration_ms: stage_start.elapsed().as_millis() as u64,
+        };
+
+        (ranked, stage)
+    }
+
+    fn stage_rrf_fusion(
+        &self,
+        candidates: ParallelResults,
+        tag_ranks: &[(String, usize)],
+    ) -> (Vec<FusionEntry>, StageTrace) {
+        let stage_start = Instant::now();
+        let input_count = candidates.vector.len() + candidates.bm25.len() + tag_ranks.len();
+
+        let total_w = self.vector_weight + self.bm25_weight + self.tag_weight;
+        let vw = self.vector_weight / total_w;
+        let bw = self.bm25_weight / total_w;
+        let tw = self.tag_weight / total_w;
 
         let mut score_map: HashMap<String, FusionEntry> = HashMap::new();
 
         for (rank, (memory, _score)) in candidates.vector.into_iter().enumerate() {
-            let rrf = self.vector_weight / (self.rrf_k + (rank + 1) as f32);
+            let rrf = vw / (self.rrf_k + (rank + 1) as f32);
             score_map
                 .entry(memory.id.clone())
                 .and_modify(|e| e.rrf_score += rrf)
@@ -275,7 +380,7 @@ impl RetrievalPipeline {
         }
 
         for (rank, (memory, bm25_raw)) in candidates.bm25.into_iter().enumerate() {
-            let rrf = self.bm25_weight / (self.rrf_k + (rank + 1) as f32);
+            let rrf = bw / (self.rrf_k + (rank + 1) as f32);
             score_map
                 .entry(memory.id.clone())
                 .and_modify(|e| {
@@ -291,6 +396,17 @@ impl RetrievalPipeline {
         }
 
         let mut fused: Vec<FusionEntry> = score_map.into_values().collect();
+
+        let tag_map: HashMap<&str, usize> = tag_ranks
+            .iter()
+            .map(|(id, rank)| (id.as_str(), *rank))
+            .collect();
+        for entry in &mut fused {
+            if let Some(&tag_rank) = tag_map.get(entry.memory.id.as_str()) {
+                let rrf = tw / (self.rrf_k + (tag_rank + 1) as f32);
+                entry.rrf_score += rrf;
+            }
+        }
 
         for entry in &mut fused {
             if entry.memory.memory_type.is_pinned() {
@@ -422,6 +538,89 @@ impl RetrievalPipeline {
         };
 
         (entries, stage)
+    }
+
+    async fn stage_expand_relations(
+        &self,
+        mut candidates: Vec<FusionEntry>,
+    ) -> (Vec<FusionEntry>, StageTrace) {
+        let stage_start = Instant::now();
+        let input_count = candidates.len();
+
+        let existing_ids: HashSet<String> =
+            candidates.iter().map(|e| e.memory.id.clone()).collect();
+
+        let mut relation_target_ids: Vec<String> = candidates
+            .iter()
+            .flat_map(|e| e.memory.relations.iter().map(|r| r.target_id.clone()))
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
+
+        relation_target_ids.sort();
+        relation_target_ids.dedup();
+
+        if relation_target_ids.is_empty() {
+            let stage = StageTrace {
+                name: "expand_relations".to_string(),
+                input_count,
+                output_count: candidates.len(),
+                dropped_ids: Vec::new(),
+                score_range: fusion_score_range(&candidates),
+                duration_ms: stage_start.elapsed().as_millis() as u64,
+            };
+            return (candidates, stage);
+        }
+
+        let min_score = candidates
+            .iter()
+            .map(|e| e.rrf_score)
+            .fold(f32::INFINITY, f32::min);
+        let expanded_score = min_score * 0.8;
+
+        let fetched = match self.store.get_memories_by_ids(&relation_target_ids).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("expand_relations fetch failed: {e}");
+                let stage = StageTrace {
+                    name: "expand_relations".to_string(),
+                    input_count,
+                    output_count: candidates.len(),
+                    dropped_ids: Vec::new(),
+                    score_range: fusion_score_range(&candidates),
+                    duration_ms: stage_start.elapsed().as_millis() as u64,
+                };
+                return (candidates, stage);
+            }
+        };
+
+        let mut added = 0usize;
+        for memory in fetched {
+            if added >= 20 {
+                break;
+            }
+            if existing_ids.contains(&memory.id) {
+                continue;
+            }
+            candidates.push(FusionEntry {
+                memory,
+                rrf_score: expanded_score,
+                bm25_score: 0.0,
+                pre_rerank_score: 0.0,
+            });
+            added += 1;
+        }
+
+        let score_range = fusion_score_range(&candidates);
+        let stage = StageTrace {
+            name: "expand_relations".to_string(),
+            input_count,
+            output_count: candidates.len(),
+            dropped_ids: Vec::new(),
+            score_range,
+            duration_ms: stage_start.elapsed().as_millis() as u64,
+        };
+
+        (candidates, stage)
     }
 
     async fn stage_cross_encoder_rerank(
@@ -657,6 +856,168 @@ impl RetrievalPipeline {
         (entries, stage)
     }
 
+    async fn stage_llm_refine(
+        &self,
+        candidates: Vec<SearchResult>,
+        query: &str,
+        conversation_context: Option<&[String]>,
+    ) -> (Vec<SearchResult>, StageTrace) {
+        let stage_start = Instant::now();
+        let input_count = candidates.len();
+
+        let llm = match self.llm {
+            Some(ref l) => l,
+            None => {
+                let stage = StageTrace {
+                    name: "llm_refine".to_string(),
+                    input_count,
+                    output_count: candidates.len(),
+                    dropped_ids: Vec::new(),
+                    score_range: search_result_score_range(&candidates),
+                    duration_ms: stage_start.elapsed().as_millis() as u64,
+                };
+                return (candidates, stage);
+            }
+        };
+
+        /// Maximum number of candidates sent to LLM for relevance evaluation.
+        /// Beyond this limit, extra candidates pass through as-is without evaluation.
+        /// With default max_results=5, this threshold is never approached under normal operation.
+        const LLM_REFINE_MAX_EVAL: usize = 15;
+
+        let eval_candidates: Vec<SearchResult> = candidates
+            .iter()
+            .take(LLM_REFINE_MAX_EVAL)
+            .cloned()
+            .collect();
+
+        let memories: Vec<(String, &str, Option<&str>)> = eval_candidates
+            .iter()
+            .map(|r| {
+                (
+                    r.memory.id.clone(),
+                    r.memory.content.as_str(),
+                    if r.memory.l1_overview.is_empty() {
+                        None
+                    } else {
+                        Some(r.memory.l1_overview.as_str())
+                    },
+                )
+            })
+            .collect();
+
+        let user_prompt = super::prompts::build_refine_user_prompt(
+            &memories,
+            query,
+            conversation_context,
+        );
+        let system_prompt = super::prompts::REFINE_SYSTEM_PROMPT;
+
+        let refine_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::llm::complete_json::<super::prompts::RefineResponse>(
+                llm.as_ref(),
+                system_prompt,
+                &user_prompt,
+            ),
+        )
+        .await;
+
+        let refined = match refine_result {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                warn!("LLM refine JSON parse error: {e}");
+                let stage = StageTrace {
+                    name: "llm_refine".to_string(),
+                    input_count,
+                    output_count: candidates.len(),
+                    dropped_ids: Vec::new(),
+                    score_range: search_result_score_range(&candidates),
+                    duration_ms: stage_start.elapsed().as_millis() as u64,
+                };
+                return (candidates, stage);
+            }
+            Err(_) => {
+                warn!("LLM refine timed out (5s)");
+                let stage = StageTrace {
+                    name: "llm_refine".to_string(),
+                    input_count,
+                    output_count: candidates.len(),
+                    dropped_ids: Vec::new(),
+                    score_range: search_result_score_range(&candidates),
+                    duration_ms: stage_start.elapsed().as_millis() as u64,
+                };
+                return (candidates, stage);
+            }
+        };
+
+        let eval_ids: HashSet<&str> = eval_candidates.iter().map(|r| r.memory.id.as_str()).collect();
+
+        // Build relevance map: only the eval_ids entries have LLM verdicts
+        let relevance_map: HashMap<&str, &str> = refined
+            .items
+            .iter()
+            .map(|item| (item.id.as_str(), item.relevance.as_str()))
+            .collect();
+
+        let relevant_ids: HashSet<&str> = refined
+            .items
+            .iter()
+            .filter(|item| item.relevance != "irrelevant")
+            .map(|item| item.id.as_str())
+            .collect();
+
+        let mut kept: Vec<SearchResult> = candidates
+            .into_iter()
+            .filter(|r| {
+                if eval_ids.contains(r.memory.id.as_str()) {
+                    relevant_ids.contains(r.memory.id.as_str())
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Apply medium relevance downgrade: replace content with l1_overview (or first 200 chars)
+        for r in &mut kept {
+            if let Some(&relevance) = relevance_map.get(r.memory.id.as_str()) {
+                if relevance == "medium" {
+                r.memory.content = if !r.memory.l1_overview.is_empty() {
+                    std::mem::take(&mut r.memory.l1_overview)
+                } else {
+                    let end = r.memory.content
+                        .char_indices()
+                        .nth(200)
+                        .map(|(i, _)| i)
+                        .unwrap_or(r.memory.content.len());
+                    r.memory.content[..end].to_string()
+                };
+            }
+            }
+        }
+
+        let kept_ids: HashSet<&str> = kept.iter().map(|r| r.memory.id.as_str()).collect();
+        let dropped_ids: Vec<String> = eval_candidates
+            .iter()
+            .filter(|r| !kept_ids.contains(r.memory.id.as_str()))
+            .map(|r| r.memory.id.clone())
+            .collect();
+
+        let output_count = kept.len();
+        let score_range = search_result_score_range(&kept);
+
+        let stage = StageTrace {
+            name: "llm_refine".to_string(),
+            input_count,
+            output_count,
+            dropped_ids,
+            score_range,
+            duration_ms: stage_start.elapsed().as_millis() as u64,
+        };
+
+        (kept, stage)
+    }
+
     fn compute_score_range(
         vec_results: &[(Memory, f32)],
         bm25_results: &[(Memory, f32)],
@@ -692,6 +1053,21 @@ fn fusion_score_range(entries: &[FusionEntry]) -> Option<(f32, f32)> {
     let max = entries
         .iter()
         .map(|e| e.rrf_score)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Some((min, max))
+}
+
+fn search_result_score_range(results: &[SearchResult]) -> Option<(f32, f32)> {
+    if results.is_empty() {
+        return None;
+    }
+    let min = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f32::INFINITY, f32::min);
+    let max = results
+        .iter()
+        .map(|r| r.score)
         .fold(f32::NEG_INFINITY, f32::max);
     Some((min, max))
 }
@@ -806,11 +1182,12 @@ mod tests {
             source_filter: None,
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
+            conversation_context: None,
         };
 
         let results = pipeline.search(&request).await.expect("search");
         assert!(!results.results.is_empty());
-        assert_eq!(results.trace.stages.len(), 12);
+        assert!(results.trace.stages.len() >= 12);
     }
 
     #[tokio::test]
@@ -870,6 +1247,7 @@ mod tests {
             source_filter: None,
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
+            conversation_context: None,
         };
 
         let results = pipeline.search(&request).await.expect("search");
@@ -948,6 +1326,7 @@ mod tests {
             source_filter: None,
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
+            conversation_context: None,
         };
 
         let results = pipeline
@@ -983,24 +1362,28 @@ mod tests {
             source_filter: None,
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
+            conversation_context: None,
         };
 
         let results = pipeline.search(&request).await.expect("search");
         let trace = &results.trace;
 
-        assert_eq!(trace.stages.len(), 12);
+        assert_eq!(trace.stages.len(), 15);
         assert_eq!(trace.stages[0].name, "parallel_search");
-        assert_eq!(trace.stages[1].name, "rrf_fusion");
-        assert_eq!(trace.stages[2].name, "rrf_normalize");
-        assert_eq!(trace.stages[3].name, "min_score_filter");
-        assert_eq!(trace.stages[4].name, "topk_cap");
-        assert_eq!(trace.stages[5].name, "cross_encoder_rerank");
-        assert_eq!(trace.stages[6].name, "bm25_floor");
-        assert_eq!(trace.stages[7].name, "decay_boost");
-        assert_eq!(trace.stages[8].name, "importance_weight");
-        assert_eq!(trace.stages[9].name, "length_normalization");
-        assert_eq!(trace.stages[10].name, "hard_cutoff");
-        assert_eq!(trace.stages[11].name, "mmr_diversity");
+        assert_eq!(trace.stages[1].name, "tag_boost");
+        assert_eq!(trace.stages[2].name, "rrf_fusion");
+        assert_eq!(trace.stages[3].name, "rrf_normalize");
+        assert_eq!(trace.stages[4].name, "min_score_filter");
+        assert_eq!(trace.stages[5].name, "topk_cap");
+        assert_eq!(trace.stages[6].name, "expand_relations");
+        assert_eq!(trace.stages[7].name, "cross_encoder_rerank");
+        assert_eq!(trace.stages[8].name, "bm25_floor");
+        assert_eq!(trace.stages[9].name, "decay_boost");
+        assert_eq!(trace.stages[10].name, "importance_weight");
+        assert_eq!(trace.stages[11].name, "length_normalization");
+        assert_eq!(trace.stages[12].name, "hard_cutoff");
+        assert_eq!(trace.stages[13].name, "mmr_diversity");
+        assert_eq!(trace.stages[14].name, "llm_refine");
 
         let display = trace.to_string();
         assert!(display.contains("Retrieval Trace"));
@@ -1026,6 +1409,7 @@ mod tests {
             source_filter: None,
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
+            conversation_context: None,
         };
 
         let results = pipeline
@@ -1239,14 +1623,14 @@ mod tests {
 
     #[test]
     fn test_rrf_normalize_single_result() {
-        let entries = vec![make_entry("only", 0.016)];
+        let entries = vec![make_entry("only", 0.008)];
 
         let (result, _) = RetrievalPipeline::stage_rrf_normalize(entries);
         assert_eq!(result.len(), 1);
         let score = result[0].rrf_score;
         assert!(
-            (score - 0.64).abs() < 1e-4,
-            "0.016 * 40 = 0.64, got {score}"
+            (score - 0.96).abs() < 1e-4,
+            "0.008 * 120 = 0.96, got {score}"
         );
     }
 

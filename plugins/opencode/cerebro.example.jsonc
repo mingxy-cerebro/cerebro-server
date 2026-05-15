@@ -1,4 +1,5 @@
 {
+  "$schema": "./schema.json",
   // ── Connection ───────────────────────────────────────────────
   // API endpoint and authentication for the Cerebro server.
   "connection": {

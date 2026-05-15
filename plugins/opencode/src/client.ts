@@ -325,6 +325,7 @@ export class CerebroClient {
     similarity_threshold?: number,
     max_results?: number,
     project_tags?: string[],
+    conversation_context?: string[],
   ): Promise<ShouldRecallResponse | null> {
     const res = await this.post<ShouldRecallResponse>("/v1/should-recall", {
       query_text,
@@ -333,6 +334,7 @@ export class CerebroClient {
       similarity_threshold,
       max_results,
       project_tags,
+      conversation_context,
     }, 20_000);
     return res;
   }

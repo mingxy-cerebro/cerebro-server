@@ -1,5 +1,5 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
-use std::collections::HashMap;
 
 use axum::extract::{Extension, Path, Query, State};
 use axum::Json;
@@ -11,6 +11,7 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
 use crate::store::lancedb::SessionRecall;
+use crate::retrieve::pipeline::{RetrievalPipeline, SearchRequest};
 
 type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
@@ -39,6 +40,7 @@ pub struct ShouldRecallRequest {
     pub max_results: Option<usize>,
     pub project_tags: Option<Vec<String>>,
     pub agent_id: Option<String>,
+    pub conversation_context: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -237,8 +239,6 @@ pub async fn should_recall(
         max_results = 5;
     }
 
-    let is_zero_vector = query_vector.as_ref().is_none_or(|v| v.iter().all(|&x| x == 0.0));
-
     let effective_min_score = if llm_yes { min_score } else { min_score * 0.5 };
 
     let spaces = state
@@ -247,98 +247,97 @@ pub async fn should_recall(
         .await?;
     let accessible_space_ids: Vec<String> = spaces.iter().map(|s| s.id.clone()).collect();
 
-    let visibility_filter = body
-        .agent_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|agent_id| store.build_visibility_filter(agent_id, &accessible_space_ids));
-    let vis_ref = visibility_filter.as_deref();
+    // Construct pipeline on-the-fly
+    let mut pipeline = RetrievalPipeline::new(store.clone())
+        .with_tag_weight(0.2)
+        .with_llm(state.recall_llm.clone());
+    if let Some(ref reranker) = state.reranker {
+        pipeline = pipeline.with_reranker(reranker.clone());
+    }
 
     // Two-phase search: project-first, then global fallback
-    let project_tags_slice = body.project_tags.as_deref();
     let mut all_results: Vec<(Memory, f32)> = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let project_tags_slice = body.project_tags.as_deref();
 
     // Phase 1: Search within project scope (using project_tags filter)
     if let Some(tags) = project_tags_slice {
         if !tags.is_empty() {
-            let project_results = if is_zero_vector {
-                store
-                    .fts_search(&body.query_text, max_results, None, vis_ref, Some(tags))
-                    .await
-                    .unwrap_or_default()
-            } else {
-                let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
-                store
-                    .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, Some(tags), None)
-                    .await
-                    .unwrap_or_default()
+            let search_req = SearchRequest {
+                query: denoised_query.clone(),
+                query_vector: query_vector.clone(),
+                tenant_id: auth.tenant_id.clone(),
+                scope_filter: None,
+                limit: Some(max_results),
+                min_score: Some(effective_min_score),
+                include_trace: false,
+                tags_filter: Some(tags.to_vec()),
+                source_filter: None,
+                agent_id_filter: body.agent_id.clone(),
+                accessible_spaces: accessible_space_ids.clone(),
+                conversation_context: body.conversation_context.clone(),
             };
-
-            for (mem, score) in project_results {
-                seen_ids.insert(mem.id.clone());
-                all_results.push((mem, score));
-            }
-
-            tracing::info!(
-                query = %body.query_text,
-                project_results = all_results.len(),
-                project_tags = ?tags,
-                "should_recall_phase1_project"
-            );
-        }
-    }
-
-    // Phase 2: If project results are insufficient, supplement with global scope
-    let need_global = all_results.len() < max_results;
-    if need_global {
-        let remaining = max_results - all_results.len();
-            let global_results = if is_zero_vector {
-            store
-                .fts_search(&body.query_text, remaining + 5, None, vis_ref, None)
-                .await
-                .unwrap_or_default()
-        } else {
-            let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
-            store
-                .vector_search(search_vec, remaining + 5, effective_min_score, None, vis_ref, None, None)
-                .await
-                .unwrap_or_default()
-        };
-
-        let mut global_count = 0;
-        for (mem, score) in global_results {
-            if !seen_ids.contains(&mem.id) {
-                seen_ids.insert(mem.id.clone());
-                all_results.push((mem, score));
-                global_count += 1;
-                if global_count >= remaining {
-                    break;
+            match pipeline.search(&search_req).await {
+                Ok(results) => {
+                    for r in results.results {
+                        if seen_ids.insert(r.memory.id.clone()) {
+                            all_results.push((r.memory, r.score));
+                        }
+                    }
+                    tracing::info!(
+                        query = %body.query_text,
+                        project_results = all_results.len(),
+                        project_tags = ?tags,
+                        "should_recall_phase1_project"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "pipeline_search_project_failed");
                 }
             }
         }
-
-        tracing::info!(
-            query = %body.query_text,
-            global_supplement = global_count,
-            total_results = all_results.len(),
-            "should_recall_phase2_global"
-        );
     }
 
-    // Fallback: if no project_tags provided, do a normal global search
-    if project_tags_slice.is_none() || project_tags_slice.is_none_or(|t| t.is_empty()) {
-        all_results = if is_zero_vector {
-            store
-                .fts_search(&body.query_text, max_results, None, vis_ref, None)
-                .await
-                .unwrap_or_default()
-        } else {
-            let search_vec = query_vector.as_ref().ok_or_else(|| OmemError::Internal("query_vector not available".into()))?;
-            store
-                .vector_search(search_vec, max_results, effective_min_score, None, vis_ref, None, None)
-                .await
-                .unwrap_or_default()
+    // Phase 2: Global fallback — supplement if project results insufficient, or no project tags
+    let need_global = all_results.len() < max_results;
+    if need_global || (project_tags_slice.is_none() || project_tags_slice.is_none_or(|t| t.is_empty())) {
+        let global_search_req = SearchRequest {
+            query: denoised_query.clone(),
+            query_vector: query_vector.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            scope_filter: None,
+            limit: Some(max_results * 2),
+            min_score: Some(effective_min_score),
+            include_trace: false,
+            tags_filter: None,
+            source_filter: None,
+            agent_id_filter: body.agent_id.clone(),
+            accessible_spaces: accessible_space_ids.clone(),
+            conversation_context: body.conversation_context.clone(),
+        };
+        match pipeline.search(&global_search_req).await {
+            Ok(results) => {
+                let remaining = if need_global { max_results.saturating_sub(all_results.len()) } else { max_results };
+                let mut global_count = 0;
+                for r in results.results {
+                    if seen_ids.insert(r.memory.id.clone()) {
+                        all_results.push((r.memory, r.score));
+                        global_count += 1;
+                        if global_count >= remaining {
+                            break;
+                        }
+                    }
+                }
+                tracing::info!(
+                    query = %body.query_text,
+                    global_supplement = global_count,
+                    total_results = all_results.len(),
+                    "should_recall_phase2_global"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "pipeline_search_global_failed");
+            }
         }
     }
 

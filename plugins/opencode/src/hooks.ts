@@ -4,6 +4,7 @@ import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
 import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
+import { stripPrivateContent } from "./privacy.js";
 
 const BOUNDARY_SEARCH_RATIO = 0.6;
 const MIN_ITEM_CONTENT_CHARS = 100;
@@ -135,7 +136,7 @@ const keywordDetectedSessions = new Set<string>();
 const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
-const profileInjectedSessions = new Set<string>();
+const profileInjectedSessions = new Map<string, number>();
 
 function formatRelativeAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -277,7 +278,20 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
 
       const projectTags = containerTags.filter(t => t.startsWith("omem_project_"));
-      const shouldRecallRes = await client.shouldRecall(query_text, last_query_text, input.sessionID, similarityThreshold, maxRecallResults, projectTags.length > 0 ? projectTags : undefined);
+
+      const conversationContext = userMessages.length >= 2
+        ? userMessages.slice(-4, -1).map((m) => {
+          const stripped = stripPrivateContent(m.content);
+          return stripped.length > 200 ? stripped.slice(0, 200) : stripped;
+        })
+        : undefined;
+
+      const shouldRecallRes = await client.shouldRecall(
+        query_text, last_query_text, input.sessionID,
+        similarityThreshold, maxRecallResults,
+        projectTags.length > 0 ? projectTags : undefined,
+        conversationContext && conversationContext.length > 0 ? conversationContext : undefined,
+      );
 
       if (!shouldRecallRes) {
         showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
@@ -289,24 +303,36 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       let profileInjected = false;
       let profileCountText = "";
       let profileBlock = "";
-      if (profile && !profileInjectedSessions.has(input.sessionID)) {
+      const lastInjected = profileInjectedSessions.get(input.sessionID);
+      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 5 * 60 * 1000);
+      const isFirstInjection = !lastInjected;
+      if (profile && ttlExpired) {
         profileBlock = [
           "<cerebro-profile>",
           JSON.stringify(profile),
           "</cerebro-profile>",
         ].join("\n");
-        output.system.push(profileBlock);
+        const existingIdx = output.system.findIndex((s) => s.includes("<cerebro-profile>"));
+        if (existingIdx >= 0) {
+          output.system[existingIdx] = profileBlock;
+        } else {
+          output.system.push(profileBlock);
+        }
         profileInjected = true;
-        profileInjectedSessions.add(input.sessionID);
+        profileInjectedSessions.set(input.sessionID, Date.now());
         const p = profile as any;
         const dynamicCount = p?.dynamic_context?.length ?? 0;
         const staticCount = p?.static_facts?.length ?? 0;
         profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
-        logDebug("autoRecallHook profile injected", { dynamicCount, staticCount });
+        if (isFirstInjection) {
+          logDebug("autoRecallHook profile injected (first)", { dynamicCount, staticCount });
+        } else {
+          logDebug("autoRecallHook profile refreshed (TTL)", { dynamicCount, staticCount });
+        }
       }
 
       if (!shouldRecallRes.should_recall) {
-        if (profileInjected) {
+        if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
         }
         return;
@@ -319,7 +345,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
       if (newResults.length === 0) {
-        if (profileInjected) {
+        if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
         }
         return;
@@ -495,13 +521,21 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
     const policy = resolveAgentPolicy(effectiveAgentId, config);
     if (policy !== "readwrite") {
       logInfo("compactingHook blocked by policy", { agentId: effectiveAgentId, policy });
-      if (input.sessionID) sessionMessages.delete(input.sessionID);
+      if (input.sessionID) {
+        sessionMessages.delete(input.sessionID);
+        profileInjectedSessions.delete(input.sessionID);
+        injectedMemoryIds.delete(input.sessionID);
+        firstMessages.delete(input.sessionID);
+      }
       return;
     }
 
     if (input.sessionID && sessionMessages.has(input.sessionID)) {
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
+        profileInjectedSessions.delete(input.sessionID);
+        injectedMemoryIds.delete(input.sessionID);
+        firstMessages.delete(input.sessionID);
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
         if (messages.length > 0) {
@@ -543,6 +577,9 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
             showToast(tui, "🔴 Archive Failed", "Session archive blocked · spiritual pulse anomaly", "error");
           }
           sessionMessages.delete(input.sessionID);
+          profileInjectedSessions.delete(input.sessionID);
+          injectedMemoryIds.delete(input.sessionID);
+          firstMessages.delete(input.sessionID);
         }
       }
     }
