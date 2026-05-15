@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -853,6 +854,39 @@ impl LanceStore {
             .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
 
         Self::batch_to_recall_items(&batches)
+    }
+
+    pub async fn batch_list_recall_items_by_events(
+        &self,
+        tenant_id: &str,
+        event_ids: &[String],
+    ) -> Result<HashMap<String, Vec<RecallItem>>, OmemError> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let quoted: Vec<String> = event_ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+        let filter = format!(
+            "tenant_id = '{}' AND event_id IN ({})",
+            escape_sql(tenant_id),
+            quoted.join(", ")
+        );
+        let table = self.recall_items_table.clone();
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(&filter)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch list recall_items query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let all_items = Self::batch_to_recall_items(&batches)?;
+        let mut map: HashMap<String, Vec<RecallItem>> = HashMap::new();
+        for item in all_items {
+            map.entry(item.event_id.clone()).or_default().push(item);
+        }
+        Ok(map)
     }
 
     pub async fn delete_recall_events_by_session(

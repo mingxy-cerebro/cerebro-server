@@ -636,11 +636,21 @@ pub struct ListRecallEventsQuery {
     #[serde(default)]
     pub offset: usize,
     pub session_id: Option<String>,
+    pub expand: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RecallEventWithItems {
+    #[serde(flatten)]
+    pub event: RecallEvent,
+    pub items: Vec<RecallItem>,
 }
 
 #[derive(Serialize)]
 pub struct ListRecallEventsResponse {
     pub events: Vec<RecallEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_items: Option<Vec<RecallEventWithItems>>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -663,8 +673,28 @@ pub async fn list_recall_events(
         )
         .await?;
 
+    let event_items = if params.expand.as_deref() == Some("items") && !events.is_empty() {
+        let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+        let items_map = store
+            .batch_list_recall_items_by_events(&auth.tenant_id, &event_ids)
+            .await
+            .unwrap_or_default();
+        let mut result = Vec::with_capacity(events.len());
+        for event in &events {
+            let items = items_map.get(&event.id).cloned().unwrap_or_default();
+            result.push(RecallEventWithItems {
+                event: event.clone(),
+                items,
+            });
+        }
+        Some(result)
+    } else {
+        None
+    };
+
     Ok(Json(ListRecallEventsResponse {
         events,
+        event_items,
         limit: params.limit,
         offset: params.offset,
     }))
