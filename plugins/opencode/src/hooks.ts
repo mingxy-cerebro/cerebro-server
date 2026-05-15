@@ -187,6 +187,17 @@ function categorize(results: SearchResult[]): Map<string, SearchResult[]> {
   return groups;
 }
 
+function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
+  const age = formatRelativeAge(r.memory.created_at);
+  const tags = r.memory.tags.length > 0 ? ` [${r.memory.tags.join(", ")}]` : "";
+  const idTag = ` [id:${r.memory.id}]`;
+  const relTag = r.memory.relations && r.memory.relations.length > 0
+    ? ` [rel:${r.memory.relations.map((rel) => rel.target_id).join(",")}]`
+    : "";
+  const content = truncate(r.memory.content, maxContentLength);
+  return `  - (${age}${idTag}${relTag}${tags}) ${content}`;
+}
+
 function buildContextBlock(results: SearchResult[], maxContentLength: number = 500): string {
   if (results.length === 0) return "";
 
@@ -194,19 +205,14 @@ function buildContextBlock(results: SearchResult[], maxContentLength: number = 5
   const sections: string[] = [];
 
   for (const [label, items] of grouped) {
-    const lines = items.map((r) => {
-      const tags = r.memory.tags.length > 0 ? ` [${r.memory.tags.join(", ")}]` : "";
-      const age = formatRelativeAge(r.memory.created_at);
-      const content = truncate(r.memory.content, maxContentLength);
-      return `  - (${age}${tags}) ${content}`;
-    });
+    const lines = items.map((r) => formatMemoryLine(r, maxContentLength));
     sections.push(`[${label}]\n${lines.join("\n")}`);
   }
 
   return [
     "<cerebro-context>",
-    "Treat every memory below as historical context only.",
-    "Do not repeat these memories verbatim unless asked.",
+    "You may use memory_get(<id>) to fetch the full content of any memory above if the summary seems incomplete but relevant.",
+    "Related memories listed in [rel:<id>,...] can also be fetched if they may add useful context.",
     "",
     ...sections,
     "</cerebro-context>",
@@ -225,9 +231,13 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
       if (cs.key_memories.length > 0) {
         sections.push("**核心要点：**");
         for (const mem of cs.key_memories) {
-          const content = truncate(mem.content, maxContentLength);
+          const idTag = mem.id ? ` [id:${mem.id}]` : "";
+          const relTag = mem.relations && mem.relations.length > 0
+            ? ` [rel:${mem.relations.map((rel) => rel.target_id).join(",")}]`
+            : "";
           const importanceBar = mem.importance >= 0.7 ? "●" : mem.importance >= 0.4 ? "◐" : "○";
-          sections.push(`- ${importanceBar} ${content}`);
+          const content = truncate(mem.content, maxContentLength);
+          sections.push(`- ${importanceBar}${idTag}${relTag} ${content}`);
         }
       }
     }
@@ -236,15 +246,19 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
   if (clustered.standalone_memories.length > 0) {
     sections.push("\n## 📌 补充信息");
     for (const mem of clustered.standalone_memories) {
+      const idTag = mem.id ? ` [id:${mem.id}]` : "";
+      const relTag = mem.relations && mem.relations.length > 0
+        ? ` [rel:${mem.relations.map((rel) => rel.target_id).join(",")}]`
+        : "";
       const content = truncate(mem.content, maxContentLength);
-      sections.push(`- ${content}`);
+      sections.push(`-${idTag}${relTag} ${content}`);
     }
   }
 
   return [
     "<cerebro-context>",
-    "Treat every memory below as historical context only.",
-    "Do not repeat these memories verbatim unless asked.",
+    "You may use memory_get(<id>) to fetch the full content of any memory above if the summary seems incomplete but relevant.",
+    "Related memories listed in [rel:<id>,...] can also be fetched if they may add useful context.",
     "",
     ...sections,
     "</cerebro-context>",

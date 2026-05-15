@@ -74,6 +74,12 @@ export interface SessionRecallListResponse {
   recalls: SessionRecallRecord[];
 }
 
+export interface MemoryRelation {
+  relation_type: string;
+  target_id: string;
+  context_label?: string;
+}
+
 export interface MemoryDto {
   id: string;
   content: string;
@@ -82,6 +88,7 @@ export interface MemoryDto {
   memory_type: string;
   state: string;
   tags: string[];
+  relations?: MemoryRelation[];
   source?: string;
   tenant_id: string;
   agent_id?: string;
