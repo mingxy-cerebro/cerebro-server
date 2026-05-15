@@ -198,6 +198,14 @@ function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
   return `  - (${age}${idTag}${relTag}${tags}) ${content}`;
 }
 
+const FETCH_POLICY = [
+  "<cerebro-fetch-policy>",
+  "Each memory in cerebro-context above is a SUMMARY only, not full content.",
+  `If a summary is insufficient for your task, you MUST use memory_get("id") to fetch the full content.`,
+  "Do NOT guess or fabricate details based on summaries alone.",
+  "</cerebro-fetch-policy>",
+].join("\n");
+
 function buildContextBlock(results: SearchResult[], maxContentLength: number = 500): string {
   if (results.length === 0) return "";
 
@@ -211,8 +219,6 @@ function buildContextBlock(results: SearchResult[], maxContentLength: number = 5
 
   return [
     "<cerebro-context>",
-    "You may use memory_get(<id>) to fetch the full content of any memory above if the summary seems incomplete but relevant.",
-    "Related memories listed in [rel:<id>,...] can also be fetched if they may add useful context.",
     "",
     ...sections,
     "</cerebro-context>",
@@ -257,8 +263,6 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
 
   return [
     "<cerebro-context>",
-    "You may use memory_get(<id>) to fetch the full content of any memory above if the summary seems incomplete but relevant.",
-    "Related memories listed in [rel:<id>,...] can also be fetched if they may add useful context.",
     "",
     ...sections,
     "</cerebro-context>",
@@ -387,6 +391,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         : buildContextBlock(newResults, dynamicMaxContentLength);
       if (block) {
         output.system.push(block);
+        output.system.push(FETCH_POLICY);
       }
 
       const newIds = newResults.map((r) => r.memory.id);
@@ -518,6 +523,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       const block = buildContextBlock(results);
       if (block) {
         output.context.push(block);
+        output.context.push(FETCH_POLICY);
       }
     } catch {
     }
