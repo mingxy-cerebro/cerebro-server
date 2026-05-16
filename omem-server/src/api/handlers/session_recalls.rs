@@ -258,11 +258,11 @@ pub async fn should_recall(
     let (effective_min_score, quality_gate) = if llm_yes {
         (min_score, 0.40)
     } else if has_recall_signals(&denoised_query) {
-        tracing::info!(query = %body.query_text, original_min_score = min_score, strict_min_score = min_score.max(0.55), quality_gate = 0.50, "recall_llm_rejected_with_signals");
-        (min_score.max(0.55), 0.50)
+        tracing::info!(query = %body.query_text, original_min_score = min_score, strict_min_score = min_score.max(0.50), quality_gate = 0.45, "recall_llm_rejected_with_signals");
+        (min_score.max(0.50), 0.45)
     } else {
-        tracing::info!(query = %body.query_text, strict_min_score = min_score.max(0.65), quality_gate = 0.60, "recall_llm_rejected_strict");
-        (min_score.max(0.65), 0.60)
+        tracing::info!(query = %body.query_text, strict_min_score = min_score.max(0.60), quality_gate = 0.55, "recall_llm_rejected_strict");
+        (min_score.max(0.60), 0.55)
     };
 
     let spaces = state

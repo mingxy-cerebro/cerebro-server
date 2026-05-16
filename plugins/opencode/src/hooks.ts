@@ -468,10 +468,8 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       };
 
       if (!shouldRecallRes.should_recall) {
-        if (storedDiscardedIds.length > 0) {
-          await createEventAndReturn(0, 0, storedDiscardedIds.length);
-        }
         if (profileInjected && isFirstInjection) {
+          await createEventAndReturn(0, 0, 0);
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
         }
         return;
@@ -484,7 +482,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
       if (newResults.length === 0) {
-        await createEventAndReturn(0, storedMemoryIds.length, storedDiscardedIds.length);
         if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
         }
