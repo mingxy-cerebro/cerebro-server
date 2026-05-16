@@ -29,7 +29,7 @@ pub use memory::{
 pub use merge::merge_memories;
 pub use profile::get_profile;
 pub use session_recalls::{
-    delete_session_recalls_by_session, list_recall_event_items, list_recall_events,
+    create_recall_event, delete_session_recalls_by_session, list_recall_event_items, list_recall_events,
     list_session_groups, should_recall, update_recall_event_profile,
 };
 pub use sharing::{

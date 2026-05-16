@@ -96,6 +96,61 @@
           "default": 10,
           "minimum": 1,
           "maximum": 50
+        },
+        "fetchMultiplier": {
+          "type": "number",
+          "description": "Search breadth multiplier: fetch_limit = max_results * N",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "topkCapMultiplier": {
+          "type": "number",
+          "description": "Candidate cap multiplier: topk_cap = max_results * N",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "mmrJaccardThreshold": {
+          "type": "number",
+          "description": "Jaccard similarity threshold for MMR diversity penalty",
+          "default": 0.85,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "mmrPenaltyFactor": {
+          "type": "number",
+          "description": "Score penalty factor for similar memories in MMR diversity",
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "phase2Multiplier": {
+          "type": "number",
+          "description": "Phase2 global fallback search multiplier",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "llmMaxEval": {
+          "type": "number",
+          "description": "Maximum candidates sent to LLM for relevance evaluation",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 50
+        },
+        "refineStrategy": {
+          "type": "string",
+          "description": "LLM refinement strategy: strict (high only), balanced (high+medium), loose (keep all)",
+          "enum": ["strict", "balanced", "loose"],
+          "default": "balanced"
+        },
+        "refineMediumChars": {
+          "type": "number",
+          "description": "Character limit for medium-relevance content truncation",
+          "default": 200,
+          "minimum": 50,
+          "maximum": 2000
         }
       },
       "additionalProperties": false

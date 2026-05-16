@@ -67,6 +67,8 @@ pub struct RecallEvent {
     pub profile_injected: bool,
     pub kept_count: u32,
     pub discarded_count: u32,
+    pub injected_count: u32,
+    pub profile_content: Option<String>,
     pub tenant_id: String,
     pub created_at: String,
 }
@@ -287,15 +289,51 @@ impl LanceStore {
                 .collect();
 
             if !missing_fields.is_empty() {
-                let missing_schema = Arc::new(Schema::new(missing_fields));
-                self.recall_events_table
-                    .add_columns(NewColumnTransform::AllNulls(missing_schema), None)
-                    .await
-                    .map_err(|e| {
-                        OmemError::Storage(format!(
-                            "failed to add missing columns to recall_events: {e}"
-                        ))
-                    })?;
+                // Separate nullable vs non-nullable: AllNulls only works for nullable columns
+                let mut nullable_fields: Vec<Field> = Vec::new();
+                let mut non_nullable_fields: Vec<Field> = Vec::new();
+                for f in missing_fields {
+                    if f.is_nullable() {
+                        nullable_fields.push(f);
+                    } else {
+                        non_nullable_fields.push(f);
+                    }
+                }
+
+                if !nullable_fields.is_empty() {
+                    let nullable_schema = Arc::new(Schema::new(nullable_fields));
+                    self.recall_events_table
+                        .add_columns(NewColumnTransform::AllNulls(nullable_schema), None)
+                        .await
+                        .map_err(|e| {
+                            OmemError::Storage(format!(
+                                "failed to add nullable columns to recall_events: {e}"
+                            ))
+                        })?;
+                }
+
+                if !non_nullable_fields.is_empty() {
+                    let sql_exprs: Vec<(String, String)> = non_nullable_fields
+                        .iter()
+                        .map(|f| {
+                            let default_val = match f.data_type() {
+                                arrow::datatypes::DataType::UInt32 => "0".to_string(),
+                                arrow::datatypes::DataType::Float32 => "0.0".to_string(),
+                                arrow::datatypes::DataType::Boolean => "false".to_string(),
+                                _ => "''".to_string(),
+                            };
+                            (f.name().clone(), default_val)
+                        })
+                        .collect();
+                    self.recall_events_table
+                        .add_columns(NewColumnTransform::SqlExpressions(sql_exprs), None)
+                        .await
+                        .map_err(|e| {
+                            OmemError::Storage(format!(
+                                "failed to add non-nullable columns to recall_events: {e}"
+                            ))
+                        })?;
+                }
             }
 
             Self::fix_null_columns(&self.recall_events_table, &current_schema, &expected_schema).await?;
@@ -565,6 +603,8 @@ impl LanceStore {
             Field::new("profile_injected", DataType::Boolean, false),
             Field::new("kept_count", DataType::UInt32, false),
             Field::new("discarded_count", DataType::UInt32, false),
+            Field::new("injected_count", DataType::UInt32, false),
+            Field::new("profile_content", DataType::Utf8, true),
             Field::new("tenant_id", DataType::Utf8, false),
             Field::new("created_at", DataType::Utf8, false),
         ]))
@@ -585,6 +625,7 @@ impl LanceStore {
     }
 
     fn recall_event_to_batch(event: &RecallEvent) -> Result<RecordBatch, OmemError> {
+        let profile_content_val: Option<String> = event.profile_content.clone();
         RecordBatch::try_new(
             Self::recall_events_schema(),
             vec![
@@ -597,6 +638,8 @@ impl LanceStore {
                 Arc::new(BooleanArray::from(vec![event.profile_injected])),
                 Arc::new(UInt32Array::from(vec![event.kept_count])),
                 Arc::new(UInt32Array::from(vec![event.discarded_count])),
+                Arc::new(UInt32Array::from(vec![event.injected_count])),
+                Arc::new(StringArray::from(vec![profile_content_val.as_deref()])),
                 Arc::new(StringArray::from(vec![event.tenant_id.as_str()])),
                 Arc::new(StringArray::from(vec![event.created_at.as_str()])),
             ],
@@ -652,6 +695,41 @@ impl LanceStore {
                     Ok(arr.value(i))
                 };
 
+                let get_u32_or = |name: &str, default: u32| -> Result<u32, OmemError> {
+                    match batch.column_by_name(name) {
+                        Some(col) => {
+                            if let Some(arr) = col.as_any().downcast_ref::<UInt32Array>() {
+                                if arr.is_null(i) {
+                                    Ok(default)
+                                } else {
+                                    Ok(arr.value(i))
+                                }
+                            } else {
+                                Ok(default)
+                            }
+                        }
+                        None => Ok(default),
+                    }
+                };
+
+                let get_opt_str = |name: &str| -> Result<Option<String>, OmemError> {
+                    match batch.column_by_name(name) {
+                        Some(col) => {
+                            let arr = col
+                                .as_any()
+                                .downcast_ref::<StringArray>();
+                            match arr {
+                                Some(arr) if !arr.is_null(i) => {
+                                    let val = arr.value(i);
+                                    Ok(if val.is_empty() { None } else { Some(val.to_string()) })
+                                }
+                                _ => Ok(None),
+                            }
+                        }
+                        None => Ok(None),
+                    }
+                };
+
                 events.push(RecallEvent {
                     id: get_str("id")?,
                     session_id: get_str("session_id")?,
@@ -662,6 +740,8 @@ impl LanceStore {
                     profile_injected: get_bool("profile_injected")?,
                     kept_count: get_u32("kept_count")?,
                     discarded_count: get_u32("discarded_count")?,
+                    injected_count: get_u32_or("injected_count", 0)?,
+                    profile_content: get_opt_str("profile_content")?,
                     tenant_id: get_str("tenant_id")?,
                     created_at: get_str("created_at")?,
                 });
@@ -746,6 +826,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to insert recall_event: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 
@@ -799,6 +880,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to batch insert recall_items: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 
@@ -893,6 +975,7 @@ impl LanceStore {
         &self,
         event_id: &str,
         profile_injected: bool,
+        profile_content: Option<&str>,
     ) -> Result<(), OmemError> {
         let table = self.recall_events_table.clone();
         let filter = format!("id = '{}'", escape_sql(event_id));
@@ -911,7 +994,10 @@ impl LanceStore {
         }
 
         let val = if profile_injected { "true" } else { "false" };
-        let sql_exprs = vec![("profile_injected".to_string(), val.to_string())];
+        let mut sql_exprs = vec![("profile_injected".to_string(), val.to_string())];
+        if let Some(content) = profile_content {
+            sql_exprs.push(("profile_content".to_string(), format!("'{}'", escape_sql(content))));
+        }
         table
             .add_columns(
                 lancedb::table::NewColumnTransform::SqlExpressions(sql_exprs),
@@ -920,6 +1006,7 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("update recall_event profile_injected failed: {e}")))?;
 
+        self.after_mutation();
         Ok(())
     }
 
@@ -972,6 +1059,7 @@ impl LanceStore {
             .delete(&filter)
             .await
             .map_err(|e| OmemError::Storage(format!("failed to delete recall_events by session: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 
@@ -1700,6 +1788,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("update cluster_id failed: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 
@@ -1756,6 +1845,7 @@ impl LanceStore {
                 .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids set anchor failed: {e}")))?;
         }
 
+        self.after_mutation();
         Ok(())
     }
 
@@ -1769,6 +1859,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("batch clear cluster_id failed: {e}")))?;
+        self.after_mutation();
         Ok(result.rows_updated)
     }
 
@@ -1791,6 +1882,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("batch_bump_access_count failed: {e}")))?;
+        self.after_mutation();
         Ok(())
     }
 

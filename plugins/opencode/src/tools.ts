@@ -52,17 +52,17 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           "Do NOT overuse 'private' for normal work notes — default 'global' is correct for most cases."
           ),
         category: tool.schema
-          .string()
+          .enum(["cases", "preferences", "entities", "events", "profile", "patterns"])
           .optional()
           .describe(
-            "MUST be one of (choose the BEST fit): " +
-          "'cases' (default) = work records, bug fixes, architecture decisions, implementation notes, meeting conclusions; " +
-          "'preferences' = user likes/dislikes, coding style preferences, tool choices (e.g. 'prefers Vim over VSCode'); " +
-          "'entities' = projects, tools, people, concepts — defining what something IS (e.g. 'omem-server: Rust memory backend using LanceDB'); " +
+            "Memory category. MUST be one of these exact values (lowercase): " +
+          "'cases' (default) = work records, bug fixes, architecture decisions; " +
+          "'preferences' = user likes/dislikes, coding style, tool choices; " +
+          "'entities' = projects, tools, people, concepts; " +
           "'events' = time-bound milestones (deployments, releases, incidents); " +
           "'profile' = user identity traits (role, skills, team membership); " +
-          "'patterns' = workflows, methodologies, best practices, recurring solutions. " +
-          "When in doubt, use 'cases'."
+          "'patterns' = workflows, methodologies, best practices. " +
+          "When in doubt, omit this field (defaults to 'cases')."
           ),
       },
       async execute(args) {

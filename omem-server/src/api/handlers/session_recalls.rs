@@ -11,7 +11,7 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
 use crate::store::lancedb::{RecallEvent, RecallItem};
-use crate::retrieve::pipeline::{RetrievalPipeline, SearchRequest, SearchResult};
+use crate::retrieve::pipeline::{RetrievalPipeline, SearchOverrides, SearchRequest, SearchResult};
 
 type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
@@ -41,11 +41,38 @@ pub struct ShouldRecallRequest {
     pub project_tags: Option<Vec<String>>,
     pub agent_id: Option<String>,
     pub conversation_context: Option<Vec<String>>,
+    #[serde(default)]
+    pub fetch_multiplier: Option<usize>,
+    #[serde(default)]
+    pub topk_cap_multiplier: Option<usize>,
+    #[serde(default)]
+    pub mmr_jaccard_threshold: Option<f32>,
+    #[serde(default)]
+    pub mmr_penalty_factor: Option<f32>,
+    #[serde(default)]
+    pub phase2_multiplier: Option<usize>,
+    #[serde(default)]
+    pub llm_max_eval: Option<usize>,
+    #[serde(default)]
+    pub refine_strategy: Option<String>,
+    #[serde(default)]
+    pub refine_medium_chars: Option<usize>,
 }
 
 #[derive(Serialize)]
 pub struct MemoryWithScore {
     pub memory: Memory,
+    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_relevance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refine_reasoning: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DiscardedItem {
+    pub memory_id: String,
+    pub content: String,
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refine_relevance: Option<String>,
@@ -61,13 +88,13 @@ pub struct ShouldRecallResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memories: Option<Vec<MemoryWithScore>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub discarded: Option<Vec<DiscardedItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_score: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clustered: Option<crate::cluster::aggregator::ClusteredResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_id: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -118,10 +145,10 @@ pub async fn should_recall(
             should_recall: false,
             reason: Some("system_injection_filtered".to_string()),
             memories: None,
+            discarded: None,
             confidence: None,
             similarity_score: None,
             clustered: None,
-            event_id: None,
         }));
     }
 
@@ -143,10 +170,10 @@ pub async fn should_recall(
                     should_recall: false,
                     reason: Some("rate_limited".to_string()),
                     memories: None,
+                    discarded: None,
                     confidence: None,
                     similarity_score: None,
                     clustered: None,
-                    event_id: None,
                 }));
             }
         }
@@ -169,10 +196,10 @@ pub async fn should_recall(
                         should_recall: false,
                         reason: Some("similarity_too_high".to_string()),
                         memories: None,
+                        discarded: None,
                         confidence: None,
                         similarity_score: Some(sim),
                         clustered: None,
-                        event_id: None,
                     }));
                 }
                 Some(sim)
@@ -245,6 +272,33 @@ pub async fn should_recall(
         pipeline = pipeline.with_reranker(reranker.clone());
     }
 
+    // Build SearchOverrides: request params override config defaults
+    let phase2_multiplier = body.phase2_multiplier.unwrap_or(state.config.recall_phase2_multiplier);
+    let overrides = SearchOverrides {
+        fetch_multiplier: body.fetch_multiplier.or(Some(state.config.search_fetch_multiplier)),
+        topk_cap_multiplier: body.topk_cap_multiplier.or(Some(state.config.search_topk_cap_multiplier)),
+        mmr_jaccard_threshold: body.mmr_jaccard_threshold.or(Some(state.config.search_mmr_jaccard_threshold)),
+        mmr_penalty_factor: body.mmr_penalty_factor.or(Some(state.config.search_mmr_penalty_factor)),
+        llm_max_eval: body.llm_max_eval.or(Some(state.config.recall_llm_max_eval)),
+        refine_strategy: body.refine_strategy.clone().or(Some(state.config.recall_refine_strategy.clone())),
+        refine_medium_chars: body.refine_medium_chars.or(Some(state.config.recall_refine_medium_chars)),
+        refine_timeout_secs: Some(state.config.recall_llm_refine_timeout_secs),
+    };
+
+    tracing::info!(
+        query = %body.query_text,
+        fetch_multiplier = ?overrides.fetch_multiplier,
+        topk_cap_multiplier = ?overrides.topk_cap_multiplier,
+        mmr_jaccard_threshold = ?overrides.mmr_jaccard_threshold,
+        mmr_penalty_factor = ?overrides.mmr_penalty_factor,
+        phase2_multiplier,
+        llm_max_eval = ?overrides.llm_max_eval,
+        refine_strategy = ?overrides.refine_strategy,
+        refine_medium_chars = ?overrides.refine_medium_chars,
+        refine_timeout_secs = ?overrides.refine_timeout_secs,
+        "should_recall_overrides"
+    );
+
     // Two-phase search: project-first, then global fallback
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut all_discarded: Vec<SearchResult> = Vec::new();
@@ -269,7 +323,7 @@ pub async fn should_recall(
                 accessible_spaces: accessible_space_ids.clone(),
                 conversation_context: body.conversation_context.clone(),
             };
-            match pipeline.search(&search_req).await {
+            match pipeline.search(&search_req, Some(&overrides)).await {
                 Ok(results) => {
                     for d in results.discarded {
                         if seen_ids_for_discarded.insert(d.memory.id.clone()) {
@@ -305,7 +359,7 @@ pub async fn should_recall(
             query_vector: query_vector.clone(),
             tenant_id: auth.tenant_id.clone(),
             scope_filter: None,
-            limit: Some(max_results * 2),
+            limit: Some(max_results * phase2_multiplier),
             min_score: Some(effective_min_score),
             include_trace: false,
             tags_filter: None,
@@ -314,7 +368,7 @@ pub async fn should_recall(
             accessible_spaces: accessible_space_ids.clone(),
             conversation_context: body.conversation_context.clone(),
         };
-        match pipeline.search(&global_search_req).await {
+        match pipeline.search(&global_search_req, Some(&overrides)).await {
             Ok(results) => {
                 for d in results.discarded {
                     if seen_ids_for_discarded.insert(d.memory.id.clone()) {
@@ -359,91 +413,34 @@ pub async fn should_recall(
         })
         .collect();
 
-    tracing::info!(query = %body.query_text, result_count = memories.len(), discarded_count = all_discarded.len(), should_recall = !memories.is_empty(), "should_recall_result");
+    let discarded_items: Vec<DiscardedItem> = all_discarded
+        .iter()
+        .map(|d| {
+            let content = if d.memory.content.chars().count() > 200 {
+                let end = d.memory.content.char_indices()
+                    .nth(200).map(|(i, _)| i)
+                    .unwrap_or(d.memory.content.len());
+                format!("{}…", &d.memory.content[..end])
+            } else {
+                d.memory.content.clone()
+            };
+            DiscardedItem {
+                memory_id: d.memory.id.clone(),
+                content,
+                score: d.score,
+                refine_relevance: d.refine_relevance.clone(),
+                refine_reasoning: d.refine_reasoning.clone(),
+            }
+        })
+        .collect();
+
+    tracing::info!(query = %body.query_text, result_count = memories.len(), discarded_count = discarded_items.len(), should_recall = !memories.is_empty(), "should_recall_result");
 
     let confidence = if memories.is_empty() {
         0.0
     } else {
         memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32
     };
-
-    let event_id = uuid::Uuid::new_v4().to_string();
-
-    if !memories.is_empty() || !all_discarded.is_empty() {
-        let kept_count = memories.len() as u32;
-        let discarded_count = all_discarded.len() as u32;
-
-        let max_score = memories.iter().map(|m| m.score).fold(0.0_f32, f32::max);
-
-        let event = RecallEvent {
-            id: event_id.clone(),
-            session_id: body.session_id.clone(),
-            recall_type: "auto".to_string(),
-            query_text: body.query_text.clone(),
-            max_score,
-            llm_confidence: confidence,
-            profile_injected: false,
-            kept_count,
-            discarded_count,
-            tenant_id: auth.tenant_id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        if let Err(e) = store.create_recall_event(&event).await {
-            tracing::warn!(error = %e, "failed_to_save_recall_event");
-        }
-
-        let mut items = Vec::new();
-        let now = chrono::Utc::now().to_rfc3339();
-        for m in &memories {
-            items.push(RecallItem {
-                id: uuid::Uuid::new_v4().to_string(),
-                event_id: event_id.clone(),
-                memory_id: m.memory.id.clone(),
-                score: m.score,
-                refine_relevance: m.refine_relevance.clone(),
-                refine_reasoning: m.refine_reasoning.clone(),
-                is_kept: true,
-                tenant_id: auth.tenant_id.clone(),
-                created_at: now.clone(),
-            });
-        }
-        for d in &all_discarded {
-            items.push(RecallItem {
-                id: uuid::Uuid::new_v4().to_string(),
-                event_id: event_id.clone(),
-                memory_id: d.memory.id.clone(),
-                score: d.score,
-                refine_relevance: d.refine_relevance.clone(),
-                refine_reasoning: d.refine_reasoning.clone(),
-                is_kept: false,
-                tenant_id: auth.tenant_id.clone(),
-                created_at: now.clone(),
-            });
-        }
-        if !items.is_empty() {
-            if let Err(e) = store.batch_create_recall_items(&items).await {
-                tracing::warn!(error = %e, "failed_to_save_recall_items");
-            }
-        }
-    } else {
-        let event = RecallEvent {
-            id: event_id.clone(),
-            session_id: body.session_id.clone(),
-            recall_type: "auto".to_string(),
-            query_text: body.query_text.clone(),
-            max_score: 0.0,
-            llm_confidence: 0.0,
-            profile_injected: false,
-            kept_count: 0,
-            discarded_count: 0,
-            tenant_id: auth.tenant_id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        if let Err(e) = store.create_recall_event(&event).await {
-            tracing::warn!(error = %e, "failed_to_save_recall_event");
-        }
-    }
 
     let clustered = if !memories.is_empty() {
         let aggregator = crate::cluster::aggregator::ClusterAggregator::new(state.cluster_store.clone());
@@ -470,10 +467,10 @@ pub async fn should_recall(
             should_recall: false,
             reason: Some("no_relevant_memories".to_string()),
             memories: None,
+            discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
             confidence: None,
             similarity_score,
             clustered: None,
-            event_id: Some(event_id.clone()),
         }));
     }
 
@@ -488,10 +485,10 @@ pub async fn should_recall(
         should_recall: true,
         reason: None,
         memories: Some(memories),
+        discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
         confidence: Some(confidence),
         similarity_score,
         clustered,
-        event_id: Some(event_id.clone()),
     }))
 }
 
@@ -672,6 +669,7 @@ pub async fn list_recall_event_items(
 #[derive(Deserialize)]
 pub struct UpdateProfileInjectedBody {
     pub profile_injected: bool,
+    pub profile_content: Option<String>,
 }
 
 pub async fn update_recall_event_profile(
@@ -685,7 +683,86 @@ pub async fn update_recall_event_profile(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
     store
-        .update_recall_event_profile(&event_id, body.profile_injected)
+        .update_recall_event_profile(&event_id, body.profile_injected, body.profile_content.as_deref())
         .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateRecallEventBody {
+    pub session_id: String,
+    pub recall_type: Option<String>,
+    pub query_text: String,
+    pub max_score: f32,
+    pub llm_confidence: f32,
+    pub profile_injected: bool,
+    pub kept_count: u32,
+    pub discarded_count: u32,
+    pub injected_count: Option<u32>,
+    pub profile_content: Option<String>,
+    pub items: Option<Vec<CreateRecallEventItem>>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateRecallEventItem {
+    pub memory_id: String,
+    pub score: f32,
+    pub refine_relevance: Option<String>,
+    pub refine_reasoning: Option<String>,
+    pub is_kept: bool,
+}
+
+pub async fn create_recall_event(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<CreateRecallEventBody>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    let event_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let recall_type = body.recall_type.unwrap_or_else(|| "auto".to_string());
+
+    let event = RecallEvent {
+        id: event_id.clone(),
+        session_id: body.session_id.clone(),
+        recall_type,
+        query_text: body.query_text,
+        max_score: body.max_score,
+        llm_confidence: body.llm_confidence,
+        profile_injected: body.profile_injected,
+        kept_count: body.kept_count,
+        discarded_count: body.discarded_count,
+        injected_count: body.injected_count.unwrap_or(0),
+        profile_content: body.profile_content,
+        tenant_id: auth.tenant_id.clone(),
+        created_at: now.clone(),
+    };
+
+    store.create_recall_event(&event).await?;
+
+    if let Some(items) = body.items {
+        if !items.is_empty() {
+            let recall_items: Vec<crate::store::lancedb::RecallItem> = items
+                .into_iter()
+                .map(|item| crate::store::lancedb::RecallItem {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    event_id: event_id.clone(),
+                    memory_id: item.memory_id,
+                    score: item.score,
+                    refine_relevance: item.refine_relevance,
+                    refine_reasoning: item.refine_reasoning,
+                    is_kept: item.is_kept,
+                    tenant_id: auth.tenant_id.clone(),
+                    created_at: now.clone(),
+                })
+                .collect();
+            store.batch_create_recall_items(&recall_items).await?;
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true, "event_id": event_id })))
 }

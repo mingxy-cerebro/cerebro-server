@@ -55,6 +55,14 @@ export interface ClusteredRecallResult {
   standalone_memories: MemoryDto[];
 }
 
+export interface DiscardedItem {
+  memory_id: string;
+  content: string;
+  score: number;
+  refine_relevance?: string;
+  refine_reasoning?: string;
+}
+
 export interface ShouldRecallResponse {
   should_recall: boolean;
   query?: string;
@@ -62,8 +70,8 @@ export interface ShouldRecallResponse {
   similarity_score?: number;
   confidence?: number;
   memories?: SearchResult[];
+  discarded?: DiscardedItem[];
   clustered?: ClusteredRecallResult;
-  event_id?: string;
 }
 
 export interface MemoryRelation {
@@ -332,6 +340,16 @@ export class CerebroClient {
     max_results?: number,
     project_tags?: string[],
     conversation_context?: string[],
+    recall_overrides?: {
+      fetch_multiplier?: number;
+      topk_cap_multiplier?: number;
+      mmr_jaccard_threshold?: number;
+      mmr_penalty_factor?: number;
+      phase2_multiplier?: number;
+      llm_max_eval?: number;
+      refine_strategy?: string;
+      refine_medium_chars?: number;
+    },
   ): Promise<ShouldRecallResponse | null> {
     const res = await this.post<ShouldRecallResponse>("/v1/should-recall", {
       query_text,
@@ -341,6 +359,7 @@ export class CerebroClient {
       max_results,
       project_tags,
       conversation_context,
+      ...recall_overrides,
     }, 20_000);
     return res;
   }
@@ -348,13 +367,40 @@ export class CerebroClient {
   async updateProfileInjected(
     event_id: string,
     profile_injected: boolean,
+    profile_content?: string,
   ): Promise<unknown | null> {
+    const body: Record<string, unknown> = { profile_injected };
+    if (profile_content !== undefined) {
+      body.profile_content = profile_content;
+    }
     const res = await this.patch(
       `/v1/recall-events/${event_id}/profile-injected`,
-      { profile_injected },
+      body,
       10_000,
     );
     return res;
+  }
+
+  async createRecallEvent(params: {
+    session_id: string;
+    recall_type?: string;
+    query_text: string;
+    max_score: number;
+    llm_confidence: number;
+    profile_injected: boolean;
+    kept_count: number;
+    discarded_count: number;
+    injected_count: number;
+    profile_content?: string;
+    items?: Array<{
+      memory_id: string;
+      score: number;
+      refine_relevance?: string;
+      refine_reasoning?: string;
+      is_kept: boolean;
+    }>;
+  }): Promise<{ ok: boolean; event_id?: string } | null> {
+    return this.post("/v1/recall-events", params, 10_000);
   }
 
   async sessionIngest(

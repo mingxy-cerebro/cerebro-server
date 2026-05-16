@@ -22,6 +22,14 @@ export interface OmemPluginConfig {
   recall: {
     similarityThreshold: number;
     maxRecallResults: number;
+    fetchMultiplier: number;
+    topkCapMultiplier: number;
+    mmrJaccardThreshold: number;
+    mmrPenaltyFactor: number;
+    phase2Multiplier: number;
+    llmMaxEval: number;
+    refineStrategy: "strict" | "balanced" | "loose";
+    refineMediumChars: number;
   };
   logging: {
     logEnabled: boolean;
@@ -55,6 +63,14 @@ const DEFAULTS: OmemPluginConfig = {
   recall: {
     similarityThreshold: 0.4,
     maxRecallResults: 10,
+    fetchMultiplier: 3,
+    topkCapMultiplier: 2,
+    mmrJaccardThreshold: 0.85,
+    mmrPenaltyFactor: 0.5,
+    phase2Multiplier: 2,
+    llmMaxEval: 15,
+    refineStrategy: "balanced",
+    refineMediumChars: 200,
   },
   logging: {
     logEnabled: true,
@@ -111,6 +127,14 @@ function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
     recall: {
       similarityThreshold: flat.similarityThreshold ?? DEFAULTS.recall.similarityThreshold,
       maxRecallResults: flat.maxRecallResults ?? DEFAULTS.recall.maxRecallResults,
+      fetchMultiplier: DEFAULTS.recall.fetchMultiplier,
+      topkCapMultiplier: DEFAULTS.recall.topkCapMultiplier,
+      mmrJaccardThreshold: DEFAULTS.recall.mmrJaccardThreshold,
+      mmrPenaltyFactor: DEFAULTS.recall.mmrPenaltyFactor,
+      phase2Multiplier: DEFAULTS.recall.phase2Multiplier,
+      llmMaxEval: DEFAULTS.recall.llmMaxEval,
+      refineStrategy: DEFAULTS.recall.refineStrategy,
+      refineMediumChars: DEFAULTS.recall.refineMediumChars,
     },
     logging: {
       logEnabled: flat.logEnabled ?? DEFAULTS.logging.logEnabled,

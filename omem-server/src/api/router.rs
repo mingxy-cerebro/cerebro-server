@@ -112,7 +112,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/session-recalls/session/{session_id}",
             delete(handlers::delete_session_recalls_by_session),
         )
-.route("/v1/recall-events", get(handlers::list_recall_events))
+.route("/v1/recall-events", get(handlers::list_recall_events).post(handlers::create_recall_event))
 .route("/v1/recall-events/{id}/items", get(handlers::list_recall_event_items))
 .route("/v1/recall-events/{id}/profile-injected", patch(handlers::update_recall_event_profile))
         .route("/v1/clusters", get(handlers::list_clusters))

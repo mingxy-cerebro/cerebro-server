@@ -87,6 +87,26 @@ pub struct OmemConfig {
     pub forgetting_max_stale_deletions: usize,
     pub forgetting_access_count_protection: u32,
     pub forgetting_superseded_archive_days: u32,
+
+    // Search & Recall pipeline parameters
+    /// fetch_limit = max_results * N. Default: 3
+    pub search_fetch_multiplier: usize,
+    /// topk_cap = max_results * N. Default: 2
+    pub search_topk_cap_multiplier: usize,
+    /// Jaccard similarity penalty threshold. Default: 0.85
+    pub search_mmr_jaccard_threshold: f32,
+    /// Similarity score penalty factor. Default: 0.5
+    pub search_mmr_penalty_factor: f32,
+    /// Phase2 limit = max_results * N. Default: 2
+    pub recall_phase2_multiplier: usize,
+    /// Max candidates per LLM evaluation. Default: 15
+    pub recall_llm_max_eval: usize,
+    /// Refine strategy: strict / balanced / loose. Default: balanced
+    pub recall_refine_strategy: String,
+    /// Medium relevance truncation chars. Default: 200
+    pub recall_refine_medium_chars: usize,
+    /// LLM refine timeout in seconds. Default: 15
+    pub recall_llm_refine_timeout_secs: u64,
 }
 
 impl Default for OmemConfig {
@@ -142,6 +162,15 @@ impl Default for OmemConfig {
             forgetting_max_stale_deletions: 50,
             forgetting_access_count_protection: 5,
             forgetting_superseded_archive_days: 30,
+            search_fetch_multiplier: 3,
+            search_topk_cap_multiplier: 2,
+            search_mmr_jaccard_threshold: 0.85,
+            search_mmr_penalty_factor: 0.5,
+            recall_phase2_multiplier: 2,
+            recall_llm_max_eval: 15,
+            recall_refine_strategy: "balanced".to_string(),
+            recall_refine_medium_chars: 200,
+            recall_llm_refine_timeout_secs: 15,
         }
     }
 }
@@ -288,6 +317,40 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.forgetting_superseded_archive_days),
+            search_fetch_multiplier: env::var("OMEM_SEARCH_FETCH_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.search_fetch_multiplier),
+            search_topk_cap_multiplier: env::var("OMEM_SEARCH_TOPK_CAP_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.search_topk_cap_multiplier),
+            search_mmr_jaccard_threshold: env::var("OMEM_SEARCH_MMR_JACCARD_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.search_mmr_jaccard_threshold),
+            search_mmr_penalty_factor: env::var("OMEM_SEARCH_MMR_PENALTY_FACTOR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.search_mmr_penalty_factor),
+            recall_phase2_multiplier: env::var("OMEM_RECALL_PHASE2_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.recall_phase2_multiplier),
+            recall_llm_max_eval: env::var("OMEM_RECALL_LLM_MAX_EVAL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.recall_llm_max_eval),
+            recall_refine_strategy: env::var("OMEM_RECALL_REFINE_STRATEGY")
+                .unwrap_or(defaults.recall_refine_strategy),
+            recall_refine_medium_chars: env::var("OMEM_RECALL_REFINE_MEDIUM_CHARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.recall_refine_medium_chars),
+            recall_llm_refine_timeout_secs: env::var("OMEM_RECALL_LLM_REFINE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.recall_llm_refine_timeout_secs),
         };
 
         // Validate lifecycle parameters — warn and fallback to defaults on invalid values

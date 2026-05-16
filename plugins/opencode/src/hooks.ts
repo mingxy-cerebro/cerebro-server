@@ -299,6 +299,14 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
 export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string) {
   const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
   const maxRecallResults = config.recall?.maxRecallResults ?? 10;
+  const fetchMultiplier = config.recall?.fetchMultiplier ?? 3;
+  const topkCapMultiplier = config.recall?.topkCapMultiplier ?? 2;
+  const mmrJaccardThreshold = config.recall?.mmrJaccardThreshold ?? 0.85;
+  const mmrPenaltyFactor = config.recall?.mmrPenaltyFactor ?? 0.5;
+  const phase2Multiplier = config.recall?.phase2Multiplier ?? 2;
+  const llmMaxEval = config.recall?.llmMaxEval ?? 15;
+  const refineStrategy = config.recall?.refineStrategy ?? "balanced";
+  const refineMediumChars = config.recall?.refineMediumChars ?? 200;
   const maxContentLength = Math.max(MIN_CONTENT_LENGTH, config.content?.maxContentLength ?? 500);
   const maxContentChars = Math.max(MIN_CONTENT_CHARS, config.content?.maxContentChars ?? 30000);
   const toastDelayMs = config.ui?.toastDelayMs ?? 7000;
@@ -315,7 +323,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
     if (policy === "none") return;
 
     try {
-      logDebug("autoRecallHook start", { sessionId: input.sessionID, agentId, policy });
+      logDebug("autoRecallHook start", { sessionId: input.sessionID, agentId, policy, similarityThreshold, maxRecallResults, fetchMultiplier, topkCapMultiplier, mmrJaccardThreshold, mmrPenaltyFactor, phase2Multiplier, llmMaxEval, refineStrategy, refineMediumChars });
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
@@ -348,26 +356,36 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         similarityThreshold, maxRecallResults,
         projectTags.length > 0 ? projectTags : undefined,
         conversationContext && conversationContext.length > 0 ? conversationContext : undefined,
+        {
+          fetch_multiplier: fetchMultiplier,
+          topk_cap_multiplier: topkCapMultiplier,
+          mmr_jaccard_threshold: mmrJaccardThreshold,
+          mmr_penalty_factor: mmrPenaltyFactor,
+          phase2_multiplier: phase2Multiplier,
+          llm_max_eval: llmMaxEval,
+          refine_strategy: refineStrategy,
+          refine_medium_chars: refineMediumChars,
+        },
       );
 
       if (!shouldRecallRes) {
         showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
         return;
       }
-      logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, clustered: !!shouldRecallRes.clustered });
+      logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, discardedCount: shouldRecallRes.discarded?.length ?? 0, clustered: !!shouldRecallRes.clustered });
 
       const profile = await client.getProfile();
       let profileInjected = false;
       let profileCountText = "";
       let profileBlock = "";
       const lastInjected = profileInjectedSessions.get(input.sessionID);
-      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 5 * 60 * 1000);
+      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
       const isFirstInjection = !lastInjected;
       if (profile && ttlExpired) {
         const prefs = ((profile as any)?.static_facts ?? [])
           .filter((sf: any) => {
             const t: string[] = sf.tags ?? [];
-            return t.includes("preferences") || t.includes("preference_extract") || t.some((tag: string) => tag.includes("偏好"));
+            return t.includes("preferences");
           })
           .map((sf: any) => sf.l2_content ?? sf.content ?? "")
           .filter(Boolean);
@@ -398,10 +416,56 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         }
       }
 
-      if (!shouldRecallRes.should_recall) {
-        if (profileInjected && shouldRecallRes?.event_id) {
-          await client.updateProfileInjected(shouldRecallRes.event_id, true).catch(() => {});
+      const storedMemoryIds = shouldRecallRes.memories?.map((r) => r.memory.id) ?? [];
+      const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
+      const maxScore = storedMemoryIds.length > 0
+        ? Math.max(...(shouldRecallRes.memories?.map((r) => r.score) ?? [0]))
+        : 0;
+
+      const createEventAndReturn = async (
+        injectedCount: number,
+        keptCount: number,
+        discardedCount: number,
+      ): Promise<string | undefined> => {
+        try {
+          const items = [
+            ...(shouldRecallRes.memories?.map((r) => ({
+              memory_id: r.memory.id,
+              score: r.score,
+              refine_relevance: r.refine_relevance,
+              refine_reasoning: r.refine_reasoning,
+              is_kept: true,
+            })) ?? []),
+            ...(shouldRecallRes.discarded?.map((d) => ({
+              memory_id: d.memory_id,
+              score: d.score,
+              refine_relevance: d.refine_relevance,
+              refine_reasoning: d.refine_reasoning,
+              is_kept: false,
+            })) ?? []),
+          ];
+          const result = await client.createRecallEvent({
+            session_id: input.sessionID!,
+            recall_type: "auto",
+            query_text,
+            max_score: maxScore,
+            llm_confidence: shouldRecallRes.confidence ?? 0,
+            profile_injected: profileInjected,
+            kept_count: keptCount,
+            discarded_count: discardedCount,
+            injected_count: injectedCount,
+            profile_content: profileInjected && profileBlock ? profileBlock : undefined,
+            items: items.length > 0 ? items : undefined,
+          });
+          return result?.event_id;
+        } catch (e) {
+          logErr("autoRecallHook createRecallEvent failed", { error: String(e) });
+          return undefined;
         }
+      };
+
+      if (!shouldRecallRes.should_recall) {
+        await createEventAndReturn(0, 0, storedDiscardedIds.length);
         if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
         }
@@ -415,9 +479,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
       if (newResults.length === 0) {
-        if (profileInjected && shouldRecallRes?.event_id) {
-          await client.updateProfileInjected(shouldRecallRes.event_id, true).catch(() => {});
-        }
+        await createEventAndReturn(0, storedMemoryIds.length, storedDiscardedIds.length);
         if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
         }
@@ -453,9 +515,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
       logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered });
 
-      if (profileInjected && shouldRecallRes?.event_id) {
-        await client.updateProfileInjected(shouldRecallRes.event_id, true).catch(() => {});
-      }
+      await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length);
 
       const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
       const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;

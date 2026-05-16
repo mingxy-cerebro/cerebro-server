@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::time::Duration;
+
 use tracing::warn;
 
 use crate::domain::error::OmemError;
@@ -11,6 +13,18 @@ use crate::store::lancedb::LanceStore;
 
 use super::reranker::Reranker;
 use super::trace::{RetrievalTrace, StageTrace};
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchOverrides {
+    pub fetch_multiplier: Option<usize>,
+    pub topk_cap_multiplier: Option<usize>,
+    pub mmr_jaccard_threshold: Option<f32>,
+    pub mmr_penalty_factor: Option<f32>,
+    pub llm_max_eval: Option<usize>,
+    pub refine_strategy: Option<String>,
+    pub refine_medium_chars: Option<usize>,
+    pub refine_timeout_secs: Option<u64>,
+}
 
 pub struct SearchRequest {
     pub query: String,
@@ -137,12 +151,41 @@ impl RetrievalPipeline {
         self
     }
 
-    pub async fn search(&self, request: &SearchRequest) -> Result<SearchResults, OmemError> {
+    pub async fn search(
+        &self,
+        request: &SearchRequest,
+        overrides: Option<&SearchOverrides>,
+    ) -> Result<SearchResults, OmemError> {
         let pipeline_start = Instant::now();
         let mut trace = RetrievalTrace::new();
         let limit = request.limit.unwrap_or(self.default_limit);
         let min_score = request.min_score.unwrap_or(self.min_score);
-        let fetch_limit = limit * 3;
+
+        let fetch_multiplier = overrides.and_then(|o| o.fetch_multiplier).unwrap_or(3);
+        let topk_cap_multiplier = overrides.and_then(|o| o.topk_cap_multiplier).unwrap_or(2);
+        let mmr_jaccard_threshold = overrides.and_then(|o| o.mmr_jaccard_threshold).unwrap_or(0.85);
+        let mmr_penalty_factor = overrides.and_then(|o| o.mmr_penalty_factor).unwrap_or(0.5);
+        let llm_max_eval = overrides.and_then(|o| o.llm_max_eval).unwrap_or(15);
+        let refine_strategy = overrides
+            .and_then(|o| o.refine_strategy.clone())
+            .unwrap_or_else(|| "balanced".to_string())
+            .to_lowercase();
+        let refine_medium_chars = overrides.and_then(|o| o.refine_medium_chars).unwrap_or(200);
+        let refine_timeout_secs = overrides.and_then(|o| o.refine_timeout_secs).unwrap_or(15);
+
+        tracing::info!(
+            fetch_multiplier,
+            topk_cap_multiplier,
+            mmr_jaccard_threshold,
+            mmr_penalty_factor,
+            llm_max_eval,
+            refine_strategy = %refine_strategy,
+            refine_medium_chars,
+            refine_timeout_secs,
+            "recall_search_params"
+        );
+
+        let fetch_limit = limit * fetch_multiplier;
 
         let (candidates, stage1) = self.stage_parallel_search(request, fetch_limit).await?;
         trace.add_stage(stage1);
@@ -169,7 +212,7 @@ impl RetrievalPipeline {
         let (filtered, stage4) = Self::stage_min_score_filter(normalized_rrf, min_score);
         trace.add_stage(stage4);
 
-        let (capped, stage5) = Self::stage_topk_cap(filtered, limit * 2);
+        let (capped, stage5) = Self::stage_topk_cap(filtered, limit * topk_cap_multiplier);
         trace.add_stage(stage5);
 
         let (expanded, stage_expand) = self.stage_expand_relations(capped).await;
@@ -195,7 +238,7 @@ impl RetrievalPipeline {
         let (cutoff_results, stage11) = Self::stage_hard_cutoff(normalized, self.hard_cutoff);
         trace.add_stage(stage11);
 
-        let (final_entries, stage12) = Self::stage_mmr_diversity(cutoff_results, limit);
+        let (final_entries, stage12) = Self::stage_mmr_diversity(cutoff_results, limit, mmr_jaccard_threshold, mmr_penalty_factor);
         trace.add_stage(stage12);
 
         let results: Vec<SearchResult> = final_entries
@@ -213,6 +256,10 @@ impl RetrievalPipeline {
                 results,
                 &request.query,
                 request.conversation_context.as_deref(),
+                llm_max_eval,
+                &refine_strategy,
+                refine_medium_chars,
+                refine_timeout_secs,
             )
             .await;
         trace.add_stage(stage_llm);
@@ -813,6 +860,8 @@ impl RetrievalPipeline {
     fn stage_mmr_diversity(
         mut entries: Vec<FusionEntry>,
         limit: usize,
+        jaccard_threshold: f32,
+        penalty_factor: f32,
     ) -> (Vec<FusionEntry>, StageTrace) {
         let stage_start = Instant::now();
         let input_count = entries.len();
@@ -826,13 +875,13 @@ impl RetrievalPipeline {
         for i in 1..entries.len() {
             let mut too_similar = false;
             for j in 0..i {
-                if content_jaccard(&entries[j].memory.content, &entries[i].memory.content) > 0.85 {
+                if content_jaccard(&entries[j].memory.content, &entries[i].memory.content) > jaccard_threshold {
                     too_similar = true;
                     break;
                 }
             }
             if too_similar {
-                entries[i].rrf_score *= 0.5;
+                entries[i].rrf_score *= penalty_factor;
             }
         }
 
@@ -868,9 +917,31 @@ impl RetrievalPipeline {
         candidates: Vec<SearchResult>,
         query: &str,
         conversation_context: Option<&[String]>,
+        max_eval: usize,
+        refine_strategy: &str,
+        medium_chars: usize,
+        timeout_secs: u64,
     ) -> (Vec<SearchResult>, Vec<SearchResult>, StageTrace) {
         let stage_start = Instant::now();
         let input_count = candidates.len();
+
+        // loose strategy: skip LLM entirely, return all candidates
+        if refine_strategy == "loose" {
+            tracing::info!(
+                strategy = "loose",
+                input = input_count,
+                "llm_refine_skipped"
+            );
+            let stage = StageTrace {
+                name: "llm_refine".to_string(),
+                input_count,
+                output_count: candidates.len(),
+                dropped_ids: Vec::new(),
+                score_range: search_result_score_range(&candidates),
+                duration_ms: stage_start.elapsed().as_millis() as u64,
+            };
+            return (candidates, Vec::new(), stage);
+        }
 
         let llm = match self.llm {
             Some(ref l) => l,
@@ -887,13 +958,9 @@ impl RetrievalPipeline {
             }
         };
 
-        /// Maximum number of candidates sent to LLM for relevance evaluation.
-        /// With default max_results=5, this threshold is never approached under normal operation.
-        const LLM_REFINE_MAX_EVAL: usize = 15;
-
         let eval_candidates: Vec<SearchResult> = candidates
             .iter()
-            .take(LLM_REFINE_MAX_EVAL)
+            .take(max_eval)
             .cloned()
             .collect();
 
@@ -920,7 +987,7 @@ impl RetrievalPipeline {
         let system_prompt = super::prompts::REFINE_SYSTEM_PROMPT;
 
         let refine_result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            Duration::from_secs(timeout_secs),
             crate::llm::complete_json::<super::prompts::RefineResponse>(
                 llm.as_ref(),
                 system_prompt,
@@ -944,7 +1011,7 @@ impl RetrievalPipeline {
                 return (candidates, Vec::new(), stage);
             }
             Err(_) => {
-                warn!("LLM refine timed out (15s)");
+                warn!("LLM refine timed out ({}s)", timeout_secs);
                 let stage = StageTrace {
                     name: "llm_refine".to_string(),
                     input_count,
@@ -994,7 +1061,7 @@ impl RetrievalPipeline {
             })
             .collect();
 
-        // Apply medium relevance downgrade: replace content with l1_overview (or first 200 chars)
+        // Apply medium relevance downgrade based on refine_strategy
         for r in &mut kept {
             if let Some(&relevance) = relevance_map.get(r.memory.id.as_str()) {
                 r.refine_relevance = Some(relevance.to_string());
@@ -1002,18 +1069,29 @@ impl RetrievalPipeline {
                     r.refine_reasoning = Some(item.reasoning.clone());
                 }
                 if relevance == "medium" {
-                r.memory.content = if !r.memory.l1_overview.is_empty() {
-                    std::mem::take(&mut r.memory.l1_overview)
-                } else {
-                    let end = r.memory.content
-                        .char_indices()
-                        .nth(200)
-                        .map(|(i, _)| i)
-                        .unwrap_or(r.memory.content.len());
-                    r.memory.content[..end].to_string()
-                };
+                    if refine_strategy == "strict" {
+                        // strict: treat medium same as irrelevant — discard
+                        r.memory.content.clear();
+                    } else {
+                        // balanced: replace with l1_overview or truncate to medium_chars
+                        r.memory.content = if !r.memory.l1_overview.is_empty() {
+                            std::mem::take(&mut r.memory.l1_overview)
+                        } else {
+                            let end = r.memory.content
+                                .char_indices()
+                                .nth(medium_chars)
+                                .map(|(i, _)| i)
+                                .unwrap_or(r.memory.content.len());
+                            r.memory.content[..end].to_string()
+                        };
+                    }
+                }
             }
-            }
+        }
+
+        // strict mode: filter out cleared (medium-turned-irrelevant) entries
+        if refine_strategy == "strict" {
+            kept.retain(|r| !r.memory.content.is_empty());
         }
 
         let kept_ids: HashSet<&str> = kept.iter().map(|r| r.memory.id.as_str()).collect();
@@ -1023,10 +1101,12 @@ impl RetrievalPipeline {
             .map(|r| r.memory.id.clone())
             .collect();
         let eval_count = eval_candidates.len();
+        // In strict mode, medium entries are also discarded
+        let is_strict = refine_strategy == "strict";
         let discard_ref_map: HashMap<&str, &str> = refined
             .items
             .iter()
-            .filter(|i| i.relevance == "irrelevant")
+            .filter(|i| i.relevance == "irrelevant" || (is_strict && i.relevance == "medium"))
             .map(|i| (i.id.as_str(), i.relevance.as_str()))
             .collect();
         let mut discarded: Vec<SearchResult> = eval_candidates
@@ -1236,7 +1316,7 @@ mod tests {
             conversation_context: None,
         };
 
-        let results = pipeline.search(&request).await.expect("search");
+        let results = pipeline.search(&request, None).await.expect("search");
         assert!(!results.results.is_empty());
         assert!(results.trace.stages.len() >= 12);
     }
@@ -1301,7 +1381,7 @@ mod tests {
             conversation_context: None,
         };
 
-        let results = pipeline.search(&request).await.expect("search");
+        let results = pipeline.search(&request, None).await.expect("search");
         assert!(!results.results.is_empty());
 
         let pinned_result = results
@@ -1381,7 +1461,7 @@ mod tests {
         };
 
         let results = pipeline
-            .search(&request)
+            .search(&request, None)
             .await
             .expect("search should succeed even without FTS index");
         assert!(!results.results.is_empty());
@@ -1416,7 +1496,7 @@ mod tests {
             conversation_context: None,
         };
 
-        let results = pipeline.search(&request).await.expect("search");
+        let results = pipeline.search(&request, None).await.expect("search");
         let trace = &results.trace;
 
         assert_eq!(trace.stages.len(), 15);
@@ -1464,7 +1544,7 @@ mod tests {
         };
 
         let results = pipeline
-            .search(&request)
+            .search(&request, None)
             .await
             .expect("search should not error on empty");
         assert!(results.results.is_empty());
@@ -1588,7 +1668,7 @@ mod tests {
             make_entry("completely different content about rust programming", 0.8),
         ];
 
-        let (result, stage) = RetrievalPipeline::stage_mmr_diversity(entries, 10);
+        let (result, stage) = RetrievalPipeline::stage_mmr_diversity(entries, 10, 0.85, 0.5);
         assert_eq!(result.len(), 3);
         assert_eq!(stage.name, "mmr_diversity");
 

@@ -368,7 +368,7 @@ pub async fn search_memories(
         if let Some(ref reranker) = state.reranker {
             retrieval_pipeline = retrieval_pipeline.with_reranker(reranker.clone());
         }
-        let search_results = retrieval_pipeline.search(&request).await?;
+        let search_results = retrieval_pipeline.search(&request, None).await?;
 
         let mut results: Vec<SearchResultDto> = search_results
             .results
@@ -471,7 +471,7 @@ pub async fn search_memories(
             if let Some(reranker) = reranker_clone {
                 pipeline = pipeline.with_reranker(reranker);
             }
-            let result = pipeline.search(&request).await;
+            let result = pipeline.search(&request, None).await;
             (space_id, weight, result)
         });
     }
