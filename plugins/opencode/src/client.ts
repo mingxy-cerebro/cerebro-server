@@ -392,6 +392,7 @@ export class CerebroClient {
     discarded_count: number;
     injected_count: number;
     profile_content?: string;
+    injected_content?: string;
     items?: Array<{
       memory_id: string;
       score: number;

@@ -427,6 +427,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         injectedCount: number,
         keptCount: number,
         discardedCount: number,
+        injectedContent?: string,
       ): Promise<string | undefined> => {
         try {
           const items = [
@@ -456,6 +457,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
             discarded_count: discardedCount,
             injected_count: injectedCount,
             profile_content: profileInjected && profileBlock ? profileBlock : undefined,
+            injected_content: injectedContent,
             items: items.length > 0 ? items : undefined,
           });
           return result?.event_id;
@@ -525,7 +527,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
       logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered, sessionId: input.sessionID });
 
-      await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length);
+      await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length, block || undefined);
 
       const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
       const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;

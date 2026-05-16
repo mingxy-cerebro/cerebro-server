@@ -740,6 +740,7 @@ pub struct CreateRecallEventBody {
     pub discarded_count: u32,
     pub injected_count: Option<u32>,
     pub profile_content: Option<String>,
+    pub injected_content: Option<String>,
     pub items: Option<Vec<CreateRecallEventItem>>,
 }
 
@@ -778,6 +779,7 @@ pub async fn create_recall_event(
         discarded_count: body.discarded_count,
         injected_count: body.injected_count.unwrap_or(0),
         profile_content: body.profile_content,
+        injected_content: body.injected_content,
         tenant_id: auth.tenant_id.clone(),
         created_at: now.clone(),
     };

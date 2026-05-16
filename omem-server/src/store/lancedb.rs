@@ -69,6 +69,7 @@ pub struct RecallEvent {
     pub discarded_count: u32,
     pub injected_count: u32,
     pub profile_content: Option<String>,
+    pub injected_content: Option<String>,
     pub tenant_id: String,
     pub created_at: String,
 }
@@ -605,6 +606,7 @@ impl LanceStore {
             Field::new("discarded_count", DataType::UInt32, false),
             Field::new("injected_count", DataType::UInt32, false),
             Field::new("profile_content", DataType::Utf8, true),
+            Field::new("injected_content", DataType::Utf8, true),
             Field::new("tenant_id", DataType::Utf8, false),
             Field::new("created_at", DataType::Utf8, false),
         ]))
@@ -640,6 +642,7 @@ impl LanceStore {
                 Arc::new(UInt32Array::from(vec![event.discarded_count])),
                 Arc::new(UInt32Array::from(vec![event.injected_count])),
                 Arc::new(StringArray::from(vec![profile_content_val.as_deref()])),
+                Arc::new(StringArray::from(vec![event.injected_content.as_deref()])),
                 Arc::new(StringArray::from(vec![event.tenant_id.as_str()])),
                 Arc::new(StringArray::from(vec![event.created_at.as_str()])),
             ],
@@ -742,6 +745,7 @@ impl LanceStore {
                     discarded_count: get_u32("discarded_count")?,
                     injected_count: get_u32_or("injected_count", 0)?,
                     profile_content: get_opt_str("profile_content")?,
+                    injected_content: get_opt_str("injected_content")?,
                     tenant_id: get_str("tenant_id")?,
                     created_at: get_str("created_at")?,
                 });
