@@ -135,7 +135,7 @@ impl Default for OmemConfig {
             cluster_llm_base_url: String::new(),
             scheduler_interval_secs: 21600,
             scheduler_run_on_start: true,
-            should_recall_min_interval_secs: 30,
+            should_recall_min_interval_secs: 60,
             admission_preset: "high_recall".to_string(),
             admission_reject_threshold: None,
             admission_admit_threshold: None,

@@ -408,6 +408,9 @@ fn should_skip_content(content: &str) -> bool {
 fn is_compression_artifact(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("完成dcp压缩")
+        || lower.contains("▣ dcp")
+        || lower.contains("▪ dcp")
+        || (lower.contains("removed") && lower.contains("summary"))
         || (lower.contains("移除") && lower.contains("数据"))
         || (lower.contains("新增") && lower.contains("摘要"))
         || (lower.contains("compressed") && lower.contains("messages"))

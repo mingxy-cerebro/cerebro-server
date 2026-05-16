@@ -17,19 +17,18 @@ type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"你是一个记忆召回助手。用户有一个个人知识库，保存了过往笔记、项目经验、技术方案、偏好设置、私密记录等记忆。你的任务是判断用户当前的问题是否需要从知识库中检索相关记忆来辅助回答。
+const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"你是一个记忆召回助手。用户有一个个人知识库，保存了过往笔记、项目经验、技术方案、偏好设置等记忆。判断用户当前问题是否需要检索知识库。
 
-回答 yes 的情况：
-- 涉及用户个人知识、项目细节、过往经验
-- 涉及私密内容、个人情感、亲密关系、家庭事务
-- 涉及密码、配置、账号等敏感信息
-- 任何可能需要参考历史记录的问题
+分类标准：
+A类（需要召回 → yes）：明确引用过去的决策、偏好、项目细节、密钥/配置、用"之前/上次/那个"等词引用历史
+B类（可能需要 → no）：涉及技术方案选择、架构讨论，但问题是首次提出的新话题
+C类（不需要 → no）：通用编程问题、简单功能实现、数学推导、与历史无关的闲聊
 
-回答 no 的情况：
-- 通用常识、简单问候
-- 与历史记录完全无关的闲聊
-
-注意：知识库中包括私密记忆，涉及私密内容的问题同样需要召回。只回答 yes 或 no。"#;
+规则：
+- A类回答 yes
+- B类和C类回答 no
+- 不确定时答 no（后续有兜底搜索机制，不会遗漏高相关记忆）
+- 只回答 yes 或 no"#;
 
 #[derive(Deserialize)]
 pub struct ShouldRecallRequest {
@@ -256,7 +255,15 @@ pub async fn should_recall(
         max_results = 5;
     }
 
-    let effective_min_score = if llm_yes { min_score } else { min_score * 0.5 };
+    let (effective_min_score, quality_gate) = if llm_yes {
+        (min_score, 0.40)
+    } else if has_recall_signals(&denoised_query) {
+        tracing::info!(query = %body.query_text, original_min_score = min_score, strict_min_score = min_score.max(0.55), quality_gate = 0.50, "recall_llm_rejected_with_signals");
+        (min_score.max(0.55), 0.50)
+    } else {
+        tracing::info!(query = %body.query_text, strict_min_score = min_score.max(0.65), quality_gate = 0.60, "recall_llm_rejected_strict");
+        (min_score.max(0.65), 0.60)
+    };
 
     let spaces = state
         .space_store
@@ -441,8 +448,29 @@ pub async fn should_recall(
     } else {
         memories.iter().map(|m| m.score).sum::<f32>() / memories.len() as f32
     };
+    let max_score = memories.iter().map(|m| m.score).fold(0.0_f32, f32::max);
 
-    let clustered = if !memories.is_empty() {
+    // 质量门槛：用max_score而非平均score，避免"一条高分拉高平均"的问题
+    // quality_gate由LLM判断结果动态决定：yes=0.40, 信号词=0.50, 无信号=0.60
+    if memories.is_empty() || max_score <= quality_gate {
+        let reason = if memories.is_empty() {
+            "no_relevant_memories".to_string()
+        } else {
+            tracing::info!(query = %body.query_text, confidence, max_score, quality_gate, "recall_below_quality_gate");
+            "below_quality_gate".to_string()
+        };
+        return Ok(Json(ShouldRecallResponse {
+            should_recall: false,
+            reason: Some(reason),
+            memories: None,
+            discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
+            confidence: Some(confidence),
+            similarity_score,
+            clustered: None,
+        }));
+    }
+
+    let clustered = {
         let aggregator = crate::cluster::aggregator::ClusterAggregator::new(state.cluster_store.clone());
         match aggregator.aggregate(memories.iter().map(|m| m.memory.clone()).collect()).await {
             Ok(clustered) => {
@@ -458,21 +486,7 @@ pub async fn should_recall(
                 None
             }
         }
-    } else {
-        None
     };
-
-    if memories.is_empty() {
-        return Ok(Json(ShouldRecallResponse {
-            should_recall: false,
-            reason: Some("no_relevant_memories".to_string()),
-            memories: None,
-            discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
-            confidence: None,
-            similarity_score,
-            clustered: None,
-        }));
-    }
 
     let recalled_ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
     if !recalled_ids.is_empty() {
@@ -578,6 +592,32 @@ fn denoise_for_recall(text: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// 检查query是否包含高信号关键词（低成本，无需embedding）
+/// 仅检测明确的"引用历史"信号，避免编程通用词(config/key/token)误触发
+/// 安全阀设计：只在LLM判断no但query明确引用历史时，给予一次严格搜索的机会
+fn has_recall_signals(query: &str) -> bool {
+    static SIGNAL_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+        let patterns = [
+            // 明确的历史/时间引用（中文）—— 最强信号，表明用户在回忆过去的交互
+            r"(?:之前|上次|以前|过去|曾经|记得|忘了|忘记|那个方案|之前的|上次说的|之前做的|上次的)",
+            // 密钥类（中文，编程通用词中极少自然出现）
+            r"(?:密码|密钥|口令)",
+            // 明确的历史引用（英文）
+            r"(?i)(?:remember|recall|previously|last\s+time|earlier|that\s+time|before\s+this|the\s+other\s+day)",
+        ];
+        patterns.iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect()
+    });
+
+    for pattern in SIGNAL_PATTERNS.iter() {
+        if pattern.is_match(query) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Deserialize)]

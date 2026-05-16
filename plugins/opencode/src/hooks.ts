@@ -145,6 +145,7 @@ const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
   /^Provide ONLY the extracted/,
   /^Called the Read tool/,
   /^MANDATORY delegate_task/,
+  /^[▣▪]\s*DCP/,
 ];
 
 function extractUserRequest(content: string): string {
@@ -465,7 +466,9 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       };
 
       if (!shouldRecallRes.should_recall) {
-        await createEventAndReturn(0, 0, storedDiscardedIds.length);
+        if (storedDiscardedIds.length > 0) {
+          await createEventAndReturn(0, 0, storedDiscardedIds.length);
+        }
         if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
         }
@@ -509,11 +512,18 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       if (block) {
         output.system.push(block);
         output.system.push(FETCH_POLICY);
+        logDebug("autoRecallHook block injected to output.system", {
+          sessionId: input.sessionID,
+          blockPreview: block.slice(0, 200),
+          outputSystemLength: output.system.length,
+        });
+      } else {
+        logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
       }
 
       const newIds = newResults.map((r) => r.memory.id);
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
-      logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered });
+      logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered, sessionId: input.sessionID });
 
       await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length);
 
@@ -633,6 +643,13 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
         output.context.push(block);
         output.context.push(FETCH_POLICY);
       }
+      // 将compacting搜索结果的ID写入injectedMemoryIds，避免后续autoRecall重复注入
+      if (input.sessionID && results.length > 0) {
+        const compactingIds = results.map((r) => r.memory.id);
+        const existing = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
+        injectedMemoryIds.set(input.sessionID, new Set([...existing, ...compactingIds]));
+        logDebug("compactingHook updated injectedMemoryIds", { sessionId: input.sessionID, addedCount: compactingIds.length, totalExisting: existing.size });
+      }
     } catch {
     }
 
@@ -652,7 +669,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (input.sessionID) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
-        injectedMemoryIds.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       }
       return;
@@ -679,7 +695,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
-        injectedMemoryIds.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
@@ -708,8 +723,11 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       // Cleanup tracked messages regardless of ingest result
       sessionMessages.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
-      injectedMemoryIds.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
+      // Evict stale injectedMemoryIds if over size cap (200 sessions)
+      if (injectedMemoryIds.size > 200) {
+        injectedMemoryIds.clear();
+      }
     }
 
     // Phase 2: compact inserts "[restore checkpointed" user message — poll for that marker

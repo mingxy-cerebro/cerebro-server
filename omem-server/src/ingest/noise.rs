@@ -132,6 +132,9 @@ fn build_regex_patterns() -> Vec<Regex> {
         r"(?i)移除-?[\d.]+K?数据",
         r"(?i)新增\+?[\d.]+K?摘要",
         r"(?i)compressed \d+ messages?",
+        r"[▣▪]\s*DCP",
+        r"(?i)\d+[\d.]*K?\s*removed.*\+.*summary",
+        r"(?i)Compression #\d+.*removed",
     ];
 
     patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
