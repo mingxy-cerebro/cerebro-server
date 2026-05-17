@@ -77,6 +77,9 @@ struct FusionEntry {
     pre_rerank_score: f32,
 }
 
+const MAX_RETRIES: u32 = 2;
+const RETRY_DELAY_MS: u64 = 500;
+
 impl RetrievalPipeline {
     pub fn new(store: Arc<LanceStore>) -> Self {
         Self {
@@ -152,6 +155,34 @@ impl RetrievalPipeline {
     }
 
     pub async fn search(
+        &self,
+        request: &SearchRequest,
+        overrides: Option<&SearchOverrides>,
+    ) -> Result<SearchResults, OmemError> {
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            match self.search_inner(request, overrides).await {
+                Ok(results) => return Ok(results),
+                Err(e) => {
+                    let is_retryable = matches!(e, OmemError::Storage(_));
+                    if !is_retryable || attempt == MAX_RETRIES {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        error = %e,
+                        "search_retry_storage_error"
+                    );
+                    tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64 + 1))).await;
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    async fn search_inner(
         &self,
         request: &SearchRequest,
         overrides: Option<&SearchOverrides>,
