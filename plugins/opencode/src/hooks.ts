@@ -977,6 +977,69 @@ export function autocontinueHook(
 const processedMessageIds = new Set<string>();
 const pluginStartTime = Date.now();
 
+const FETCH_POLICY_NUDGE = [
+  "<cerebro-system-reminder>",
+  "MEMORY REMINDER: You have injected memories above (see <cerebro-context>).",
+  `These are SUMMARIES, not full content. When you need details, you MUST use memory_get("id") to fetch the full memory.`,
+  "Do NOT guess or fabricate based on summaries alone.",
+  "</cerebro-system-reminder>",
+].join("\n");
+
+export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
+  return async (_input: Record<string, unknown>, output: { messages: any[] }) => {
+    let shouldNudge = getContextInjectedFlag();
+    if (!shouldNudge && Array.isArray(output.messages)) {
+      shouldNudge = output.messages.some((m: any) =>
+        Array.isArray(m.parts) &&
+        m.parts.some((p: any) => typeof p.text === "string" && p.text.includes("<cerebro-context>"))
+      );
+    }
+    if (!shouldNudge) return;
+
+    const messages = output.messages;
+    if (!messages || !Array.isArray(messages) || messages.length === 0) return;
+
+    // Find the last user message
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.info?.role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx < 0) return;
+
+    const userMsg = messages[lastUserIdx];
+    if (!Array.isArray(userMsg.parts)) return;
+
+    // Idempotency check
+    const nudgeId = `cerebro_nudge_${userMsg.info.sessionID || userMsg.info.id}`;
+    for (const part of userMsg.parts) {
+      if (part.id === nudgeId) return;
+    }
+
+    // Find the first text part position, insert synthetic part before it
+    const textPartIdx = userMsg.parts.findIndex((p: any) => p.type === "text" && typeof p.text === "string");
+
+    const syntheticPart = {
+      id: nudgeId,
+      messageID: userMsg.info.id,
+      sessionID: userMsg.info.sessionID || "",
+      type: "text" as const,
+      text: FETCH_POLICY_NUDGE,
+      synthetic: true,
+    };
+
+    if (textPartIdx >= 0) {
+      userMsg.parts.splice(textPartIdx, 0, syntheticPart);
+    } else {
+      userMsg.parts.push(syntheticPart);
+    }
+
+    logDebug("fetchPolicyNudgeHook injected", { sessionId: userMsg.info.sessionID || "", nudgeId });
+  };
+}
+
 export function sessionIdleHook(
   cerebroClient: CerebroClient,
   _containerTags: string[],

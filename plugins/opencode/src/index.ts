@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook } from "./hooks.js";
+import { autoRecallHook, autocontinueHook, compactingHook, fetchPolicyNudgeHook, keywordDetectionHook, sessionIdleHook } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
@@ -121,6 +121,14 @@ const OmemPlugin: Plugin = async (input) => {
 
   const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId);
 
+  let contextInjectedThisTurn = false;
+
+  const wrappedRecallHook = async (input: any, output: any) => {
+    contextInjectedThisTurn = false;
+    await recallHook(input, output);
+    contextInjectedThisTurn = output.system?.some((s: string) => s.includes("<cerebro-context>")) ?? false;
+  };
+
   return {
     config: async (cfg: any) => {
       cfg.command ??= {};
@@ -136,13 +144,14 @@ const OmemPlugin: Plugin = async (input) => {
         mainSessionLocked = true;
         logInfo("mainSessionId locked", { sessionId: input.sessionID });
       }
-      return recallHook(input, output);
+      return wrappedRecallHook(input, output);
     },
     "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId),
     "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId),
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId),
     tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId }),
     event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => mainSessionId, isAutoStoreEnabled, agentId, config, (name: string) => { cachedAgentName = name; }),
+    "experimental.chat.messages.transform": fetchPolicyNudgeHook(() => contextInjectedThisTurn),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;
