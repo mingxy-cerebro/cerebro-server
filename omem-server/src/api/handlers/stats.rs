@@ -879,7 +879,7 @@ mod tests {
     }
 
     fn make_memory(content: &str, space_id: &str, agent_id: &str) -> Memory {
-        let mut mem = Memory::new(content, Category::Preferences, MemoryType::Insight, "test");
+        let mut mem = Memory::new(content, Category::new("preferences"), MemoryType::Insight, "test");
         mem.space_id = space_id.to_string();
         mem.owner_agent_id = agent_id.to_string();
         mem

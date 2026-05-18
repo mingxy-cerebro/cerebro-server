@@ -144,7 +144,7 @@ mod tests {
     }
 
     fn make_memory(tenant: &str, content: &str) -> Memory {
-        Memory::new(content, Category::Preferences, MemoryType::Insight, tenant)
+        Memory::new(content, Category::new("preferences"), MemoryType::Insight, tenant)
     }
 
     fn days_ago_str(n: i64) -> String {

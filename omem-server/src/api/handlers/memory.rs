@@ -218,6 +218,8 @@ pub async fn create_memory(
                 &state.config.admission_preset,
                 state.config.admission_reject_threshold,
                 state.config.admission_admit_threshold,
+                state.category_registry.clone(),
+                auth.tenant_id.clone(),
             ).await?.with_ingest_semaphore(state.ingest_semaphore.clone());
 
         let response = ingest_pipeline.ingest(request).await?;
@@ -233,11 +235,9 @@ pub async fn create_memory(
     }
 
     let category = if let Some(cat_str) = body.category {
-        cat_str
-            .parse::<Category>()
-            .map_err(|e: String| OmemError::Validation(e))?
+        cat_str.parse::<Category>().unwrap()
     } else {
-        Category::Cases
+        Category::new("cases")
     };
     let mut memory = Memory::new(
         &content,
@@ -1455,10 +1455,12 @@ pub async fn session_ingest(
             Some(combined_summary_parts.join("\n\n"))
         };
 
+        let categories = state.category_registry.get_active_categories(&auth.tenant_id).unwrap_or_default();
         let (system_prompt, user_prompt) = crate::ingest::prompts::build_session_extract_prompt_with_memories(
             &conversation,
             combined_summary.as_deref(),
             project_name.as_deref(),
+            &categories,
         );
 
         let topics: Vec<SessionTopicSummary> = match crate::llm::complete_json(
@@ -1522,9 +1524,9 @@ pub async fn session_ingest(
                 normalized.parse().ok()
             }).unwrap_or_else(|| {
                 if topic.scope == "private" {
-                    Category::Profile
+                    Category::new("profile")
                 } else {
-                    Category::Events
+                    Category::new("events")
                 }
             });
 
@@ -2327,7 +2329,7 @@ async fn fetch_session_work_memory(
                 .filter(|m| {
                     m.session_id.as_deref() == Some(sid)
                         && m.scope != "private"
-                        && m.category != Category::Preferences
+                        && m.category != Category::new("preferences")
                 })
                 .collect::<Vec<_>>(),
         Err(_) => return None,

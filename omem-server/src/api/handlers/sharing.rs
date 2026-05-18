@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     fn make_memory(content: &str, tenant: &str, space_id: &str) -> Memory {
-        let mut mem = Memory::new(content, Category::Preferences, MemoryType::Insight, tenant);
+        let mut mem = Memory::new(content, Category::new("preferences"), MemoryType::Insight, tenant);
         mem.space_id = space_id.to_string();
         mem.owner_agent_id = "agent-1".to_string();
         mem
@@ -1862,7 +1862,7 @@ mod tests {
             .expect("create mem1");
 
         let mut mem2 = make_memory("some random fact", "user-001", "user-001");
-        mem2.category = crate::domain::category::Category::Events;
+        mem2.category = crate::domain::category::Category::new("events");
         personal_store
             .create(&mem2, None)
             .await

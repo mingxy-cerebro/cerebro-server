@@ -87,7 +87,7 @@ pub async fn upload_file(
         for chunk in chunks {
             let mut memory = Memory::new(
                 &chunk.content,
-                Category::Entities,
+                Category::new("entities"),
                 MemoryType::Session,
                 &tenant_id,
             );

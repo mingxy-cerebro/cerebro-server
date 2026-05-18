@@ -9,6 +9,9 @@ use omem_server::cluster::cluster_store::ClusterStore;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
 use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
+use omem_server::domain::category::CategoryRegistry;
+use omem_server::store::sqlite::SqliteStore;
+use omem_server::store::sqlite_schema;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -66,6 +69,17 @@ async fn main() {
         .await
         .expect("failed to init spaces tables");
 
+    let sqlite_path = format!("{}/_system/omem.db", base_uri);
+    let sqlite_store = Arc::new(
+        SqliteStore::new(&sqlite_path)
+            .expect("failed to create SqliteStore"),
+    );
+    {
+        let conn = sqlite_store.conn().lock().expect("sqlite lock");
+        sqlite_schema::create_tables(&conn).expect("failed to create SQLite tables");
+    }
+    let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
+
     let embed: Arc<dyn EmbedService> = Arc::from(
         create_embed_service(&config)
             .await
@@ -121,6 +135,8 @@ async fn main() {
         reranker: omem_server::retrieve::reranker::Reranker::from_env(),
         ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
         profile_cache: Arc::new(dashmap::DashMap::new()),
+        sqlite_store,
+        category_registry,
     });
 
     let app = build_router(state.clone());

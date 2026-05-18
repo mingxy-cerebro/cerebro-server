@@ -1286,7 +1286,7 @@ mod tests {
     }
 
     fn make_memory(tenant: &str, content: &str, mem_type: MemoryType) -> Memory {
-        Memory::new(content, Category::Preferences, mem_type, tenant)
+        Memory::new(content, Category::new("preferences"), mem_type, tenant)
     }
 
     fn make_entry(content: &str, score: f32) -> FusionEntry {

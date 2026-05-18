@@ -206,7 +206,7 @@ mod tests {
     fn make_test_memory() -> Memory {
         let mut mem = Memory::new(
             "test memory",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-test",
         );

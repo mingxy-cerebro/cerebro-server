@@ -117,14 +117,14 @@ mod tests {
             "space-001",
             "WSL2环境配置",
             "WSL2相关的环境配置问题汇总",
-            Category::Preferences,
+            Category::new("preferences"),
             "mem-001",
         );
 
         assert!(!cluster.id.is_empty());
         assert_eq!(cluster.title, "WSL2环境配置");
         assert_eq!(cluster.member_count, 1);
-        assert_eq!(cluster.category, Category::Preferences);
+        assert_eq!(cluster.category, Category::new("preferences"));
         assert!(cluster.keywords.is_empty());
     }
 }

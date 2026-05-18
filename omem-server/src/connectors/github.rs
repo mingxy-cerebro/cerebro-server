@@ -215,7 +215,7 @@ impl GitHubConnector {
             );
 
             let mut memory =
-                Memory::new(&content, Category::Events, MemoryType::Session, tenant_id);
+                Memory::new(&content, Category::new("events"), MemoryType::Session, tenant_id);
             memory.tags = vec![
                 format!("repo:{repo_name}"),
                 "github:push".to_string(),
@@ -228,7 +228,7 @@ impl GitHubConnector {
                     let code_content = format!("[File changed: {file} in commit {commit_id}]");
                     let mut file_memory = Memory::new(
                         &code_content,
-                        Category::Entities,
+                        Category::new("entities"),
                         MemoryType::Session,
                         tenant_id,
                     );
@@ -270,7 +270,7 @@ impl GitHubConnector {
             let content = format!("Issue #{number}: {title}\nBy: {author}\n\n{body}");
 
             let mut memory =
-                Memory::new(&content, Category::Events, MemoryType::Session, tenant_id);
+                Memory::new(&content, Category::new("events"), MemoryType::Session, tenant_id);
             memory.tags = vec![
                 format!("repo:{repo_name}"),
                 "github:issue".to_string(),
@@ -292,7 +292,7 @@ impl GitHubConnector {
             let content = format!("Comment on issue #{issue_number} by {author}:\n{body}");
 
             let mut memory =
-                Memory::new(&content, Category::Events, MemoryType::Session, tenant_id);
+                Memory::new(&content, Category::new("events"), MemoryType::Session, tenant_id);
             memory.tags = vec![
                 format!("repo:{repo_name}"),
                 "github:issue_comment".to_string(),
@@ -338,7 +338,7 @@ impl GitHubConnector {
             );
 
             let mut memory =
-                Memory::new(&content, Category::Events, MemoryType::Session, tenant_id);
+                Memory::new(&content, Category::new("events"), MemoryType::Session, tenant_id);
             memory.tags = vec![
                 format!("repo:{repo_name}"),
                 "github:pull_request".to_string(),
@@ -366,7 +366,7 @@ impl GitHubConnector {
                 let content = format!("Review on PR #{pr_number} by {author} ({state}):\n{body}");
 
                 let mut memory =
-                    Memory::new(&content, Category::Events, MemoryType::Session, tenant_id);
+                    Memory::new(&content, Category::new("events"), MemoryType::Session, tenant_id);
                 memory.tags = vec![
                     format!("repo:{repo_name}"),
                     "github:review".to_string(),

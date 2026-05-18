@@ -246,6 +246,7 @@ pub async fn create_import(
                 bg_task_id.clone(),
                 bg_tenant_id,
                 bg_strategy,
+                state.category_registry.clone(),
             );
             intelligence.run().await;
             Ok::<(), OmemError>(())
@@ -320,6 +321,7 @@ pub async fn trigger_intelligence(
     let bg_embed = state.embed.clone();
     let bg_llm = state.llm.clone();
     let bg_space_store = state.space_store.clone();
+    let bg_registry = state.category_registry.clone();
     let bg_task_id = task.id.clone();
     let bg_tenant_id = auth.tenant_id.clone();
     let bg_strategy = task.strategy.clone();
@@ -340,6 +342,7 @@ pub async fn trigger_intelligence(
             bg_task_id.clone(),
             bg_tenant_id,
             bg_strategy,
+            bg_registry,
         );
         intelligence.run().await;
         Ok::<(), OmemError>(())

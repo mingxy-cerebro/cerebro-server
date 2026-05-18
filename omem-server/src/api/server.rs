@@ -12,6 +12,8 @@ use crate::embed::EmbedService;
 use crate::llm::LlmService;
 use crate::profile::service::CachedProfile;
 use crate::retrieve::reranker::Reranker;
+use crate::domain::category::CategoryRegistry;
+use crate::store::sqlite::SqliteStore;
 use crate::store::{SpaceStore, StoreManager, TenantStore};
 
 pub type SessionLockMap = DashMap<String, (Arc<tokio::sync::Mutex<()>>, Instant)>;
@@ -36,6 +38,8 @@ pub struct AppState {
     /// Prevents OOM under burst load. Default: 10.
     pub ingest_semaphore: Arc<Semaphore>,
     pub profile_cache: Arc<DashMap<String, CachedProfile>>,
+    pub sqlite_store: Arc<SqliteStore>,
+    pub category_registry: Arc<CategoryRegistry>,
 }
 
 /// Map tenant_id to their personal Space ID.

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+use crate::domain::category::CategoryRegistry;
 use crate::domain::error::OmemError;
 use crate::embed::EmbedService;
 use crate::ingest::extractor::FactExtractor;
@@ -89,6 +90,7 @@ pub struct IntelligenceTask {
     task_id: String,
     tenant_id: String,
     strategy: String,
+    category_registry: Arc<CategoryRegistry>,
 }
 
 impl IntelligenceTask {
@@ -103,11 +105,12 @@ impl IntelligenceTask {
         task_id: String,
         tenant_id: String,
         strategy: String,
+        registry: Arc<CategoryRegistry>,
     ) -> Self {
         let mut extractor = FactExtractor::new(llm.clone());
         extractor.max_input_chars = SMART_SPLIT_MAX_CHARS;
 
-        let reconciler = Reconciler::new(llm, store, embed);
+        let reconciler = Reconciler::new(llm, store, embed, registry.clone(), tenant_id.clone());
 
         Self {
             session_store,
@@ -118,6 +121,7 @@ impl IntelligenceTask {
             task_id,
             tenant_id,
             strategy,
+            category_registry: registry,
         }
     }
 
@@ -250,7 +254,7 @@ impl IntelligenceTask {
                 content: chunk.to_string(),
             }];
 
-            match self.extractor.extract(&messages, None, None).await {
+            match self.extractor.extract(&messages, None, None, &[]).await {
                 Ok(mut facts) => {
                     for fact in &mut facts {
                         fact.source_text = Some(chunk.to_string());
@@ -280,9 +284,10 @@ impl IntelligenceTask {
     async fn extract_sections(&self, full_text: &str) -> Result<Vec<ExtractedFact>, OmemError> {
         let sections = split_by_sections(full_text);
         let mut all_facts = Vec::new();
+        let categories = self.category_registry.get_active_categories(&self.tenant_id).unwrap_or_default();
 
         for (i, section) in sections.iter().enumerate() {
-            let (system, user) = prompts::build_section_prompt(section);
+            let (system, user) = prompts::build_section_prompt(section, &categories);
             match Self::extract_with_retry(&self.extractor, &system, &user, 2).await {
                 Ok(mut facts) => {
                     for fact in &mut facts {
@@ -311,7 +316,8 @@ impl IntelligenceTask {
     }
 
     async fn extract_document(&self, full_text: &str) -> Result<Vec<ExtractedFact>, OmemError> {
-        let (system, user) = prompts::build_document_prompt(full_text);
+        let categories = self.category_registry.get_active_categories(&self.tenant_id).unwrap_or_default();
+        let (system, user) = prompts::build_document_prompt(full_text, &categories);
         let mut facts = Self::extract_with_retry(&self.extractor, &system, &user, 2).await?;
         for fact in &mut facts {
             fact.source_text = Some(full_text.to_string());

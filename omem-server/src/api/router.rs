@@ -126,6 +126,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/memories/re-embed", post(handlers::reembed_memories))
         .route("/v1/memories/optimize", post(handlers::optimize_memories))
         .route("/v1/clusters/{id}", get(handlers::get_cluster).delete(handlers::delete_cluster))
+        .route("/v1/categories/aliases", get(handlers::list_aliases).post(handlers::create_alias))
+        .route("/v1/categories/aliases/{alias}", delete(handlers::delete_alias))
+        .route("/v1/categories", get(handlers::list_categories).post(handlers::create_category))
+        .route(
+            "/v1/categories/{name}",
+            get(handlers::get_category).put(handlers::update_category).delete(handlers::delete_category),
+        )
         .route("/v1/lifecycle/trigger", post(handlers::trigger_lifecycle))
         .route("/v1/scheduler/status", get(handlers::get_scheduler_status))
         .route("/v1/scheduler/lifecycle/pause", post(handlers::pause_lifecycle))

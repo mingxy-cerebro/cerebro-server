@@ -1,3 +1,4 @@
+pub mod categories;
 pub mod clusters;
 pub mod events;
 pub mod files;
@@ -48,6 +49,10 @@ pub use stats::{
 pub use tenant::{create_tenant, get_tenant};
 pub use vault::{
     delete_vault_password, get_vault_status, set_vault_password, verify_vault_password,
+};
+pub use categories::{
+    create_alias, create_category, delete_alias, delete_category, get_category, list_aliases,
+    list_categories, update_category,
 };
 pub use clusters::{
     batch_delete_clusters, delete_all_clusters, delete_cluster, delete_clustering_job,

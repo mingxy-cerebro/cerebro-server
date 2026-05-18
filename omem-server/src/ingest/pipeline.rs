@@ -5,7 +5,7 @@ use regex::RegexSet;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::domain::category::Category;
+use crate::domain::category::{Category, CategoryConfig, CategoryRegistry};
 use crate::domain::error::OmemError;
 use crate::embed::EmbedService;
 use crate::ingest::admission::AdmissionControl;
@@ -35,6 +35,7 @@ pub struct IngestPipeline {
     admission: Arc<AdmissionControl>,
     embed: Arc<dyn EmbedService>,
     ingest_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    category_registry: Arc<CategoryRegistry>,
 }
 
 impl IngestPipeline {
@@ -48,14 +49,17 @@ impl IngestPipeline {
         admission_preset: &str,
         admission_reject_threshold: Option<f32>,
         admission_admit_threshold: Option<f32>,
+        registry: Arc<CategoryRegistry>,
+        tenant_id: String,
     ) -> Result<Self, OmemError> {
         let extractor = Arc::new(FactExtractor::new(llm.clone()));
-        let reconciler = Arc::new(Reconciler::new(llm.clone(), store.clone(), embed.clone()));
+        let reconciler = Arc::new(Reconciler::new(llm.clone(), store.clone(), embed.clone(), registry.clone(), tenant_id.clone()));
         let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), Some(llm.clone())));
         let cluster_assigner = Arc::new(ClusterAssigner::new(cluster_store, embed.clone()).with_llm(llm.clone()));
         let noise_filter = Arc::new(tokio::sync::Mutex::new(NoiseFilter::new(Vec::new())));
+        let category_registry = registry.clone();
         let admission = Arc::new(
-            AdmissionControl::from_preset_str(admission_preset, embed.clone(), store.clone())
+            AdmissionControl::from_preset_str(admission_preset, embed.clone(), store.clone(), registry, tenant_id)
                 .with_custom_thresholds(admission_reject_threshold, admission_admit_threshold)
         );
         Ok(Self {
@@ -69,6 +73,7 @@ impl IngestPipeline {
             admission,
             embed,
             ingest_semaphore: None,
+            category_registry,
         })
     }
 
@@ -139,6 +144,11 @@ impl IngestPipeline {
         let project_name = request.project_name.clone();
         let bg_task_id = task_id.clone();
         let ingest_sem = self.ingest_semaphore.clone();
+        let category_registry = self.category_registry.clone();
+
+        let categories: Vec<CategoryConfig> = category_registry
+            .get_active_categories(&tenant_id)
+            .unwrap_or_default();
 
         let permit = match ingest_sem {
             Some(sem) => Some(
@@ -169,7 +179,7 @@ impl IngestPipeline {
             }
 
             let facts = match extractor
-                .extract(&sanitized, entity_context.as_deref(), project_name.as_deref())
+                .extract(&sanitized, entity_context.as_deref(), project_name.as_deref(), &categories)
                 .await
             {
                 Ok(f) => f,
@@ -223,7 +233,7 @@ impl IngestPipeline {
                 let category = fact
                     .category
                     .parse::<Category>()
-                    .unwrap_or(Category::Events);
+                    .unwrap_or(Category::new("events"));
 
                 let result = admission
                     .evaluate(fact, &category, Some(&conversation_text))
@@ -468,6 +478,8 @@ mod tests {
     use super::*;
     use crate::ingest::session::SessionStore;
     use crate::store::LanceStore;
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::sqlite_schema;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -534,6 +546,12 @@ mod tests {
         let cluster_store = Arc::new(
             ClusterStore::new(store.db()).await.expect("cluster store")
         );
+        let sqlite = SqliteStore::new_in_memory().expect("sqlite");
+        let conn = sqlite.conn().lock().expect("lock");
+        sqlite_schema::create_tables(&conn).expect("tables");
+        drop(conn);
+        let registry = Arc::new(CategoryRegistry::new(Arc::new(sqlite)));
+        registry.seed_tenant("t").expect("seed");
         let pipeline = IngestPipeline::new(
             store,
             session_store.clone(),
@@ -543,6 +561,8 @@ mod tests {
             "balanced",
             None,
             None,
+            registry,
+            "t".to_string(),
         ).await.expect("pipeline");
 
         (pipeline, session_store, dir)

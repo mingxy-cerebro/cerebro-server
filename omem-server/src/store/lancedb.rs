@@ -2185,7 +2185,6 @@ impl LanceStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Memory>, OmemError> {
-
         let mut memories = if let Some(ref q) = filter.q {
             // Full-text search path: use FTS with postfilter for other conditions
             let table = self.table.clone();
@@ -2251,7 +2250,6 @@ impl LanceStore {
     }
 
     pub async fn count_filtered(&self, filter: &ListFilter) -> Result<usize, OmemError> {
-
         if let Some(ref q) = filter.q {
             // Full-text search path
             let table = self.table.clone();
@@ -2605,7 +2603,7 @@ impl LanceStore {
         tokio::spawn(async move {
             tracing::info!(write_count = count, "GC trigger: unified gc (prune + compact + index merge + orphan cleanup)");
 
-            // Step 1: Prune old versions (10-minute safety window)
+            // Step 1-3: Prune + compact memories table
             match table
                 .optimize(OptimizeAction::Prune {
                     older_than: Some(
@@ -2626,7 +2624,6 @@ impl LanceStore {
                 }
             }
 
-            // Step 2: Compact — merge small fragment files
             match table
                 .optimize(OptimizeAction::Compact {
                     options: CompactionOptions::default(),
@@ -2642,7 +2639,6 @@ impl LanceStore {
                 }
             }
 
-            // Step 3: Index merge — merge unindexed data into existing indices
             match table
                 .optimize(OptimizeAction::Index(
                     lance_index::optimize::OptimizeOptions::merge(128),

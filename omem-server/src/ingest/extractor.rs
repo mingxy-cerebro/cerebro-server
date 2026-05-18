@@ -1,7 +1,10 @@
 use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
+use tracing::warn;
 
+use crate::domain::category::CategoryRegistry;
+use crate::domain::category::CategoryConfig;
 use crate::domain::error::OmemError;
 use crate::ingest::prompts;
 use crate::ingest::types::{ExtractedFact, ExtractionResult, IngestMessage};
@@ -9,19 +12,13 @@ use crate::llm::{complete_json, LlmService};
 
 const DEFAULT_MAX_FACTS: usize = 15;
 const DEFAULT_MAX_INPUT_CHARS: usize = 8000;
-const VALID_CATEGORIES: &[&str] = &[
-    "profile",
-    "preferences",
-    "entities",
-    "events",
-    "cases",
-    "patterns",
-];
 
 pub struct FactExtractor {
     llm: Arc<dyn LlmService>,
     max_facts: usize,
     pub(crate) max_input_chars: usize,
+    registry: Option<Arc<CategoryRegistry>>,
+    tenant_id: Option<String>,
 }
 
 impl FactExtractor {
@@ -30,7 +27,16 @@ impl FactExtractor {
             llm,
             max_facts: DEFAULT_MAX_FACTS,
             max_input_chars: DEFAULT_MAX_INPUT_CHARS,
+            registry: None,
+            tenant_id: None,
         }
+    }
+
+    /// Attach a CategoryRegistry and tenant_id for alias-aware category normalization.
+    pub fn with_context(mut self, registry: Arc<CategoryRegistry>, tenant_id: String) -> Self {
+        self.registry = Some(registry);
+        self.tenant_id = Some(tenant_id);
+        self
     }
 
     pub async fn extract(
@@ -38,6 +44,7 @@ impl FactExtractor {
         messages: &[IngestMessage],
         entity_context: Option<&str>,
         project_name: Option<&str>,
+        categories: &[CategoryConfig],
     ) -> Result<Vec<ExtractedFact>, OmemError> {
         if messages.is_empty() {
             return Ok(Vec::new());
@@ -50,7 +57,7 @@ impl FactExtractor {
             return Ok(Vec::new());
         }
 
-        let system = prompts::build_system_prompt(entity_context);
+        let system = prompts::build_system_prompt(entity_context, categories);
         let user = prompts::build_user_prompt(&cleaned, project_name);
 
         let result: ExtractionResult = complete_json(self.llm.as_ref(), &system, &user).await?;
@@ -68,7 +75,7 @@ impl FactExtractor {
                 !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
             })
             .filter_map(|mut f| {
-                match normalize_category(&f.category) {
+                match self.normalize_category(&f.category) {
                     Some(cat) => {
                         f.category = cat;
                         f.quality_score = calculate_quality_score(&f.l0_abstract);
@@ -103,7 +110,7 @@ impl FactExtractor {
                 !f.l0_abstract.trim().is_empty() && f.llm_confidence >= 3
             })
             .filter_map(|mut f| {
-                match normalize_category(&f.category) {
+                match self.normalize_category(&f.category) {
                     Some(cat) => {
                         f.category = cat;
                         f.quality_score = calculate_quality_score(&f.l0_abstract);
@@ -142,6 +149,27 @@ impl FactExtractor {
         }
 
         full_text
+    }
+
+    fn normalize_category(&self, raw: &str) -> Option<String> {
+        let lower = raw.trim().to_lowercase();
+
+        if let (Some(registry), Some(tid)) = (&self.registry, &self.tenant_id) {
+            match registry.normalize(tid, &lower) {
+                Ok(Some(resolved)) => return Some(resolved),
+                Ok(None) => {
+                    warn!(category = %lower, tenant_id = %tid, "unknown category from LLM, accepting as-is");
+                    return Some(lower);
+                }
+                Err(e) => {
+                    warn!(category = %lower, tenant_id = %tid, error = %e, "registry lookup failed, falling back");
+                }
+            }
+        }
+
+        FALLBACK_CATEGORIES
+            .contains(&lower.as_str())
+            .then_some(lower)
     }
 }
 
@@ -196,14 +224,10 @@ fn calculate_quality_score(text: &str) -> f32 {
     score.clamp(0.1, 1.0)
 }
 
-fn normalize_category(raw: &str) -> Option<String> {
-    let lower = raw.trim().to_lowercase();
-    if VALID_CATEGORIES.contains(&lower.as_str()) {
-        Some(lower)
-    } else {
-        None
-    }
-}
+const FALLBACK_CATEGORIES: &[&str] = &[
+    "preferences", "identity", "emotional", "project", "work",
+    "lessons_learned", "decisions", "success_patterns", "mistakes",
+];
 
 pub fn strip_envelope_metadata(text: &str) -> String {
     let system_channel = Regex::new(r"(?m)^(?:\w+:\s*)?System:\s*\[.*?\]\s*Channel.*$")

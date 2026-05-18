@@ -1,5 +1,143 @@
-pub fn build_system_prompt(entity_context: Option<&str>) -> String {
-    let mut prompt = format!("{BASE_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}");
+use crate::domain::category::CategoryConfig;
+
+/// Build a dynamic category classification section from CategoryConfig entries.
+fn build_category_section(categories: &[CategoryConfig]) -> String {
+    let mut s = String::from("## Categories\nClassify each fact into exactly one category:\n\n");
+    for cat in categories {
+        s.push_str(&format!("- **{}**: {}", cat.name, cat.description));
+        if let Some(rule) = &cat.decision_rule {
+            s.push_str(&format!(" Decision: \"{}\"", rule));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// Build dynamic format rules from CategoryConfig prompt_format fields.
+fn build_format_rules(categories: &[CategoryConfig]) -> String {
+    let mut s = String::new();
+
+    // Categories with prompt_format = "preference"
+    let pref_cats: Vec<&CategoryConfig> = categories
+        .iter()
+        .filter(|c| c.prompt_format.as_deref() == Some("preference"))
+        .collect();
+    if !pref_cats.is_empty() {
+        let cat_names: Vec<&str> = pref_cats.iter().map(|c| c.name.as_str()).collect();
+        let cat_list = cat_names.join(", ");
+        s.push_str(&format!(
+            r###"### PREFERENCE Format (MANDATORY for categories: {cat_list})
+For facts classified as "{cat_list}", ALL three layers (l0_abstract, l1_overview, l2_content) MUST use this structured Markdown format:
+```
+## {{偏好主题}}
+- **偏好**: {{具体偏好描述}}
+- **置信度**: {{0.0-1.0}}
+- **类型**: static | evolving
+```
+- Each preference gets its own `## Title` section. Multiple preferences separated by blank lines.
+- `type`: static = stable preference; evolving = may change over time.
+- This format applies ONLY to categories "{cat_list}". Other categories keep their normal format.
+
+"###
+        ));
+    }
+
+    // Categories with prompt_format = "work"
+    let work_cats: Vec<&CategoryConfig> = categories
+        .iter()
+        .filter(|c| c.prompt_format.as_deref() == Some("work"))
+        .collect();
+    if !work_cats.is_empty() {
+        let cat_names: Vec<&str> = work_cats.iter().map(|c| c.name.as_str()).collect();
+        let cat_list = cat_names.join(", ");
+        s.push_str(&format!(
+            r###"### WORK Format (MANDATORY for categories: {cat_list})
+For facts classified as technical/work categories ({cat_list}), ALL three layers MUST use this structured Markdown format:
+```
+## {{工作主题/技术决策}}
+- **内容**: {{简要描述做了什么、为什么、结果如何}}
+- **影响范围**: {{影响的模块/文件/系统}}
+- **结论**: {{最终结论或决策}}
+```
+- Each independent technical topic gets its own `## Title` section.
+- Keep 内容 concise — conclusions only, not step-by-step process.
+"###
+        ));
+    }
+
+    s
+}
+
+/// Build dynamic category-aware reconciliation rules from CategoryConfig entries.
+fn build_reconcile_category_rules(categories: &[CategoryConfig]) -> String {
+    let mut rules = String::from("## Category-Aware Rules\n\n");
+    let mut rule_num = 1u32;
+
+    for cat in categories {
+        if cat.always_merge {
+            rules.push_str(&format!(
+                "{}. **{}** category: always use MERGE when a matching memory exists (never SUPERSEDE or CONTRADICT for {}). Same topic but with new details or different perspective → MERGE into the best matching existing memory. Do not CREATE a new {} fact for a topic already covered.\n",
+                rule_num, cat.name, cat.name, cat.name
+            ));
+            rule_num += 1;
+        } else if cat.append_only {
+            rules.push_str(&format!(
+                "{}. **{}** category: prefer CREATE or SKIP. MERGE is allowed when the new fact adds meaningful detail. Never SUPERSEDE, SUPPORT, CONTEXTUALIZE, or CONTRADICT.\n",
+                rule_num, cat.name
+            ));
+            rule_num += 1;
+        } else if cat.merge_supported {
+            rules.push_str(&format!(
+                "{}. **{}** category: support all 7 operations including SUPERSEDE and CONTRADICT.\n",
+                rule_num, cat.name
+            ));
+            rule_num += 1;
+        }
+    }
+
+    rules
+}
+
+/// Build a dynamic category classification list for session prompts (compact format).
+fn build_session_category_list(categories: &[CategoryConfig]) -> String {
+    let lines: Vec<String> = categories
+        .iter()
+        .map(|cat| {
+            let mut line = format!("- **{}**: {}", cat.name, cat.description);
+            if let Some(rule) = &cat.decision_rule {
+                line.push_str(&format!(" Decision: \"{}\"", rule));
+            }
+            line
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Build a dynamic category validation clause for session prompts.
+fn build_session_category_validation(categories: &[CategoryConfig]) -> String {
+    let names: Vec<&str> = categories.iter().map(|c| c.name.as_str()).collect();
+    let name_list = names.join(", ");
+    format!(
+        "CRITICAL: The category field MUST be one of the valid values: {}. Do NOT invent categories. If unsure, use \"{}\" for past activities or \"{}\" for likes/dislikes.",
+        name_list,
+        categories.first().map(|c| c.name.as_str()).unwrap_or("events"),
+        categories.iter().find(|c| c.name == "preferences").map(|c| c.name.as_str()).unwrap_or("preferences")
+    )
+}
+
+pub fn build_system_prompt(entity_context: Option<&str>, categories: &[CategoryConfig]) -> String {
+    let cat_section = build_category_section(categories);
+    let format_rules = build_format_rules(categories);
+
+    let mut prompt = format!(
+        "{}{}{}{}{}",
+        BASE_SYSTEM_PROMPT_BEFORE_CATEGORIES,
+        cat_section,
+        BASE_SYSTEM_PROMPT_AFTER_CATEGORIES,
+        format_rules,
+        BASE_SYSTEM_PROMPT_AFTER_FORMAT,
+    );
+    prompt.push_str(ALLOWED_TAGS_LIST);
     if let Some(ctx) = entity_context {
         let truncated = if ctx.len() > 1500 { &ctx[..1500] } else { ctx };
         prompt.push_str("\n\n## Additional Context\n");
@@ -33,8 +171,10 @@ pub fn build_reconcile_prompt(
     existing: &[Memory],
     id_map: &[(usize, &str)], // (int_id -> real uuid)
     fuzzy_pairs: &[(usize, usize)],
+    categories: &[CategoryConfig],
 ) -> (String, String) {
-    let system = RECONCILE_SYSTEM_PROMPT.to_string();
+    let cat_rules = build_reconcile_category_rules(categories);
+    let system = format!("{}{}{}", RECONCILE_SYSTEM_PROMPT_BEFORE_CATS, cat_rules, RECONCILE_SYSTEM_PROMPT_AFTER_CATS);
 
     let mut user = String::with_capacity(2048);
 
@@ -140,7 +280,7 @@ Do NOT invent or translate tags.
 Exception: "私密" is a system-reserved tag added by privacy detection rules, not from this list.
 "#;
 
-const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine. Given a set of NEW FACTS extracted from a conversation and a set of EXISTING MEMORIES, decide what to do with each fact.
+const RECONCILE_SYSTEM_PROMPT_BEFORE_CATS: &str = r#"You are a memory reconciliation engine. Given a set of NEW FACTS extracted from a conversation and a set of EXISTING MEMORIES, decide what to do with each fact.
 
 ## Operations
 
@@ -153,16 +293,11 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 - **SUPERSEDE**: The fact contradicts or updates an existing memory on the same topic (e.g., changed preference, updated status). The old memory is archived and a new one is created. Use when time-sensitive facts have changed.
 - **SUPPORT**: The candidate reinforces or confirms an existing memory, possibly in a specific context. No new memory is created — the existing memory's confidence is boosted. Include `context_label` (one of: general, morning, evening, work, leisure, seasonal, weekday, weekend).
 - **CONTEXTUALIZE**: The candidate adds situational nuance to an existing memory without contradicting it. Example: existing "likes coffee" + new "prefers tea in the evening". A new memory is created with a relation to the existing one. Include `context_label`.
-- **CONTRADICT**: The candidate directly contradicts an existing memory. For temporal_versioned categories (preferences, entities) with general context, this routes to SUPERSEDE behavior. Otherwise, a new memory is created and the contradiction is recorded.
+- **CONTRADICT**: The candidate directly contradicts an existing memory. For temporal_versioned categories with general context, this routes to SUPERSEDE behavior. Otherwise, a new memory is created and the contradiction is recorded.
 
-## Category-Aware Rules
+"#;
 
-1. **profile** category: always use MERGE when a matching memory exists (never SUPERSEDE or CONTRADICT for profile).
-2. **events** and **cases** categories: prefer CREATE or SKIP. MERGE is allowed when the new fact adds meaningful detail to an existing event or case (e.g., resolution of an open case, outcome of an ongoing event). Never SUPERSEDE, SUPPORT, CONTEXTUALIZE, or CONTRADICT.
-3. **preferences** and **entities** categories: support all 7 operations including SUPERSEDE and CONTRADICT.
-4. **preferences**, **entities**, **patterns** categories: support MERGE.
-5. **profile** category: same topic but with new details or different perspective → MERGE into the best matching existing memory. Do not CREATE a new profile fact for a topic already covered.
-
+const RECONCILE_SYSTEM_PROMPT_AFTER_CATS: &str = r#"
 ## General Rules
 
 1. Each fact MUST receive exactly one decision.
@@ -175,8 +310,7 @@ const RECONCILE_SYSTEM_PROMPT: &str = r#"You are a memory reconciliation engine.
 8. For CREATE and SKIP: `match_index` is optional (null).
 9. Same meaning, different wording → MERGE into the matching existing memory.
 10. Age is a tiebreaker: when a new fact conflicts with an old memory on the same topic, the older memory is more likely outdated → prefer SUPERSEDE.
-11. When in doubt: for "profile" category, prefer MERGE or SKIP over CREATE (avoid profile duplication). For other categories, prefer CREATE over SKIP.
-12. When two new facts are marked as 'Potential Duplicates', evaluate whether they convey the same core information. If yes, one should SKIP. If they capture different aspects or nuances, both may CREATE.
+11. When two new facts are marked as 'Potential Duplicates', evaluate whether they convey the same core information. If yes, one should SKIP. If they capture different aspects or nuances, both may CREATE.
 
 ## Output Format
 Return ONLY valid JSON:
@@ -206,16 +340,18 @@ pub fn build_batch_dedup_prompt(facts: &[ExtractedFact]) -> (String, String) {
     )
 }
 
-pub fn build_section_prompt(section_text: &str) -> (String, String) {
+pub fn build_section_prompt(section_text: &str, categories: &[CategoryConfig]) -> (String, String) {
+    let cat_section = build_category_section(categories);
     (
-        format!("{SECTION_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}"),
+        format!("{}{}{cat_section}{}{ALLOWED_TAGS_LIST}", SECTION_SYSTEM_PROMPT_BEFORE_CATS, SECTION_SYSTEM_PROMPT_MID, SECTION_SYSTEM_PROMPT_AFTER_CATS),
         format!("Summarize the following section as a single memory:\n\n{section_text}"),
     )
 }
 
-pub fn build_document_prompt(document_text: &str) -> (String, String) {
+pub fn build_document_prompt(document_text: &str, categories: &[CategoryConfig]) -> (String, String) {
+    let cat_section = build_category_section(categories);
     (
-        format!("{DOCUMENT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}"),
+        format!("{}{}{cat_section}{}{ALLOWED_TAGS_LIST}", DOCUMENT_SYSTEM_PROMPT_BEFORE_CATS, DOCUMENT_SYSTEM_PROMPT_MID, DOCUMENT_SYSTEM_PROMPT_AFTER_CATS),
         format!(
             "Summarize the following document as a single comprehensive memory:\n\n{document_text}"
         ),
@@ -242,7 +378,7 @@ The array should list the indices of facts to KEEP (not the ones to remove).
 If all facts are unique, return all indices: {"keep_indices": [0, 1, 2, ...]}
 "#;
 
-const SECTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your task is to create exactly ONE memory from the given text section.
+const SECTION_SYSTEM_PROMPT_BEFORE_CATS: &str = r#"You are a memory extraction engine. Your task is to create exactly ONE memory from the given text section.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)
 
@@ -265,15 +401,13 @@ const SECTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your 
 - Create exactly 1 memory that captures the section's key information.
 - Do NOT split into multiple facts — summarize as one cohesive memory.
 
-## Categories
-Classify the memory into exactly one category:
-- **profile**: Biographical or identity information.
-- **preferences**: Likes, dislikes, tool choices, style preferences.
-- **entities**: Persistent nouns (projects, tools, people, orgs) and their states.
-- **events**: Things that happened — milestones, incidents, decisions made.
-- **cases**: Problem→solution pairs, debugging stories, how-tos.
-- **patterns**: Reusable processes, workflows, conventions, templates.
+"#;
 
+const SECTION_SYSTEM_PROMPT_MID: &str = r#"
+
+"#;
+
+const SECTION_SYSTEM_PROMPT_AFTER_CATS: &str = r#"
 ## Layered Storage
 - **l0_abstract**: A single sentence index entry. Brief enough to scan quickly.
 - **l1_overview**: A structured markdown summary in 2-4 lines. Includes key attributes.
@@ -285,7 +419,7 @@ Return ONLY valid JSON:
 - "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 "#;
 
-const DOCUMENT_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your task is to create exactly ONE comprehensive memory from the entire document.
+const DOCUMENT_SYSTEM_PROMPT_BEFORE_CATS: &str = r#"You are a memory extraction engine. Your task is to create exactly ONE comprehensive memory from the entire document.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)
 
@@ -309,15 +443,13 @@ const DOCUMENT_SYSTEM_PROMPT: &str = r#"You are a memory extraction engine. Your
 - The l2_content should be a thorough summary covering all key points.
 - Do NOT split into multiple facts — produce one comprehensive memory.
 
-## Categories
-Classify the memory into exactly one category:
-- **profile**: Biographical or identity information.
-- **preferences**: Likes, dislikes, tool choices, style preferences.
-- **entities**: Persistent nouns (projects, tools, people, orgs) and their states.
-- **events**: Things that happened — milestones, incidents, decisions made.
-- **cases**: Problem→solution pairs, debugging stories, how-tos.
-- **patterns**: Reusable processes, workflows, conventions, templates.
+"#;
 
+const DOCUMENT_SYSTEM_PROMPT_MID: &str = r#"
+
+"#;
+
+const DOCUMENT_SYSTEM_PROMPT_AFTER_CATS: &str = r#"
 ## Layered Storage
 - **l0_abstract**: A single sentence index entry. Brief enough to scan quickly.
 - **l1_overview**: A structured markdown summary in 3-5 lines covering the main topics.
@@ -329,7 +461,7 @@ Return ONLY valid JSON:
 - "tags": Select 0-3 tags from the ALLOWED_TAGS list below. If no tag fits, use empty array []. Do NOT invent tags.
 "#;
 
-const BASE_SYSTEM_PROMPT: &str = r###"You are an information extraction engine. Your task is to extract distinct, atomic facts from the USER messages in a conversation.
+const BASE_SYSTEM_PROMPT_BEFORE_CATEGORIES: &str = r###"You are an information extraction engine. Your task is to extract distinct, atomic facts from the USER messages in a conversation.
 
 ## ABSOLUTE RULES (Violating any of these is a FAILURE)
 
@@ -365,16 +497,9 @@ const BASE_SYSTEM_PROMPT: &str = r###"You are an information extraction engine. 
 - Each fact must be atomic — one piece of information per fact.
 - Maximum 15 facts per extraction.
 
-## Categories
-Classify each fact into exactly one category:
+"###;
 
-- **profile**: Stable, repeated characteristics or identity of the user. Must be enduring (not temporary states). Decision: "Has this trait been demonstrated across multiple interactions?" Valid: "User is a backend engineer", "User has a daughter named Mengmeng". NOT profile: temporary mood, one-time action, AI interaction style (those are events or patterns).
-- **preferences**: Likes, dislikes, tool choices, style preferences. Decision: "Can this be phrased as 'User prefers/likes...'?"
-- **entities**: Persistent nouns (projects, tools, people, orgs) and their states. Decision: "Does this describe a persistent noun's state?"
-- **events**: Things that happened — milestones, incidents, decisions made. Decision: "Does this describe something that happened?"
-- **cases**: Problem→solution pairs, debugging stories, how-tos. Decision: "Does this contain a problem→solution pair?"
-- **patterns**: Reusable processes, workflows, conventions, templates. Decision: "Is this a reusable process?"
-
+const BASE_SYSTEM_PROMPT_AFTER_CATEGORIES: &str = r###"
 ## Layered Storage
 For each fact, produce three layers of detail:
 
@@ -382,30 +507,9 @@ For each fact, produce three layers of detail:
 - **l1_overview**: A structured markdown summary in 2-3 lines. Includes key attributes.
 - **l2_content**: Full narrative with all relevant details, context, and nuance.
 
-### PREFERENCE Format (MANDATORY for category="preferences")
-For facts classified as "preferences", ALL three layers (l0_abstract, l1_overview, l2_content) MUST use this structured Markdown format:
-```
-## {偏好主题}
-- **偏好**: {具体偏好描述}
-- **置信度**: {0.0-1.0}
-- **类型**: static | evolving
-```
-- Each preference gets its own `## Title` section. Multiple preferences separated by blank lines.
-- `type`: static = stable preference; evolving = may change over time.
-- This format applies ONLY to category="preferences". Other categories keep their normal format.
+"###;
 
-### WORK Format (MANDATORY for categories: cases, entities, events, patterns)
-For facts classified as technical/work categories (cases, entities, events, patterns), ALL three layers MUST use this structured Markdown format:
-```
-## {工作主题/技术决策}
-- **内容**: {简要描述做了什么、为什么、结果如何}
-- **影响范围**: {影响的模块/文件/系统}
-- **结论**: {最终结论或决策}
-```
-- Each independent technical topic gets its own `## Title` section.
-- Keep 内容 concise — conclusions only, not step-by-step process.
-- This format applies to cases, entities, events, and patterns categories. Profile and preferences use their own formats.
-
+const BASE_SYSTEM_PROMPT_AFTER_FORMAT: &str = r###"
 ## Exclusion Rules
 Do NOT extract:
 - General knowledge (widely known facts)
@@ -693,15 +797,10 @@ When in doubt → scope "private". ONLY use scope "public" for purely technical/
 - BAD: "用户偏好深色模式", "你说你在Stripe工作", "用户不喜欢冗长的回复"
 
 ## CATEGORY CLASSIFICATION
-Classify each topic into exactly one category. Use ONLY these 6 valid values:
-- **profile**: Biographical or identity information (job, company, role, background)
-- **preferences**: Likes, dislikes, tool choices, style preferences, habits
-- **entities**: Persistent nouns (projects, tools, people, orgs) and their states
-- **events**: Things that happened — milestones, incidents, decisions made
-- **cases**: Problem→solution pairs, debugging stories, how-tos
-- **patterns**: Reusable processes, workflows, conventions, templates
+Classify each topic into exactly one category. Use ONLY these valid values:
+{SESSION_COMPRESS_CATEGORY_PLACEHOLDER}
 
-CRITICAL: The category field MUST be one of the 6 values above. Do NOT invent categories like "experience", "knowledge", "skills", etc. If unsure, use "events" for past activities or "preferences" for likes/dislikes.
+{SESSION_COMPRESS_CATEGORY_VALIDATION_PLACEHOLDER}
 
 ## OUTPUT
 Valid JSON array. Each element: { "topic": string, "summary": string, "tags": string[], "scope": "public"|"private", "category": string, "replaces": number[] }
@@ -714,8 +813,13 @@ Escape all double quotes and newlines inside JSON strings. Return [] if nothing 
 pub fn build_session_compress_prompt(
     conversation: &str,
     existing_summaries: &[String],
+    categories: &[CategoryConfig],
 ) -> (String, String) {
-    let system = SESSION_COMPRESS_SYSTEM_PROMPT.to_string();
+    let cat_list = build_session_category_list(categories);
+    let cat_validation = build_session_category_validation(categories);
+    let system = SESSION_COMPRESS_SYSTEM_PROMPT
+        .replace("{SESSION_COMPRESS_CATEGORY_PLACEHOLDER}", &cat_list)
+        .replace("{SESSION_COMPRESS_CATEGORY_VALIDATION_PLACEHOLDER}", &cat_validation);
 
     let mut user = String::with_capacity(4096);
 
@@ -862,12 +966,7 @@ For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use t
 ```
 
 ## CATEGORY VALUES (for WORK and EMOTIONAL)
-- **profile**: Enduring user identity traits (e.g., "backend engineer", "has daughter Mengmeng")
-- **preferences**: Likes, dislikes, style preferences (EMOTIONAL may also use this)
-- **entities**: Persistent nouns (projects, tools, people, orgs)
-- **events**: Things that happened — milestones, incidents, decisions
-- **cases**: Problem→solution pairs, debugging stories
-- **patterns**: Reusable processes, workflows, conventions
+{SESSION_EXTRACT_CATEGORY_PLACEHOLDER}
 
 ## ABSOLUTE RULES
 
@@ -946,26 +1045,16 @@ Return [] if no clear preferences found.
 /// `conversation` is the formatted conversation text.
 /// Extracts independent facts without referencing old summaries.
 /// Backward-compatible wrapper: calls [`build_session_extract_prompt_with_memories`] with `None`.
-pub fn build_session_extract_prompt(conversation: &str) -> (String, String) {
-    build_session_extract_prompt_with_memories(conversation, None, None)
+pub fn build_session_extract_prompt(conversation: &str, categories: &[CategoryConfig]) -> (String, String) {
+    build_session_extract_prompt_with_memories(conversation, None, None, categories)
 }
 
 /// Build the session extract prompt with optional existing memory summaries and project name.
-///
-/// When `existing_memories_summary` is provided, includes a `## Existing Memories` section
-/// in the user prompt so the LLM can avoid duplicating or can enrich previously stored facts.
-///
-/// # Arguments
-/// * `conversation` - The formatted conversation text to extract from
-/// * `existing_memories_summary` - Optional summary of existing memories (max ~2000 chars recommended)
-/// * `project_name` - Optional project name for prefix injection
-///
-/// # Returns
-/// A `(system_prompt, user_prompt)` tuple for the LLM call.
 pub fn build_session_extract_prompt_with_memories(
     conversation: &str,
     existing_memories_summary: Option<&str>,
     project_name: Option<&str>,
+    categories: &[CategoryConfig],
 ) -> (String, String) {
     let project_prefix_instruction = if let Some(name) = project_name {
         format!(
@@ -979,7 +1068,9 @@ pub fn build_session_extract_prompt_with_memories(
         String::new()
     };
 
-    let system = format!("{SESSION_EXTRACT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}{project_prefix_instruction}");
+    let cat_list = build_session_category_list(categories);
+    let system = format!("{SESSION_EXTRACT_SYSTEM_PROMPT}{ALLOWED_TAGS_LIST}{project_prefix_instruction}")
+        .replace("{SESSION_EXTRACT_CATEGORY_PLACEHOLDER}", &cat_list);
 
     let existing_section = match existing_memories_summary {
         Some(summary) if !summary.is_empty() => {
@@ -1037,7 +1128,7 @@ mod session_extract_tests {
 
     #[test]
     fn test_build_session_extract_prompt_without_memories() {
-        let (system, user) = build_session_extract_prompt("Hello world");
+        let (system, user) = build_session_extract_prompt("Hello world", &[]);
         assert!(!system.is_empty());
         assert!(user.contains("## Current Conversation"));
         assert!(user.contains("Hello world"));
@@ -1050,6 +1141,7 @@ mod session_extract_tests {
             "New conversation",
             Some("旧记忆摘要内容"),
             None,
+            &[],
         );
         assert!(!system.is_empty());
         assert!(user.contains("## Existing Memories"));
@@ -1065,6 +1157,7 @@ mod session_extract_tests {
             "Test conversation",
             None,
             None,
+            &[],
         );
         assert!(!system.is_empty());
         assert!(!user.contains("## Existing Memories"));
@@ -1077,14 +1170,15 @@ mod session_extract_tests {
             "Test conversation",
             Some(""),
             None,
+            &[],
         );
         assert!(!user.contains("## Existing Memories"));
     }
 
     #[test]
     fn test_backward_compat_wrapper() {
-        let (s1, u1) = build_session_extract_prompt("conversation text");
-        let (s2, u2) = build_session_extract_prompt_with_memories("conversation text", None, None);
+        let (s1, u1) = build_session_extract_prompt("conversation text", &[]);
+        let (s2, u2) = build_session_extract_prompt_with_memories("conversation text", None, None, &[]);
         assert_eq!(s1, s2);
         assert_eq!(u1, u2);
     }

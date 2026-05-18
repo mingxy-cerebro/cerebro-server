@@ -332,8 +332,7 @@ impl ClusterStore {
             space_id: get_str("space_id")?,
             title: get_str("title")?,
             summary: get_str("summary")?,
-            category: get_str("category")?.parse()
-                .map_err(|e: String| OmemError::Storage(e))?,
+            category: get_str("category")?.parse().unwrap(),
             member_count: batch
                 .column_by_name("member_count")
                 .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())

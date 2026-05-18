@@ -141,7 +141,7 @@ mod tests {
     fn memory_new_defaults() {
         let mem = Memory::new(
             "user prefers dark mode",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(mem.l2_content, "user prefers dark mode");
         assert!(mem.l0_abstract.is_empty());
         assert!(mem.l1_overview.is_empty());
-        assert_eq!(mem.category, Category::Preferences);
+        assert_eq!(mem.category, Category::new("preferences"));
         assert_eq!(mem.memory_type, MemoryType::Insight);
         assert_eq!(mem.state, MemoryState::Active);
         assert_eq!(mem.tier, Tier::Peripheral);
@@ -181,7 +181,7 @@ mod tests {
     fn memory_serde_roundtrip() {
         let mut mem = Memory::new(
             "test content",
-            Category::Events,
+            Category::new("events"),
             MemoryType::Session,
             "t-002",
         );
@@ -197,7 +197,7 @@ mod tests {
 
         assert_eq!(parsed.id, mem.id);
         assert_eq!(parsed.content, "test content");
-        assert_eq!(parsed.category, Category::Events);
+        assert_eq!(parsed.category, Category::new("events"));
         assert_eq!(parsed.tags.len(), 2);
         assert_eq!(parsed.relations.len(), 1);
         assert_eq!(parsed.relations[0].relation_type, RelationType::Supports);
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn memory_id_is_uuid_v4() {
-        let mem = Memory::new("test", Category::Profile, MemoryType::Pinned, "t-001");
+        let mem = Memory::new("test", Category::new("profile"), MemoryType::Pinned, "t-001");
         let parsed = Uuid::parse_str(&mem.id);
         assert!(parsed.is_ok());
         assert_eq!(parsed.unwrap().get_version_num(), 4);

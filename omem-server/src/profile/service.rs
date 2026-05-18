@@ -244,7 +244,7 @@ impl ProfileService {
         threshold: f32,
     ) -> Result<usize, OmemError> {
         let filter = ListFilter {
-            category: Some(Category::Profile.to_string()),
+            category: Some(Category::new("profile").to_string()),
             state: Some("active".to_string()),
             sort: "created_at".to_string(),
             order: "asc".to_string(),
@@ -272,7 +272,7 @@ impl ProfileService {
     async fn find_fact_by_key(&self, key: &str) -> Result<Option<Memory>, OmemError> {
         let key_tag = format!("{}{}", PROFILE_FACT_TAG_PREFIX, key);
         let filter = ListFilter {
-            category: Some(Category::Profile.to_string()),
+            category: Some(Category::new("profile").to_string()),
             tags: Some(vec![key_tag]),
             state: Some("active".to_string()),
             sort: "created_at".to_string(),
@@ -295,7 +295,7 @@ impl ProfileService {
             FactType::Static => FACT_TYPE_STATIC_TAG,
             FactType::Dynamic => FACT_TYPE_DYNAMIC_TAG,
         };
-        let mut mem = Memory::new(value, Category::Profile, MemoryType::Insight, &self.tenant_id);
+        let mut mem = Memory::new(value, Category::new("profile"), MemoryType::Insight, &self.tenant_id);
         mem.tags = vec![key_tag, type_tag.to_string()];
         mem.confidence = confidence;
         mem.visibility = "personal".to_string();
@@ -345,7 +345,7 @@ async fn build_profile(
 
     let mut static_memories: Vec<_> = quality_memories
         .iter()
-        .filter(|m| m.category == Category::Profile || m.category == Category::Preferences)
+        .filter(|m| m.category == Category::new("profile") || m.category == Category::new("preferences"))
         .collect();
     static_memories.sort_by(|a, b| {
         b.importance
@@ -369,8 +369,8 @@ async fn build_profile(
         .iter()
         .filter(|m| {
             matches!(
-                m.category,
-                Category::Events | Category::Cases | Category::Patterns
+                m.category.as_str(),
+                "events" | "cases" | "patterns"
             )
                 && parse_datetime(&m.created_at)
                     .map(|dt| dt >= cutoff)
@@ -442,7 +442,7 @@ mod tests {
         let mut m1 = make_memory_with(
             "t-001",
             "speaks mandarin",
-            Category::Profile,
+            Category::new("profile"),
             &days_ago_str(30),
         );
         m1.tags = vec!["language".to_string()];
@@ -450,7 +450,7 @@ mod tests {
         let mut m2 = make_memory_with(
             "t-001",
             "prefers dark mode",
-            Category::Preferences,
+            Category::new("preferences"),
             &days_ago_str(15),
         );
         m2.tags = vec!["ui".to_string()];
@@ -458,7 +458,7 @@ mod tests {
         let m3 = make_memory_with(
             "t-001",
             "meeting yesterday",
-            Category::Events,
+            Category::new("events"),
             &days_ago_str(1),
         );
 
@@ -509,13 +509,13 @@ mod tests {
         let m1 = make_memory_with(
             "t-001",
             "debugging OOM issue",
-            Category::Events,
+            Category::new("events"),
             &days_ago_str(2),
         );
         let m2 = make_memory_with(
             "t-001",
             "auth refactor pattern",
-            Category::Patterns,
+            Category::new("patterns"),
             &days_ago_str(3),
         );
 
@@ -546,11 +546,11 @@ mod tests {
         let old_event = make_memory_with(
             "t-001",
             "old event from 2 weeks ago",
-            Category::Events,
+            Category::new("events"),
             &days_ago_str(14),
         );
         let recent_event =
-            make_memory_with("t-001", "recent event", Category::Events, &days_ago_str(1));
+            make_memory_with("t-001", "recent event", Category::new("events"), &days_ago_str(1));
 
         store.create(&old_event, None).await.expect("create old");
         store
@@ -575,13 +575,13 @@ mod tests {
         let m1 = make_memory_with(
             "t-001",
             "rust programming tips",
-            Category::Preferences,
+            Category::new("preferences"),
             &days_ago_str(5),
         );
         let m2 = make_memory_with(
             "t-001",
             "python scripting notes",
-            Category::Preferences,
+            Category::new("preferences"),
             &days_ago_str(3),
         );
 
@@ -636,7 +636,7 @@ mod tests {
             "t-001".to_string(),
         );
 
-        let mut m = Memory::new("introvert", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m = Memory::new("introvert", Category::new("profile"), MemoryType::Insight, "t-001");
         m.tags = vec!["pfact:personality".to_string(), "pfact_type:static".to_string()];
         m.confidence = 0.6;
         m.created_at = days_ago_str(60);
@@ -683,7 +683,7 @@ mod tests {
             "t-001".to_string(),
         );
 
-        let mut m = Memory::new("old task", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m = Memory::new("old task", Category::new("profile"), MemoryType::Insight, "t-001");
         m.tags = vec!["pfact:current_task".to_string(), "pfact_type:dynamic".to_string()];
         m.confidence = 0.9;
         store.create(&m, None).await.expect("create existing");
@@ -747,12 +747,12 @@ mod tests {
             "t-001".to_string(),
         );
 
-        let mut m_low = Memory::new("weak fact", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m_low = Memory::new("weak fact", Category::new("profile"), MemoryType::Insight, "t-001");
         m_low.tags = vec!["pfact:weak".to_string(), "pfact_type:static".to_string()];
         m_low.confidence = 0.1;
         store.create(&m_low, None).await.expect("create low");
 
-        let mut m_high = Memory::new("strong fact", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m_high = Memory::new("strong fact", Category::new("profile"), MemoryType::Insight, "t-001");
         m_high.tags = vec!["pfact:strong".to_string(), "pfact_type:static".to_string()];
         m_high.confidence = 0.9;
         store.create(&m_high, None).await.expect("create high");
@@ -773,7 +773,7 @@ mod tests {
             "t-001".to_string(),
         );
 
-        let mut m = Memory::new("regular profile", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m = Memory::new("regular profile", Category::new("profile"), MemoryType::Insight, "t-001");
         m.confidence = 0.1;
         store.create(&m, None).await.expect("create regular");
 

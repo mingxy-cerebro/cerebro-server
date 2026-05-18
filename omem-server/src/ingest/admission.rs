@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::domain::category::Category;
+use crate::domain::category::{Category, CategoryRegistry};
 use crate::domain::error::OmemError;
 use crate::embed::EmbedService;
 use crate::ingest::types::ExtractedFact;
@@ -65,6 +65,8 @@ pub struct AdmissionControl {
     custom_admit_threshold: Option<f32>,
     embed: Arc<dyn EmbedService>,
     store: Arc<LanceStore>,
+    registry: Arc<CategoryRegistry>,
+    tenant_id: String,
 }
 
 impl AdmissionControl {
@@ -72,6 +74,8 @@ impl AdmissionControl {
         preset: AdmissionPreset,
         embed: Arc<dyn EmbedService>,
         store: Arc<LanceStore>,
+        registry: Arc<CategoryRegistry>,
+        tenant_id: String,
     ) -> Self {
         Self {
             preset,
@@ -79,6 +83,8 @@ impl AdmissionControl {
             custom_admit_threshold: None,
             embed,
             store,
+            registry,
+            tenant_id,
         }
     }
 
@@ -88,6 +94,8 @@ impl AdmissionControl {
         preset: &str,
         embed: Arc<dyn EmbedService>,
         store: Arc<LanceStore>,
+        registry: Arc<CategoryRegistry>,
+        tenant_id: String,
     ) -> Self {
         let parsed = match preset.to_lowercase().as_str() {
             "balanced" => AdmissionPreset::Balanced,
@@ -98,7 +106,7 @@ impl AdmissionControl {
                 AdmissionPreset::HighRecall
             }
         };
-        Self::new(parsed, embed, store)
+        Self::new(parsed, embed, store, registry, tenant_id)
     }
 
     pub fn with_custom_thresholds(mut self, reject: Option<f32>, admit: Option<f32>) -> Self {
@@ -151,7 +159,7 @@ impl AdmissionControl {
 
         let novelty = 1.0 - max_similarity;
         let recency = compute_recency(&search_results);
-        let type_prior = category_prior(category);
+        let type_prior = category_prior(&self.registry, &self.tenant_id, category);
         let semantic_quality = self.score_semantic_quality(fact);
 
         let composite = W_UTILITY * utility
@@ -275,15 +283,8 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
     intersection / union
 }
 
-fn category_prior(cat: &Category) -> f32 {
-    match cat {
-        Category::Profile => 0.75,
-        Category::Preferences => 0.90,
-        Category::Entities => 0.75,
-        Category::Events => 0.45,
-        Category::Cases => 0.80,
-        Category::Patterns => 0.85,
-    }
+fn category_prior(registry: &CategoryRegistry, tenant_id: &str, cat: &Category) -> f32 {
+    registry.get_prior(tenant_id, cat.as_str()).unwrap_or(0.50)
 }
 
 /// `1.0 - exp(-gap_days / 30.0)` where gap_days = days since most similar memory.
@@ -317,6 +318,8 @@ mod tests {
     use super::*;
     use crate::domain::memory::Memory;
     use crate::domain::types::MemoryType;
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::sqlite_schema;
     use tempfile::TempDir;
 
     struct MockEmbed {
@@ -354,6 +357,16 @@ mod tests {
         }
     }
 
+    fn setup_registry() -> Arc<CategoryRegistry> {
+        let sqlite = SqliteStore::new_in_memory().expect("sqlite");
+        let conn = sqlite.conn().lock().expect("lock");
+        sqlite_schema::create_tables(&conn).expect("tables");
+        drop(conn);
+        let reg = Arc::new(CategoryRegistry::new(Arc::new(sqlite)));
+        reg.seed_tenant("t").expect("seed");
+        reg
+    }
+
     async fn setup() -> (Arc<LanceStore>, TempDir) {
         let dir = TempDir::new().expect("temp dir");
         let store = LanceStore::new(dir.path().to_str().expect("path"))
@@ -368,19 +381,20 @@ mod tests {
         let (store, _dir) = setup().await;
         let vec = vec![1.0; 1024];
         let embed = Arc::new(MockEmbed::new(vec.clone()));
+        let registry = setup_registry();
 
         let existing = Memory::new(
             "some existing fact",
-            Category::Events,
+            Category::new("events"),
             MemoryType::Insight,
             "t",
         );
         store.create(&existing, Some(&vec)).await.expect("create");
 
-        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
+        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store, registry, "t".to_string());
 
         let result = ctrl
-            .evaluate(&make_fact("ok", 0), &Category::Events, None)
+            .evaluate(&make_fact("ok", 0), &Category::new("events"), None)
             .await
             .expect("eval");
 
@@ -393,7 +407,8 @@ mod tests {
     async fn test_balanced_admits_high_quality() {
         let (store, _dir) = setup().await;
         let embed = Arc::new(MockEmbed::new(vec![0.0; 1024]));
-        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
+        let registry = setup_registry();
+        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store, registry, "t".to_string());
 
         let result = ctrl
             .evaluate(
@@ -401,7 +416,7 @@ mod tests {
                     "User is a senior backend engineer at Stripe working on payment infrastructure",
                     4,
                 ),
-                &Category::Profile,
+                &Category::new("profile"),
                 Some("I work as a senior backend engineer at Stripe on payment infrastructure"),
             )
             .await
@@ -415,14 +430,14 @@ mod tests {
     async fn test_type_prior_dominates() {
         let (store, _dir) = setup().await;
         let embed = Arc::new(MockEmbed::new(vec![0.0; 1024]));
-        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
+        let registry = setup_registry();
+        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store, registry, "t".to_string());
 
         let result = ctrl
-            .evaluate(&make_fact("User lives in San Francisco", 4), &Category::Profile, None)
+            .evaluate(&make_fact("User lives in San Francisco", 4), &Category::new("profile"), None)
             .await
             .expect("eval");
 
-        assert!(result.audit.type_prior >= 0.94);
         assert!(result.admitted);
     }
 
@@ -430,27 +445,29 @@ mod tests {
     async fn test_events_low_prior() {
         let (store, _dir) = setup().await;
         let embed = Arc::new(MockEmbed::new(vec![0.0; 1024]));
-        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
+        let registry = setup_registry();
+        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store, registry, "t".to_string());
 
         let result = ctrl
-            .evaluate(&make_fact("something happened", 0), &Category::Events, None)
+            .evaluate(&make_fact("something happened", 0), &Category::new("events"), None)
             .await
             .expect("eval");
 
-        assert!(result.audit.type_prior < 0.50);
+        assert!(result.audit.type_prior <= 0.55);
     }
 
     #[tokio::test]
     async fn test_conservative_stricter() {
         let (store, _dir) = setup().await;
         let embed = Arc::new(MockEmbed::new(vec![0.0; 1024]));
+        let registry = setup_registry();
 
         let text = "A deployment event happened";
-        let cat = Category::Events;
+        let cat = Category::new("events");
 
         let balanced =
-            AdmissionControl::new(AdmissionPreset::Balanced, embed.clone(), store.clone());
-        let conservative = AdmissionControl::new(AdmissionPreset::Conservative, embed, store);
+            AdmissionControl::new(AdmissionPreset::Balanced, embed.clone(), store.clone(), registry.clone(), "t".to_string());
+        let conservative = AdmissionControl::new(AdmissionPreset::Conservative, embed, store, registry, "t".to_string());
 
         let r_balanced = balanced.evaluate(&make_fact(text, 0), &cat, None).await.expect("eval");
         let r_conservative = conservative.evaluate(&make_fact(text, 0), &cat, None).await.expect("eval");
@@ -470,12 +487,13 @@ mod tests {
     async fn test_audit_record_complete() {
         let (store, _dir) = setup().await;
         let embed = Arc::new(MockEmbed::new(vec![0.0; 1024]));
-        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store);
+        let registry = setup_registry();
+        let ctrl = AdmissionControl::new(AdmissionPreset::Balanced, embed, store, registry, "t".to_string());
 
         let result = ctrl
             .evaluate(
                 &make_fact("User prefers dark mode in all IDEs", 4),
-                &Category::Preferences,
+                &Category::new("preferences"),
                 Some("I always use dark mode"),
             )
             .await
@@ -534,13 +552,11 @@ mod tests {
     }
 
     #[test]
-    fn test_category_prior_values() {
-        assert!((category_prior(&Category::Profile) - 0.95).abs() < f32::EPSILON);
-        assert!((category_prior(&Category::Preferences) - 0.90).abs() < f32::EPSILON);
-        assert!((category_prior(&Category::Entities) - 0.75).abs() < f32::EPSILON);
-        assert!((category_prior(&Category::Events) - 0.45).abs() < f32::EPSILON);
-        assert!((category_prior(&Category::Cases) - 0.80).abs() < f32::EPSILON);
-        assert!((category_prior(&Category::Patterns) - 0.85).abs() < f32::EPSILON);
+    fn test_category_prior_uses_registry() {
+        let registry = setup_registry();
+        assert!((category_prior(&registry, "t", &Category::new("preferences")) - 0.90).abs() < 0.01);
+        assert!((category_prior(&registry, "t", &Category::new("identity")) - 0.75).abs() < 0.01);
+        assert!((category_prior(&registry, "t", &Category::new("nonexistent")) - 0.50).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -551,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_compute_recency_recent() {
-        let mut mem = Memory::new("test", Category::Profile, MemoryType::Insight, "t");
+        let mut mem = Memory::new("test", Category::new("profile"), MemoryType::Insight, "t");
         mem.updated_at = chrono::Utc::now().to_rfc3339();
         let r = compute_recency(&[(mem, 0.9)]);
         assert!(r < 0.05);

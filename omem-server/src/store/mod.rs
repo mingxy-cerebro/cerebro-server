@@ -1,6 +1,8 @@
 pub mod lancedb;
 pub mod manager;
 pub mod spaces;
+pub mod sqlite;
+pub mod sqlite_schema;
 pub mod tenant;
 
 pub use self::lancedb::LanceStore;

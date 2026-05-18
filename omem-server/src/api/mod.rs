@@ -24,6 +24,9 @@ mod tests {
     use crate::embed::EmbedService;
     use crate::llm::LlmService;
     use crate::store::{SpaceStore, StoreManager, TenantStore};
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::sqlite_schema;
+    use crate::domain::category::CategoryRegistry;
 
     struct TestEmbedder;
 
@@ -76,6 +79,12 @@ mod tests {
             .await
             .expect("cluster store"),
         );
+        let sqlite_store = Arc::new(SqliteStore::new_in_memory().expect("sqlite store"));
+        {
+            let conn = sqlite_store.conn().lock().expect("sqlite lock");
+            sqlite_schema::create_tables(&conn).expect("sqlite tables");
+        }
+        let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
         let state = Arc::new(AppState {
             store_manager,
             tenant_store,
@@ -94,6 +103,8 @@ mod tests {
             reranker: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
             profile_cache: Arc::new(dashmap::DashMap::new()),
+            sqlite_store,
+            category_registry,
         });
 
         (build_router(state), dir)

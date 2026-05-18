@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
-use crate::domain::category::Category;
+use crate::domain::category::{Category, CategoryRegistry};
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::relation::{MemoryRelation, RelationType};
@@ -27,6 +27,8 @@ pub struct Reconciler {
     max_existing: usize,
     max_per_fact: usize,
     min_similarity: f32,
+    registry: Arc<CategoryRegistry>,
+    tenant_id: String,
 }
 
 impl Reconciler {
@@ -34,6 +36,8 @@ impl Reconciler {
         llm: Arc<dyn LlmService>,
         store: Arc<LanceStore>,
         embed: Arc<dyn EmbedService>,
+        registry: Arc<CategoryRegistry>,
+        tenant_id: String,
     ) -> Self {
         Self {
             llm,
@@ -42,6 +46,8 @@ impl Reconciler {
             max_existing: DEFAULT_MAX_EXISTING,
             max_per_fact: DEFAULT_MAX_PER_FACT,
             min_similarity: DEFAULT_MIN_SIMILARITY,
+            registry,
+            tenant_id,
         }
     }
 
@@ -137,8 +143,9 @@ impl Reconciler {
 
         let (id_map, int_to_uuid) = build_id_maps(&existing);
 
+        let categories = self.registry.get_active_categories(&self.tenant_id).unwrap_or_default();
         let (system, user) =
-            prompts::build_reconcile_prompt(&remaining_extracted, &existing, &id_map, &fuzzy_pairs);
+            prompts::build_reconcile_prompt(&remaining_extracted, &existing, &id_map, &fuzzy_pairs, &categories);
         let result: ReconcileResult = complete_json(self.llm.as_ref(), &system, &user).await?;
 
         for decision in &result.decisions {
@@ -299,15 +306,15 @@ impl Reconciler {
                 updated.l2_content = fact.l2_content.clone();
                 updated.tags = fact.tags.clone();
                 updated.confidence = fact.quality_score.clamp(0.1, 1.0);
-                let category: Category = fact.category.parse().unwrap_or(Category::Profile);
-                updated.importance = category_importance(&category, fact.quality_score);
-                updated.updated_at = chrono::Utc::now().to_rfc3339();
+        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
+        updated.importance = category_importance(&self.registry, &self.tenant_id, &category, fact.quality_score);
+        updated.updated_at = chrono::Utc::now().to_rfc3339();
 
-                let embeddings = self.embed.embed(&[updated.l0_abstract.clone()]).await?;
-                let vector = embeddings.first().map(|v| v.as_slice());
+        let embeddings = self.embed.embed(&[updated.l0_abstract.clone()]).await?;
+        let vector = embeddings.first().map(|v| v.as_slice());
 
-                self.store.update(&updated, vector).await?;
-                merged.push(updated);
+        self.store.update(&updated, vector).await?;
+        merged.push(updated);
             } else {
                 remaining.push(fact.clone());
             }
@@ -323,8 +330,8 @@ impl Reconciler {
         _agent_id: Option<String>,
         _session_id: Option<String>,
     ) -> Result<bool, OmemError> {
-        let category: Category = fact.category.parse().unwrap_or(Category::Profile);
-        if category != Category::Preferences {
+        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
+        if category != Category::new("preferences") {
             return Ok(false);
         }
 
@@ -334,7 +341,7 @@ impl Reconciler {
         };
 
         for mem in existing {
-            if mem.category != Category::Preferences {
+            if mem.category != Category::new("preferences") {
                 continue;
             }
             if let Some(existing_slot) = preference_slots::infer_preference_slot(&mem.l0_abstract) {
@@ -482,8 +489,8 @@ impl Reconciler {
             .await?
             .ok_or_else(|| OmemError::NotFound(format!("memory {real_id}")))?;
 
-        let category: Category = fact.category.parse().unwrap_or(Category::Profile);
-        if category.is_temporal_versioned() {
+        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
+        if matches!(category.as_str(), "preferences" | "project") {
             return self
                 .handle_supersede(fact, match_index, int_to_uuid, tenant_id, created_memories, agent_id.clone(), session_id.clone())
                 .await;
@@ -673,7 +680,7 @@ impl Reconciler {
         agent_id: Option<String>,
         session_id: Option<String>,
     ) -> Result<Memory, OmemError> {
-        let category: Category = fact.category.parse().unwrap_or(Category::Profile);
+        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
 
         let source = fact.source_text.as_deref().unwrap_or(&fact.l0_abstract);
 
@@ -683,7 +690,7 @@ impl Reconciler {
         mem.l2_content = fact.l2_content.clone();
         mem.tags = fact.tags.clone();
         mem.confidence = fact.quality_score.clamp(0.1, 1.0);
-        mem.importance = category_importance(&mem.category, fact.quality_score);
+        mem.importance = category_importance(&self.registry, &self.tenant_id, &mem.category, fact.quality_score);
         mem.agent_id = agent_id;
         mem.session_id = session_id;
         mem.source = Some("ingest".to_string());
@@ -728,8 +735,8 @@ impl Reconciler {
             let fact_hash = content_hash(&normalized_fact);
 
             let mut is_duplicate = false;
-            let category: Category = fact.category.parse().unwrap_or(Category::Profile);
-            let fact_importance = category_importance(&category, fact.quality_score);
+            let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
+            let fact_importance = category_importance(&self.registry, &self.tenant_id, &category, fact.quality_score);
 
             // Hard hash check
             if let Some(existing_mem) = existing_by_hash.get(&fact_hash) {
@@ -1084,15 +1091,8 @@ fn compute_fuzzy_pairs(facts: &[ExtractedFact]) -> Vec<(usize, usize)> {
     pairs
 }
 
-fn category_importance(category: &Category, quality_score: f32) -> f32 {
-    let base = match category {
-        Category::Profile => 0.8,
-        Category::Preferences => 0.7,
-        Category::Entities => 0.6,
-        Category::Patterns => 0.6,
-        Category::Cases => 0.5,
-        Category::Events => 0.4,
-    };
+fn category_importance(registry: &CategoryRegistry, tenant_id: &str, category: &Category, quality_score: f32) -> f32 {
+    let base = registry.get_importance(tenant_id, category.as_str()).unwrap_or(0.50);
     let blended = base * 0.6 + quality_score * 0.4;
     blended.clamp(0.1, 1.0)
 }
@@ -1117,6 +1117,8 @@ mod tests {
     use super::*;
     use crate::ingest::types::ExtractedFact;
     use std::sync::Mutex;
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::sqlite_schema;
     use tempfile::TempDir;
 
     struct MockLlm {
@@ -1185,6 +1187,16 @@ mod tests {
         (Arc::new(store), dir)
     }
 
+    fn setup_registry() -> Arc<CategoryRegistry> {
+        let sqlite = SqliteStore::new_in_memory().expect("sqlite");
+        let conn = sqlite.conn().lock().expect("lock");
+        sqlite_schema::create_tables(&conn).expect("tables");
+        drop(conn);
+        let reg = Arc::new(CategoryRegistry::new(Arc::new(sqlite)));
+        reg.seed_tenant("t-001").expect("seed");
+        reg
+    }
+
     fn make_fact(abstract_text: &str, category: &str) -> ExtractedFact {
         ExtractedFact {
             l0_abstract: abstract_text.to_string(),
@@ -1206,7 +1218,7 @@ mod tests {
         let llm = Arc::new(MockLlm::new(r#"{"keep_indices": [0, 1]}"#));
         let embed = Arc::new(MockEmbed);
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
 
         let facts = vec![
             make_fact("User prefers Rust", "preferences"),
@@ -1232,7 +1244,7 @@ mod tests {
 
         let existing = Memory::new(
             "User prefers Rust",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1244,7 +1256,7 @@ mod tests {
         let skip_response = r#"{"decisions":[{"action":"SKIP","fact_index":0,"match_index":0,"reason":"duplicate"}]}"#;
         let llm = Arc::new(MockLlm::new(skip_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("User prefers Rust", "preferences")];
 
         let result = reconciler
@@ -1261,7 +1273,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User prefers Rust",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1274,7 +1286,7 @@ mod tests {
         let merge_response = r#"{"decisions":[{"action":"MERGE","fact_index":0,"match_index":0,"merged_content":"User prefers Rust for its safety and performance","reason":"adds detail"}]}"#;
         let llm = Arc::new(MockLlm::new(merge_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact(
             "User likes Rust for safety and performance",
             "preferences",
@@ -1308,7 +1320,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User works at Google",
-            Category::Profile,
+            Category::new("profile"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1321,7 +1333,7 @@ mod tests {
         let supersede_response = r#"{"decisions":[{"action":"SUPERSEDE","fact_index":0,"match_index":0,"reason":"user changed jobs"}]}"#;
         let llm = Arc::new(MockLlm::new(supersede_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("User now works at Stripe", "profile")];
 
         let result = reconciler
@@ -1347,7 +1359,7 @@ mod tests {
 
         let mut pinned = Memory::new(
             "Important: always use HTTPS",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Pinned,
             "t-001",
         );
@@ -1360,7 +1372,7 @@ mod tests {
         let merge_response = r#"{"decisions":[{"action":"MERGE","fact_index":0,"match_index":0,"merged_content":"merged text","reason":"refine"}]}"#;
         let llm = Arc::new(MockLlm::new(merge_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("Use HTTPS everywhere", "preferences")];
 
         let result = reconciler
@@ -1385,11 +1397,11 @@ mod tests {
     async fn test_uuid_to_int_mapping() {
         let (store, _dir) = setup().await;
 
-        let mut m1 = Memory::new("Fact A original", Category::Profile, MemoryType::Insight, "t-001");
+        let mut m1 = Memory::new("Fact A original", Category::new("profile"), MemoryType::Insight, "t-001");
         m1.l0_abstract = "Fact A original".to_string();
         let mut m2 = Memory::new(
             "Fact B",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1409,7 +1421,7 @@ mod tests {
         let llm = Arc::new(CapturingLlm::new(skip_response));
         let embed = Arc::new(MockEmbed);
 
-        let reconciler = Reconciler::new(llm.clone(), store.clone(), embed);
+        let reconciler = Reconciler::new(llm.clone(), store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("Fact A", "profile")];
 
         let _ = reconciler
@@ -1439,7 +1451,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User likes coffee",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1453,7 +1465,7 @@ mod tests {
         let support_response = r#"{"decisions":[{"action":"SUPPORT","fact_index":0,"match_index":0,"context_label":"work","reason":"reinforces coffee preference"}]}"#;
         let llm = Arc::new(MockLlm::new(support_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact(
             "User drinks coffee at the office daily",
             "preferences",
@@ -1483,7 +1495,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User likes coffee",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1496,7 +1508,7 @@ mod tests {
         let ctx_response = r#"{"decisions":[{"action":"CONTEXTUALIZE","fact_index":0,"match_index":0,"context_label":"evening","reason":"adds situational nuance"}]}"#;
         let llm = Arc::new(MockLlm::new(ctx_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("User prefers tea in the evening", "preferences")];
 
         let result = reconciler
@@ -1524,7 +1536,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User prefers Python",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1537,7 +1549,7 @@ mod tests {
         let contradict_response = r#"{"decisions":[{"action":"CONTRADICT","fact_index":0,"match_index":0,"reason":"now prefers Rust"}]}"#;
         let llm = Arc::new(MockLlm::new(contradict_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact(
             "User now prefers Rust over Python",
             "preferences",
@@ -1566,7 +1578,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "Deployment succeeded without issues",
-            Category::Patterns,
+            Category::new("patterns"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1579,7 +1591,7 @@ mod tests {
         let contradict_response = r#"{"decisions":[{"action":"CONTRADICT","fact_index":0,"match_index":0,"reason":"deployment actually had failures"}]}"#;
         let llm = Arc::new(MockLlm::new(contradict_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("Deployment had critical failures", "patterns")];
 
         let result = reconciler
@@ -1613,7 +1625,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "喜欢星巴克的拿铁",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1625,7 +1637,7 @@ mod tests {
 
         let llm = Arc::new(MockLlm::new("should not be called"));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("喜欢星巴克的美式", "preferences")];
 
         let result = reconciler
@@ -1644,7 +1656,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User is a backend engineer",
-            Category::Profile,
+            Category::new("profile"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1657,7 +1669,7 @@ mod tests {
         let merge_response = r#"{"decisions":[{"action":"MERGE","fact_index":0,"match_index":0,"merged_content":"User is a senior backend engineer at Stripe","reason":"profile always merges"}]}"#;
         let llm = Arc::new(MockLlm::new(merge_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact(
             "User is now a senior engineer at Stripe",
             "profile",
@@ -1691,7 +1703,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "Deployed v2.0 to production on Jan 1",
-            Category::Events,
+            Category::new("events"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1704,7 +1716,7 @@ mod tests {
         let create_response = r#"{"decisions":[{"action":"CREATE","fact_index":0,"reason":"events are append-only"}]}"#;
         let llm = Arc::new(MockLlm::new(create_response));
 
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("Deployed v2.1 hotfix on Jan 5", "events")];
 
         let result = reconciler
@@ -1731,7 +1743,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User likes coffee in the morning",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1751,7 +1763,7 @@ mod tests {
         }
 
         let llm = Arc::new(PanicLlm);
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("User likes morning coffee", "preferences")];
 
         let result = reconciler
@@ -1778,7 +1790,7 @@ mod tests {
 
         let mut existing = Memory::new(
             "User likes coffee in the morning",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
@@ -1791,7 +1803,7 @@ mod tests {
 
         let create_response = r#"{"decisions":[{"action":"CREATE","fact_index":0,"reason":"no session_id match"}]}"#;
         let llm = Arc::new(MockLlm::new(create_response));
-        let reconciler = Reconciler::new(llm, store.clone(), embed);
+        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact("User likes morning coffee", "preferences")];
 
         let result = reconciler

@@ -82,6 +82,9 @@ tempfile = "3"
 
 dashmap = "6"
 
+# SQLite (metadata storage)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Memory allocator (optional - reduces fragmentation in long-running processes)
 tikv-jemallocator = { version = "0.6", optional = true }
 
