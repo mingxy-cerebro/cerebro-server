@@ -106,7 +106,6 @@ pub struct LanceStore {
     uri: String,
     write_count: Arc<AtomicU32>,
     rebuilding: Arc<AtomicBool>,
-    gc_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl LanceStore {
@@ -165,7 +164,6 @@ impl LanceStore {
             uri: uri.to_string(),
             write_count: Arc::new(AtomicU32::new(0)),
             rebuilding: Arc::new(AtomicBool::new(false)),
-            gc_lock: Arc::new(tokio::sync::RwLock::new(())),
         })
     }
 
@@ -1968,7 +1966,6 @@ impl LanceStore {
         tags_filter: Option<&[String]>,
         category_filter: Option<&str>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
-        let _read_guard = self.gc_lock.read().await;
         let table = self.table.clone();
         let mut query = table
             .query()
@@ -2041,7 +2038,6 @@ impl LanceStore {
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
-        let _read_guard = self.gc_lock.read().await;
         let table = self.table.clone();
 
         let fts_query = lance_index::scalar::FullTextSearchQuery::new(query.to_string());
@@ -2185,7 +2181,6 @@ impl LanceStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Memory>, OmemError> {
-        let _read_guard = self.gc_lock.read().await;
 
         let mut memories = if let Some(ref q) = filter.q {
             // Full-text search path: use FTS with postfilter for other conditions
@@ -2252,7 +2247,6 @@ impl LanceStore {
     }
 
     pub async fn count_filtered(&self, filter: &ListFilter) -> Result<usize, OmemError> {
-        let _read_guard = self.gc_lock.read().await;
 
         if let Some(ref q) = filter.q {
             // Full-text search path
@@ -2441,7 +2435,6 @@ impl LanceStore {
     /// Optimize LanceDB tables: compact → prune → index optimize to reclaim disk space
     /// and maintain query performance.
     pub async fn optimize(&self) -> Result<(), OmemError> {
-        let _write_guard = self.gc_lock.write().await;
         let table = self.table.clone();
 
         // Step 1: Compact — merge small fragment files produced by frequent updates
@@ -2600,12 +2593,12 @@ impl LanceStore {
             return;
         }
         let table = self.table.clone();
+        let recall_events_table = self.recall_events_table.clone();
+        let recall_items_table = self.recall_items_table.clone();
         let uri = self.uri.clone();
         let wc = Arc::clone(&self.write_count);
         let rb = Arc::clone(&self.rebuilding);
-        let gc_lock = self.gc_lock.clone();
         tokio::spawn(async move {
-            let _write_guard = gc_lock.write().await;
             tracing::info!(write_count = count, "GC trigger: unified gc (prune + compact + index merge + orphan cleanup)");
 
             // Step 1: Prune old versions (10-minute safety window)
@@ -2659,6 +2652,34 @@ impl LanceStore {
                     tracing::warn!(error = %e, "GC: index merge failed");
                 }
             }
+
+            // Recall tables: prune + compact in parallel
+            let gc_recall_table = |tbl: Table, label: &str| {
+                let label = label.to_string();
+                async move {
+                    let _ = tbl
+                        .optimize(OptimizeAction::Prune {
+                            older_than: Some(
+                                chrono::Duration::try_minutes(10)
+                                    .unwrap_or_else(|| chrono::Duration::minutes(10)),
+                            ),
+                            delete_unverified: Some(true),
+                            error_if_tagged_old_versions: None,
+                        })
+                        .await;
+                    let _ = tbl
+                        .optimize(OptimizeAction::Compact {
+                            options: CompactionOptions::default(),
+                            remap_options: None,
+                        })
+                        .await;
+                    tracing::info!(table = %label, "GC: recall table compacted");
+                }
+            };
+            let ((), ()) = tokio::join!(
+                gc_recall_table(recall_events_table, "recall_events"),
+                gc_recall_table(recall_items_table, "recall_items"),
+            );
 
             // Step 4: Surgical orphan index cleanup — delete only orphan UUID dirs
             let active_uuids: std::collections::HashSet<String> = if let Some(wrapper) = table.dataset() {
@@ -3147,7 +3168,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), gc_lock: Arc::new(tokio::sync::RwLock::new(())) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -3208,7 +3229,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), gc_lock: Arc::new(tokio::sync::RwLock::new(())) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
