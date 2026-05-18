@@ -204,4 +204,81 @@ mod tests {
         assert!((weight - 0.75).abs() < 0.01);
         assert!((importance - 0.80).abs() < 0.01);
     }
+
+    #[test]
+    fn test_all_seed_category_weights() {
+        let conn = setup_db();
+        seed_default_categories(&conn, "tenant-1").unwrap();
+
+        let expected: &[(&str, f32, f32)] = &[
+            ("preferences", 0.90, 0.70),
+            ("identity", 0.75, 0.80),
+            ("emotional", 0.65, 0.55),
+            ("project", 0.70, 0.60),
+            ("work", 0.55, 0.45),
+            ("lessons_learned", 0.85, 0.70),
+            ("decisions", 0.80, 0.75),
+            ("success_patterns", 0.85, 0.65),
+            ("mistakes", 0.80, 0.60),
+        ];
+
+        for (name, expected_weight, expected_importance) in expected {
+            let (weight, importance): (f32, f32) = conn
+                .query_row(
+                    "SELECT admission_weight, importance_base FROM categories WHERE name = ?1 AND tenant_id = 'tenant-1'",
+                    rusqlite::params![name],
+                    |row| Ok((row.get(0).unwrap(), row.get(1).unwrap())),
+                )
+                .unwrap_or_else(|e| panic!("Failed to query category '{}': {}", name, e));
+            assert!(
+                (weight - expected_weight).abs() < 0.01,
+                "category '{}': expected weight {}, got {}",
+                name,
+                expected_weight,
+                weight
+            );
+            assert!(
+                (importance - expected_importance).abs() < 0.01,
+                "category '{}': expected importance {}, got {}",
+                name,
+                expected_importance,
+                importance
+            );
+        }
+    }
+
+    #[test]
+    fn test_alias_target_references_valid_category() {
+        let conn = setup_db();
+        seed_default_categories(&conn, "tenant-1").unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM categories WHERE tenant_id = 'tenant-1'")
+            .unwrap();
+        let category_names: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let mut alias_stmt = conn
+            .prepare("SELECT alias, target FROM category_aliases WHERE tenant_id = 'tenant-1'")
+            .unwrap();
+        let aliases: Vec<(String, String)> = alias_stmt
+            .query_map([], |row| Ok((row.get(0).unwrap(), row.get(1).unwrap())))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(!aliases.is_empty(), "Should have seed aliases");
+
+        for (alias, target) in &aliases {
+            assert!(
+                category_names.contains(target),
+                "alias '{}' references non-existent category '{}'",
+                alias,
+                target
+            );
+        }
+    }
 }

@@ -673,6 +673,7 @@ mod tests {
     fn invalidate_clears_cache() {
         let reg = setup_registry();
         reg.seed_tenant("t1").unwrap();
+        reg.get_categories("t1").unwrap();
         assert!(reg.categories.contains_key("t1"));
         reg.invalidate("t1");
         assert!(!reg.categories.contains_key("t1"));
@@ -685,5 +686,64 @@ mod tests {
         let update = CategoryUpdate::default();
         // Should succeed without error (only updated_at clause, which is len==1 → early return)
         reg.update_category("t1", "preferences", &update).unwrap();
+    }
+
+    #[test]
+    fn test_ensure_loaded_on_first_access() {
+        let reg = setup_registry();
+        reg.seed_tenant("t1").unwrap();
+
+        assert!(
+            !reg.categories.contains_key("t1"),
+            "Cache should be empty before first access"
+        );
+
+        let cats = reg.get_categories("t1").unwrap();
+        assert_eq!(cats.len(), 9);
+        assert!(
+            reg.categories.contains_key("t1"),
+            "Cache should be populated after first access"
+        );
+
+        let cats2 = reg.get_categories("t1").unwrap();
+        assert_eq!(cats2.len(), 9);
+    }
+
+    #[test]
+    fn test_weights_match_seed_data() {
+        let reg = setup_registry();
+        reg.seed_tenant("t1").unwrap();
+
+        let expected: &[(&str, f32, f32)] = &[
+            ("preferences", 0.90, 0.70),
+            ("identity", 0.75, 0.80),
+            ("emotional", 0.65, 0.55),
+            ("project", 0.70, 0.60),
+            ("work", 0.55, 0.45),
+            ("lessons_learned", 0.85, 0.70),
+            ("decisions", 0.80, 0.75),
+            ("success_patterns", 0.85, 0.65),
+            ("mistakes", 0.80, 0.60),
+        ];
+
+        for (name, expected_weight, expected_importance) in expected {
+            let prior = reg.get_prior("t1", name).unwrap();
+            assert!(
+                (prior - expected_weight).abs() < 0.01,
+                "get_prior('{}'): expected {}, got {}",
+                name,
+                expected_weight,
+                prior
+            );
+
+            let importance = reg.get_importance("t1", name).unwrap();
+            assert!(
+                (importance - expected_importance).abs() < 0.01,
+                "get_importance('{}'): expected {}, got {}",
+                name,
+                expected_importance,
+                importance
+            );
+        }
     }
 }

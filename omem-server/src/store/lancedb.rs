@@ -2885,7 +2885,7 @@ mod tests {
     }
 
     fn make_memory(tenant: &str, content: &str) -> Memory {
-        Memory::new(content, Category::Preferences, MemoryType::Insight, tenant)
+        Memory::new(content, Category::new("preferences"), MemoryType::Insight, tenant)
     }
 
     #[tokio::test]
@@ -2901,7 +2901,7 @@ mod tests {
         assert_eq!(fetched.id, mem.id);
         assert_eq!(fetched.content, "user prefers dark mode");
         assert_eq!(fetched.tenant_id, "t-001");
-        assert_eq!(fetched.category, Category::Preferences);
+        assert_eq!(fetched.category, Category::new("preferences"));
         assert_eq!(fetched.memory_type, MemoryType::Insight);
         assert_eq!(fetched.state, MemoryState::Active);
         assert_eq!(fetched.tier, Tier::Peripheral);
@@ -3037,19 +3037,19 @@ mod tests {
 
         let m1 = Memory::new(
             "dark mode pref",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
         let m2 = Memory::new(
             "another pref",
-            Category::Preferences,
+            Category::new("preferences"),
             MemoryType::Insight,
             "t-001",
         );
         let m3 = Memory::new(
             "meeting happened",
-            Category::Events,
+            Category::new("events"),
             MemoryType::Session,
             "t-001",
         );

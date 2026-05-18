@@ -56,7 +56,7 @@ mod tests {
         }
     }
 
-    async fn setup_app() -> (axum::Router, tempfile::TempDir) {
+    pub(crate) async fn setup_app() -> (axum::Router, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let uri = dir.path().to_str().expect("path");
 
@@ -110,7 +110,7 @@ mod tests {
         (build_router(state), dir)
     }
 
-    async fn create_test_tenant(app: &axum::Router) -> String {
+    pub(crate) async fn create_test_tenant(app: &axum::Router) -> String {
         let response = app
             .clone()
             .oneshot(

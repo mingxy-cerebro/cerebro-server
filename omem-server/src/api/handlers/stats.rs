@@ -854,6 +854,17 @@ mod tests {
             reranker: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
             profile_cache: Arc::new(dashmap::DashMap::new()),
+            sqlite_store: {
+                let s = Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite"));
+                {
+                    let conn = s.conn().lock().expect("lock");
+                    crate::store::sqlite_schema::create_tables(&conn).expect("tables");
+                }
+                s
+            },
+            category_registry: Arc::new(crate::domain::category::CategoryRegistry::new(
+                Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite")),
+            )),
         });
 
         (state, store_dir, space_dir, tenant_dir)
