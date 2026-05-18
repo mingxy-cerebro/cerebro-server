@@ -80,6 +80,25 @@ async fn main() {
     }
     let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
 
+    // Migration: seed categories for existing tenants
+    match tenant_store.list_all().await {
+        Ok(tenants) => {
+            for tenant in &tenants {
+                match category_registry.get_categories(&tenant.id) {
+                    Ok(cats) if cats.is_empty() => {
+                        match category_registry.seed_tenant(&tenant.id) {
+                            Ok(_) => tracing::info!("Seeded categories for tenant: {}", tenant.id),
+                            Err(e) => tracing::warn!("Failed to seed categories for tenant {}: {}", tenant.id, e),
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to check categories for tenant {}: {}", tenant.id, e),
+                    _ => {} // already seeded
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Failed to list tenants for category migration: {}", e),
+    }
+
     let embed: Arc<dyn EmbedService> = Arc::from(
         create_embed_service(&config)
             .await
