@@ -197,10 +197,15 @@ pub async fn get_stats(
 
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthInfo>,
+    Extension(auth): Extension<AuthInfo>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
     let decay = state.config.decay_config();
     let tier = state.config.tier_config();
+    let categories = state
+        .category_registry
+        .get_active_categories(&auth.tenant_id)
+        .unwrap_or_default();
+    let cat_names: Vec<&str> = categories.iter().map(|c| c.name.as_str()).collect();
 
     Ok(Json(serde_json::json!({
         "decay": {
@@ -243,7 +248,7 @@ pub async fn get_config(
             "max_spaces_per_user": 20,
             "max_members_per_team": 50
         },
-        "categories": ["profile","preferences","entities","events","cases","patterns"],
+        "categories": cat_names,
         "tiers": ["core","working","peripheral"],
         "memory_types": ["pinned","insight","session"],
         "states": ["active","archived","deleted"],

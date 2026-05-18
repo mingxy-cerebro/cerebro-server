@@ -1516,11 +1516,13 @@ pub async fn session_ingest(
             };
 
             let category: Category = topic.category.as_deref().and_then(|c| {
-                let normalized = match c.to_lowercase().as_str() {
-                    "experience" | "experiences" | "activity" | "activities" => "events",
-                    "knowledge" | "skill" | "skills" | "ability" | "abilities" => "patterns",
-                    _ => c,
-                };
+                let lower = c.to_lowercase();
+                let normalized = state
+                    .category_registry
+                    .normalize(&auth.tenant_id, &lower)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(lower);
                 normalized.parse().ok()
             }).unwrap_or_else(|| {
                 if topic.scope == "private" {
