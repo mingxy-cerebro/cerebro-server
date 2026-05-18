@@ -1,2 +1,5 @@
+[build]
+target-dir = "/mnt/d/dev/github/project/omem-server-build"
+
 [target.x86_64-unknown-linux-musl]
 # 不指定 linker — 使用 Rust 内置的 musl 工具链（支持 static-pie）
