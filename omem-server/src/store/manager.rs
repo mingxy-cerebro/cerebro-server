@@ -223,29 +223,53 @@ impl StoreManager {
     }
 
     pub async fn optimize_all_on_disk(&self) -> usize {
-        let Ok(entries) = std::fs::read_dir(&self.base_uri) else {
-            tracing::warn!("cannot read store base dir for optimization");
-            return 0;
+        let mut optimized = 0usize;
+
+        let dirs_to_scan: Vec<String> = {
+            let mut dirs = vec![self.base_uri.clone()];
+            for sub in &["personal", "team"] {
+                let path = format!("{}/{}", self.base_uri, sub);
+                if std::path::Path::new(&path).is_dir() {
+                    dirs.push(path);
+                }
+            }
+            dirs
         };
 
-        let mut optimized = 0usize;
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        for dir_path in &dirs_to_scan {
+            let Ok(entries) = std::fs::read_dir(dir_path) else {
                 continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('_') || name.starts_with('.') {
-                continue;
-            }
-            match self.get_store(&name).await {
-                Ok(store) => match store.optimize().await {
-                    Ok(()) => {
-                        optimized += 1;
-                        tracing::info!(space_id = %name, "startup_optimize_ok");
-                    }
-                    Err(e) => tracing::warn!(space_id = %name, error = %e, "startup_optimize_failed"),
-                },
-                Err(e) => tracing::warn!(space_id = %name, error = %e, "startup_open_failed"),
+            };
+            let is_root = dir_path == &self.base_uri;
+            let prefix = if is_root {
+                String::new()
+            } else {
+                let sub = dir_path.strip_prefix(&format!("{}/", self.base_uri)).unwrap_or("");
+                format!("{}/", sub)
+            };
+
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('_') || name.starts_with('.') || name.ends_with(".lance") {
+                    continue;
+                }
+                if !is_root && !name.contains('-') {
+                    continue;
+                }
+                let space_id = format!("{}{}", prefix, name);
+                match self.get_store(&space_id).await {
+                    Ok(store) => match store.optimize().await {
+                        Ok(()) => {
+                            optimized += 1;
+                            tracing::info!(space_id = %space_id, "startup_optimize_ok");
+                        }
+                        Err(e) => tracing::warn!(space_id = %space_id, error = %e, "startup_optimize_failed"),
+                    },
+                    Err(e) => tracing::warn!(space_id = %space_id, error = %e, "startup_open_failed"),
+                }
             }
         }
         optimized

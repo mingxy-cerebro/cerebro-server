@@ -106,6 +106,8 @@ pub struct LanceStore {
     uri: String,
     write_count: Arc<AtomicU32>,
     rebuilding: Arc<AtomicBool>,
+    recall_write_count: Arc<AtomicU32>,
+    recall_rebuilding: Arc<AtomicBool>,
 }
 
 impl LanceStore {
@@ -164,6 +166,8 @@ impl LanceStore {
             uri: uri.to_string(),
             write_count: Arc::new(AtomicU32::new(0)),
             rebuilding: Arc::new(AtomicBool::new(false)),
+            recall_write_count: Arc::new(AtomicU32::new(0)),
+            recall_rebuilding: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -830,7 +834,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to insert recall_event: {e}")))?;
-        self.after_mutation();
+        self.after_recall_mutation();
         Ok(())
     }
 
@@ -884,7 +888,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to batch insert recall_items: {e}")))?;
-        self.after_mutation();
+        self.after_recall_mutation();
         Ok(())
     }
 
@@ -1010,7 +1014,7 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("update recall_event profile_injected failed: {e}")))?;
 
-        self.after_mutation();
+        self.after_recall_mutation();
         Ok(())
     }
 
@@ -1063,7 +1067,7 @@ impl LanceStore {
             .delete(&filter)
             .await
             .map_err(|e| OmemError::Storage(format!("failed to delete recall_events by session: {e}")))?;
-        self.after_mutation();
+        self.after_recall_mutation();
         Ok(())
     }
 
@@ -2748,6 +2752,56 @@ impl LanceStore {
         });
     }
 
+    /// Called after every recall table mutation to trigger periodic GC for recall tables.
+    /// Separate counter from memories table — recall tables can have much higher write frequency.
+    fn after_recall_mutation(&self) {
+        let count = self.recall_write_count.fetch_add(1, Ordering::Relaxed) + 1;
+        const RECALL_GC_THRESHOLD: u32 = 20;
+        if count < RECALL_GC_THRESHOLD {
+            return;
+        }
+        if self.recall_rebuilding.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return;
+        }
+        let recall_events_table = self.recall_events_table.clone();
+        let recall_items_table = self.recall_items_table.clone();
+        let wc = Arc::clone(&self.recall_write_count);
+        let rb = Arc::clone(&self.recall_rebuilding);
+        tokio::spawn(async move {
+            tracing::info!(write_count = count, "recall GC trigger: pruning + compacting recall tables");
+
+            let gc_recall_table = |tbl: Table, label: &str| {
+                let label = label.to_string();
+                async move {
+                    let _ = tbl
+                        .optimize(OptimizeAction::Prune {
+                            older_than: Some(
+                                chrono::Duration::try_minutes(5)
+                                    .unwrap_or_else(|| chrono::Duration::minutes(5)),
+                            ),
+                            delete_unverified: Some(true),
+                            error_if_tagged_old_versions: None,
+                        })
+                        .await;
+                    let _ = tbl
+                        .optimize(OptimizeAction::Compact {
+                            options: CompactionOptions::default(),
+                            remap_options: None,
+                        })
+                        .await;
+                    tracing::info!(table = %label, "recall GC: compacted");
+                }
+            };
+            let ((), ()) = tokio::join!(
+                gc_recall_table(recall_events_table, "recall_events"),
+                gc_recall_table(recall_items_table, "recall_items"),
+            );
+
+            wc.store(0, Ordering::Relaxed);
+            rb.store(false, Ordering::Release);
+        });
+    }
+
     /// Lazy compact: check actual version count on disk, auto-compact when > threshold.
     /// Prevents the version bloat that causes OOM (44435 versions → 2.5G memory).
     /// NOTE: No longer called from write path. Used by PruneDaemon background task only.
@@ -3168,7 +3222,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), recall_write_count: Arc::new(AtomicU32::new(0)), recall_rebuilding: Arc::new(AtomicBool::new(false)) };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -3229,7 +3283,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), recall_write_count: Arc::new(AtomicU32::new(0)), recall_rebuilding: Arc::new(AtomicBool::new(false)) };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();
