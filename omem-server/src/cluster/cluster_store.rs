@@ -12,6 +12,7 @@ use lancedb::Table;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::domain::category::Category;
 use crate::domain::cluster::MemoryCluster;
 use crate::domain::error::OmemError;
 
@@ -332,7 +333,7 @@ impl ClusterStore {
             space_id: get_str("space_id")?,
             title: get_str("title")?,
             summary: get_str("summary")?,
-            category: get_str("category")?.parse().unwrap(),
+            category: get_str("category")?.parse().unwrap_or_else(|_| Category::new("profile")),
             member_count: batch
                 .column_by_name("member_count")
                 .and_then(|col| col.as_any().downcast_ref::<UInt32Array>())

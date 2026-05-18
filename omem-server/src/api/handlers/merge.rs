@@ -7,6 +7,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::api::server::{personal_space_id, AppState};
+use crate::domain::category::Category;
 use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::tenant::AuthInfo;
@@ -129,7 +130,7 @@ pub async fn merge_memories(
         primary.l1_overview = result.l1_overview;
         primary.l2_content = result.l2_content.clone();
         primary.content = result.l2_content;
-        primary.category = result.category.parse().unwrap();
+        primary.category = result.category.parse().unwrap_or_else(|_| Category::new("profile"));
         for tag in result.tags {
             all_tags.insert(tag);
         }

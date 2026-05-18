@@ -306,15 +306,15 @@ impl Reconciler {
                 updated.l2_content = fact.l2_content.clone();
                 updated.tags = fact.tags.clone();
                 updated.confidence = fact.quality_score.clamp(0.1, 1.0);
-        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
-        updated.importance = category_importance(&self.registry, &self.tenant_id, &category, fact.quality_score);
-        updated.updated_at = chrono::Utc::now().to_rfc3339();
+                let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
+                updated.importance = category_importance(&self.registry, &self.tenant_id, &category, fact.quality_score);
+                updated.updated_at = chrono::Utc::now().to_rfc3339();
 
-        let embeddings = self.embed.embed(&[updated.l0_abstract.clone()]).await?;
-        let vector = embeddings.first().map(|v| v.as_slice());
+                let embeddings = self.embed.embed(&[updated.l0_abstract.clone()]).await?;
+                let vector = embeddings.first().map(|v| v.as_slice());
 
-        self.store.update(&updated, vector).await?;
-        merged.push(updated);
+                self.store.update(&updated, vector).await?;
+                merged.push(updated);
             } else {
                 remaining.push(fact.clone());
             }
