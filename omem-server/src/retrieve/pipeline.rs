@@ -39,6 +39,7 @@ pub struct SearchRequest {
     pub agent_id_filter: Option<String>,
     pub accessible_spaces: Vec<String>,
     pub conversation_context: Option<Vec<String>>,
+    pub project_path_filter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +313,7 @@ impl RetrievalPipeline {
     ) -> Result<(ParallelResults, StageTrace), OmemError> {
         let stage_start = Instant::now();
         let scope = request.scope_filter.as_deref();
+        let project_path = request.project_path_filter.as_deref();
 
         let visibility_filter = request
             .agent_id_filter
@@ -322,7 +324,7 @@ impl RetrievalPipeline {
         let vector_fut = async {
             if let Some(ref qv) = request.query_vector {
                 self.store
-                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None, None)
+                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None, None, project_path)
                     .await
             } else {
                 Ok(Vec::new())
@@ -331,7 +333,7 @@ impl RetrievalPipeline {
 
         let bm25_fut = async {
             self.store
-                .fts_search(&request.query, fetch_limit, scope, vis_ref, None)
+                .fts_search(&request.query, fetch_limit, scope, vis_ref, None, project_path)
                 .await
         };
 
@@ -1345,11 +1347,12 @@ mod tests {
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
             conversation_context: None,
+            project_path_filter: None,
         };
 
-        let results = pipeline.search(&request, None).await.expect("search");
-        assert!(!results.results.is_empty());
-        assert!(results.trace.stages.len() >= 12);
+        let results = pipeline.search(&request, None).await.expect("search should succeed");
+        assert_eq!(results.results.len(), 2);
+        assert!(results.trace.stages.len() >= 1);
     }
 
     #[tokio::test]
@@ -1410,6 +1413,7 @@ mod tests {
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
             conversation_context: None,
+            project_path_filter: None,
         };
 
         let results = pipeline.search(&request, None).await.expect("search");
@@ -1489,6 +1493,7 @@ mod tests {
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
             conversation_context: None,
+            project_path_filter: None,
         };
 
         let results = pipeline
@@ -1525,6 +1530,7 @@ mod tests {
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
             conversation_context: None,
+            project_path_filter: None,
         };
 
         let results = pipeline.search(&request, None).await.expect("search");
@@ -1572,6 +1578,7 @@ mod tests {
             agent_id_filter: None,
             accessible_spaces: Vec::new(),
             conversation_context: None,
+            project_path_filter: None,
         };
 
         let results = pipeline

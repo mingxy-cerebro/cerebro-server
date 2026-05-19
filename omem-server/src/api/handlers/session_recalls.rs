@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::api::server::{personal_space_id, AppState};
 use crate::domain::error::OmemError;
-use crate::domain::memory::Memory;
+use crate::domain::memory::{sanitize_project_path, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::store::lancedb::{RecallEvent, RecallItem};
 use crate::retrieve::pipeline::{RetrievalPipeline, SearchOverrides, SearchRequest, SearchResult};
@@ -56,6 +56,8 @@ pub struct ShouldRecallRequest {
     pub refine_strategy: Option<String>,
     #[serde(default)]
     pub refine_medium_chars: Option<usize>,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -136,6 +138,13 @@ pub async fn should_recall(
             "query_text cannot be empty".to_string(),
         ));
     }
+
+    let sanitized_project_path = match body.project_path.as_deref() {
+        Some(pp) if !pp.is_empty() => Some(sanitize_project_path(pp).map_err(|e| {
+            OmemError::Validation(format!("invalid project_path: {e}"))
+        })?),
+        _ => None,
+    };
 
     // Sanitize query_text: strip system injection artifacts (server-side fallback)
     let sanitized_query = crate::api::handlers::memory::clean_message_content(&body.query_text);
@@ -329,6 +338,7 @@ pub async fn should_recall(
                 agent_id_filter: body.agent_id.clone(),
                 accessible_spaces: accessible_space_ids.clone(),
                 conversation_context: body.conversation_context.clone(),
+                project_path_filter: sanitized_project_path.clone(),
             };
             match pipeline.search(&search_req, Some(&overrides)).await {
                 Ok(results) => {
@@ -372,9 +382,10 @@ pub async fn should_recall(
             tags_filter: None,
             source_filter: None,
             agent_id_filter: body.agent_id.clone(),
-            accessible_spaces: accessible_space_ids.clone(),
-            conversation_context: body.conversation_context.clone(),
-        };
+                accessible_spaces: accessible_space_ids.clone(),
+                conversation_context: body.conversation_context.clone(),
+                project_path_filter: sanitized_project_path.clone(),
+            };
         match pipeline.search(&global_search_req, Some(&overrides)).await {
             Ok(results) => {
                 for d in results.discarded {
@@ -807,4 +818,43 @@ pub async fn create_recall_event(
     }
 
     Ok(Json(serde_json::json!({ "ok": true, "event_id": event_id })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_recall_request_deserializes_project_path() {
+        let json = r#"{
+            "query_text": "test query",
+            "session_id": "sess_123",
+            "project_path": "/home/user/project"
+        }"#;
+        let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.project_path.as_deref(), Some("/home/user/project"));
+        assert_eq!(req.query_text, "test query");
+        assert_eq!(req.session_id, "sess_123");
+    }
+
+    #[test]
+    fn test_should_recall_request_project_path_optional() {
+        let json = r#"{
+            "query_text": "test query",
+            "session_id": "sess_123"
+        }"#;
+        let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
+        assert!(req.project_path.is_none());
+    }
+
+    #[test]
+    fn test_should_recall_request_project_path_null() {
+        let json = r#"{
+            "query_text": "test query",
+            "session_id": "sess_123",
+            "project_path": null
+        }"#;
+        let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
+        assert!(req.project_path.is_none());
+    }
 }

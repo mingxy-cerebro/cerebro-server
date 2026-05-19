@@ -76,6 +76,8 @@ pub struct IngestRequest {
     pub mode: IngestMode,
     #[serde(default)]
     pub project_name: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -90,4 +92,43 @@ pub enum IngestMode {
 pub struct IngestResponse {
     pub task_id: String,
     pub stored_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ingest_request_parse_project_path() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "hello"}],
+            "tenant_id": "t-001",
+            "project_path": "/home/user/my-project"
+        }"#;
+        let req: IngestRequest = serde_json::from_str(json).expect("parse");
+        assert_eq!(req.project_path.as_deref(), Some("/home/user/my-project"));
+    }
+
+    #[test]
+    fn test_ingest_request_project_path_default_none() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "hello"}],
+            "tenant_id": "t-001"
+        }"#;
+        let req: IngestRequest = serde_json::from_str(json).expect("parse");
+        assert!(req.project_path.is_none());
+    }
+
+    #[test]
+    fn test_ingest_request_project_path_empty_string() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "hello"}],
+            "tenant_id": "t-001",
+            "project_path": ""
+        }"#;
+        let req: IngestRequest = serde_json::from_str(json).expect("parse");
+        // Empty string is preserved as Some("") in the request; normalization
+        // to None happens in create_fact_memory() at write time.
+        assert_eq!(req.project_path.as_deref(), Some(""));
+    }
 }

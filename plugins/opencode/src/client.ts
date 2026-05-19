@@ -21,6 +21,7 @@ export interface IngestOptions {
   entityContext?: string;
   tags?: string[];
   projectName?: string;
+  projectPath?: string;
 }
 
 export interface SearchResult {
@@ -192,6 +193,7 @@ export class CerebroClient {
     sessionId?: string,
     visibility?: string,
     category?: string,
+    projectPath?: string,
   ): Promise<MemoryDto | null> {
     const safeContent = sanitizeContent(content, this.getCfg("content", "maxContentChars", 30000));
     return this.post<MemoryDto>("/v1/memories", {
@@ -203,6 +205,7 @@ export class CerebroClient {
       session_id: sessionId,
       visibility,
       category,
+      project_path: projectPath,
     });
   }
 
@@ -211,11 +214,13 @@ export class CerebroClient {
     limit = 10,
     scope?: string,
     tags?: string[],
+    projectPath?: string,
   ): Promise<SearchResult[]> {
     const safeQ = truncateQuery(query, this.getCfg("content", "maxQueryLength", 200));
     const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
     if (scope) params.set("scope", scope);
     if (tags && tags.length > 0) params.set("tags", tags.join(","));
+    if (projectPath) params.set("project_path", projectPath);
     const res = await this.request<SearchResponse>(
       `/v1/memories/search?${params}`,
       {},
@@ -259,6 +264,7 @@ export class CerebroClient {
       entity_context: opts.entityContext,
       tags: opts.tags,
       project_name: opts.projectName,
+      project_path: opts.projectPath,
     });
   }
 
@@ -350,6 +356,7 @@ export class CerebroClient {
       refine_strategy?: string;
       refine_medium_chars?: number;
     },
+    projectPath?: string,
   ): Promise<ShouldRecallResponse | null> {
     const res = await this.post<ShouldRecallResponse>("/v1/should-recall", {
       query_text,
@@ -360,6 +367,7 @@ export class CerebroClient {
       project_tags,
       conversation_context,
       ...recall_overrides,
+      project_path: projectPath,
     }, 20_000);
     return res;
   }
@@ -410,6 +418,7 @@ export class CerebroClient {
     agentId?: string,
     sessionTitle?: string,
     projectName?: string,
+    projectPath?: string,
   ): Promise<unknown> {
     return this.post("/v1/memories/session-ingest", {
       messages,
@@ -417,6 +426,7 @@ export class CerebroClient {
       agent_id: agentId,
       session_title: sessionTitle,
       project_name: projectName,
+      project_path: projectPath,
     }, 60000);
   }
 }

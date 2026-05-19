@@ -297,7 +297,7 @@ function buildClusteredContextBlock(clustered: import("./client.js").ClusteredRe
   ].join("\n");
 }
 
-export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string) {
+export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string, directory?: string) {
   const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
   const maxRecallResults = config.recall?.maxRecallResults ?? 10;
   const fetchMultiplier = config.recall?.fetchMultiplier ?? 3;
@@ -367,6 +367,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
           refine_strategy: refineStrategy,
           refine_medium_chars: refineMediumChars,
         },
+        directory || process.env.OMEM_PROJECT_DIR,
       );
 
       if (!shouldRecallRes) {
@@ -626,7 +627,7 @@ export function keywordDetectionHook(_client: CerebroClient, _containerTags: str
   };
 }
 
-export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<OmemPluginConfig> = {}, agentId?: string) {
+export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<OmemPluginConfig> = {}, agentId?: string, directory?: string) {
   const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
     input: { sessionID?: string },
@@ -677,16 +678,21 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
 
     // Resolve project name (shared by ingest + poll)
     let projectName: string | undefined;
+    let projectPath: string | undefined;
     try {
       if (sdkClient && input.sessionID) {
         const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
         logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
+        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
         projectName = sessionInfo?.data?.directory
           ? await detectProjectName(sessionInfo.data.directory)
           : undefined;
       }
     } catch (e) {
       logErr("compactingHook detectProjectName failed", { error: String(e) });
+    }
+    if (!projectPath) {
+      projectPath = directory || process.env.OMEM_PROJECT_DIR;
     }
 
     // --- Phase 1: Ingest tracked messages from sessionMessages (if available) ---
@@ -706,6 +712,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
               sessionId: effectiveSessionId,
               projectName: projectName,
               agentId: effectiveAgentId,
+              projectPath,
             });
             logInfo("compactingHook ingestMessages result", { result: result === null ? "null(blocked)" : "ok" });
             if (result === null) {
@@ -734,6 +741,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       const pollSessionId = input.sessionID;
       const pollEffectiveSessionId = effectiveSessionId;
       const pollProjectName = projectName;
+      const pollProjectPath = projectPath;
       const pollAgentId = effectiveAgentId;
 
       let baselineMsgIds: Set<string> = new Set();
@@ -843,6 +851,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
                         sessionId: pollEffectiveSessionId,
                         projectName: pollProjectName,
                         agentId: pollAgentId,
+                        projectPath: pollProjectPath,
                       },
                     );
                     logInfo("compactingHook: compact summary store result", {
@@ -881,6 +890,7 @@ export function autocontinueHook(
   sdkClient?: any,
   config: Partial<OmemPluginConfig> = {},
   agentId?: string,
+  directory?: string,
 ) {
   const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
@@ -936,13 +946,18 @@ export function autocontinueHook(
       }
 
       let projectName: string | undefined;
+      let projectPath: string | undefined;
       try {
         const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
+        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
         projectName = sessionInfo?.data?.directory
           ? await detectProjectName(sessionInfo.data.directory)
           : undefined;
       } catch (e) {
         logErr("autocontinueHook detectProjectName failed", { error: String(e) });
+      }
+      if (!projectPath) {
+        projectPath = directory || process.env.OMEM_PROJECT_DIR;
       }
 
       const messages = [{ role: "user" as const, content: summaryText }];
@@ -960,6 +975,7 @@ export function autocontinueHook(
         sessionId: effectiveSessionId,
         projectName: projectName,
         agentId: effectiveAgentId,
+        projectPath,
       });
 
       logInfo("autocontinueHook store result", { result: result === null ? "null(blocked)" : "ok" });
@@ -1052,6 +1068,7 @@ export function sessionIdleHook(
   agentId?: string,
   config: Partial<OmemPluginConfig> = {},
   onAgentResolved?: (name: string) => void,
+  directory?: string,
 ) {
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
@@ -1118,6 +1135,7 @@ export function sessionIdleHook(
 
         let sessionTitle: string | undefined;
         let projectName: string | undefined;
+        let projectPath: string | undefined;
         let effectiveAgentId = agentId || "opencode";
         try {
           const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
@@ -1126,11 +1144,15 @@ export function sessionIdleHook(
             onAgentResolved?.(effectiveAgentId);
           }
           sessionTitle = sessionInfo?.data?.title;
+          projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
           projectName = sessionInfo?.data?.directory
             ? await detectProjectName(sessionInfo.data.directory)
             : undefined;
         } catch (e) {
           logErr("sessionIdleHook detectProjectName failed", { error: String(e) });
+        }
+        if (!projectPath) {
+          projectPath = directory || process.env.OMEM_PROJECT_DIR;
         }
 
         logDebug("sessionIdleHook resolved agentId", { effectiveAgentId, fallbackAgentId: agentId });
@@ -1143,7 +1165,7 @@ export function sessionIdleHook(
 
         try {
           logInfo("sessionIdleHook sessionIngest called", { msgCount: conversationMessages.length, sessionId: sessionID, agentId: effectiveAgentId, title: String(sessionTitle) });
-          await cerebroClient.sessionIngest(conversationMessages, sessionID, effectiveAgentId, sessionTitle, projectName);
+          await cerebroClient.sessionIngest(conversationMessages, sessionID, effectiveAgentId, sessionTitle, projectName, projectPath);
           logInfo("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
             processedMessageIds.add(id);

@@ -206,7 +206,7 @@ impl IntelligenceTask {
             .map_err(|e| OmemError::Internal(format!("reconcile semaphore: {e}")))?;
         info!(task_id = %self.task_id, "reconcile lock acquired");
 
-        match self.reconciler.reconcile(&all_facts, &self.tenant_id, None, None).await {
+        match self.reconciler.reconcile(&all_facts, &self.tenant_id, None, None, None).await {
             Ok(memories) => {
                 let fact_count = all_facts.len();
                 let mem_count = memories.len();

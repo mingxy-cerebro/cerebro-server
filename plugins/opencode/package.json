@@ -1,7 +1,7 @@
 {
   "name": "@mingxy/cerebro",
   "version": "1.12.7",
-  "description": "Cerebro persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools with clustering",
+  "description": "Cerebro persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools with clustering, project-scoped memory isolation",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -24,7 +24,8 @@
     "ai-agent",
     "persistent-memory",
     "cerebro",
-    "clustering"
+    "clustering",
+    "project-isolation"
   ],
   "author": "mingxy-cerebro",
   "license": "Apache-2.0",

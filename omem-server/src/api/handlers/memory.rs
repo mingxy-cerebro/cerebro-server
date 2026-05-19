@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::server::{personal_space_id, AppState};
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
-use crate::domain::memory::Memory;
+use crate::domain::memory::{sanitize_project_path, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
@@ -35,6 +35,7 @@ pub struct CreateMemoryBody {
     pub session_id: Option<String>,
     pub entity_context: Option<String>,
     pub project_name: Option<String>,
+    pub project_path: Option<String>,
 
     // Direct single memory creation
     pub content: Option<String>,
@@ -68,6 +69,8 @@ pub struct SearchQuery {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub check_stale: bool,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 const MAX_SEARCH_LIMIT: usize = 1000;
@@ -172,6 +175,13 @@ pub async fn create_memory(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
+    let project_path = match body.project_path.as_deref() {
+        Some(pp) if !pp.is_empty() => Some(sanitize_project_path(pp).map_err(|e| {
+            OmemError::Validation(format!("invalid project_path: {e}"))
+        })?),
+        _ => None,
+    };
+
     if let Some(messages) = body.messages {
         if messages.is_empty() {
             return Err(OmemError::Validation("messages array is empty".to_string()));
@@ -200,6 +210,7 @@ pub async fn create_memory(
             entity_context: body.entity_context,
             mode,
             project_name,
+            project_path: project_path.clone(),
         };
 
         let session_store = state
@@ -248,6 +259,7 @@ pub async fn create_memory(
     memory.tags = body.tags.unwrap_or_default();
     memory.source = body.source;
     memory.agent_id = auth.agent_id.clone();
+    memory.project_path = project_path;
     if let Some(tier_str) = body.tier {
         memory.tier = tier_str
             .parse()
@@ -271,6 +283,8 @@ pub async fn create_memory(
         } else if let Some(ref agent_id) = auth.agent_id {
             memory.owner_agent_id = agent_id.clone();
         }
+        // Private memories are global — never bound to a project_path
+        memory.project_path = None;
     }
 
     let vectors = state
@@ -323,6 +337,14 @@ pub async fn search_memories(
         ));
     }
 
+    // Sanitize project_path to prevent path traversal and SQL injection
+    let sanitized_project_path = match params.project_path.as_deref() {
+        Some(pp) if !pp.is_empty() => Some(sanitize_project_path(pp).map_err(|e| {
+            OmemError::Validation(format!("invalid project_path: {e}"))
+        })?),
+        _ => None,
+    };
+
     let search_limit = params.limit.min(MAX_SEARCH_LIMIT);
 
     let vectors = state
@@ -361,6 +383,7 @@ pub async fn search_memories(
             agent_id_filter: params.agent_id.clone(),
             accessible_spaces: accessible_space_ids.clone(),
             conversation_context: None,
+            project_path_filter: sanitized_project_path.clone(),
         };
 
         let mut retrieval_pipeline = RetrievalPipeline::new(store.clone())
@@ -449,6 +472,7 @@ pub async fn search_memories(
         let space_id = acc.space_id.clone();
         let weight = acc.weight;
 
+        let project_path_filter = sanitized_project_path.clone();
         let accessible_spaces_clone = accessible_space_ids.clone();
         let reranker_clone = state.reranker.clone();
         let decay_cfg = cross_space_decay_config.clone();
@@ -466,6 +490,7 @@ pub async fn search_memories(
                 agent_id_filter,
                 accessible_spaces: accessible_spaces_clone,
                 conversation_context: None,
+                project_path_filter,
             };
             let mut pipeline = RetrievalPipeline::new(store).with_decay_config(decay_cfg);
             if let Some(reranker) = reranker_clone {
@@ -1040,6 +1065,37 @@ pub async fn delete_all_memories(
     })))
 }
 
+// ── Backfill Project Path ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct BackfillProjectPathBody {
+    pub project_path: String,
+}
+
+pub async fn backfill_project_path(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<BackfillProjectPathBody>,
+) -> Result<Json<serde_json::Value>, OmemError> {
+    if body.project_path.is_empty() {
+        return Err(OmemError::Validation("project_path cannot be empty".to_string()));
+    }
+
+    let sanitized = sanitize_project_path(&body.project_path).map_err(|e| {
+        OmemError::Validation(format!("invalid project_path: {e}"))
+    })?;
+
+    let store = state
+        .store_manager
+        .get_store(&personal_space_id(&auth.tenant_id))
+        .await?;
+
+    let filter = "project_path IS NULL AND visibility != 'private'";
+    let updated_count = store.batch_update_project_path(&sanitized, filter).await?;
+
+    Ok(Json(serde_json::json!({ "updated_count": updated_count })))
+}
+
 // ── Tier Changes ────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1305,6 +1361,8 @@ pub struct SessionIngestBody {
     pub agent_id: Option<String>,
     pub session_title: Option<String>,
     pub project_name: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1368,6 +1426,12 @@ pub async fn session_ingest(
             .collect::<String>()
     }).filter(|s| !s.is_empty());
     tracing::info!(raw_project_name = ?body.project_name, clean_project_name = ?project_name, "session_ingest: project_name received");
+    let project_path = match body.project_path.as_deref() {
+        Some(pp) if !pp.is_empty() => Some(sanitize_project_path(pp).map_err(|e| {
+            OmemError::Validation(format!("invalid project_path: {e}"))
+        })?),
+        _ => None,
+    };
 
     // Fire-and-forget: process in background, return 202 immediately
     tokio::spawn(async move {
@@ -1585,9 +1649,12 @@ pub async fn session_ingest(
             memory.session_id = session_id.clone();
             memory.agent_id = agent_id.clone();
             memory.tags = tags.clone();
+            memory.project_path = project_path.clone();
             if topic.scope == "private" {
                 memory.scope = "private".to_string();
                 memory.visibility = "private".to_string();
+                // Private memories are global — never bound to a project_path
+                memory.project_path = None;
             }
 
             let apply_append = |mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String], topic_title: &str, topic_overview: Option<&str>, topic_detail: Option<&str>| {
@@ -1841,6 +1908,7 @@ pub async fn session_ingest(
                             None,
                             None,
                             Some("preferences"),
+                            None,
                         ).await {
                             Ok(candidates) => {
                                 let matched = candidates.iter().find(|(m, _)| {

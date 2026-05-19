@@ -6,6 +6,7 @@ export interface ToolContext {
   agentId?: string;
   getSessionId: () => string | undefined;
   getAgentName?: () => string;
+  getProjectPath?: () => string | undefined;
 }
 
 export function buildTools(client: CerebroClient, containerTags: string[], context: ToolContext) {
@@ -16,7 +17,10 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "Use when the user explicitly asks to remember something, " +
         "or when you identify important preferences, facts, or decisions worth preserving. " +
         "IMPORTANT: Before calling, you MUST analyze: (1) Which category fits best? (2) Is this project-specific or cross-project? (3) Does it contain sensitive data? (4) Are tags accurate and descriptive? " +
-        "Every memory MUST have a correct category and at least 1 meaningful tag.",
+        "Every memory MUST have a correct category and at least 1 meaningful tag. " +
+        "Memories are automatically scoped to the current project via project_path. " +
+        "Set scope='global' for cross-project memories that should be visible everywhere. " +
+        "Private memories (visibility='private') are always agent-scoped and not bound to any project — use for sensitive data.",
       args: {
         content: tool.schema.string().describe(
           "The information to remember. MUST be: atomic (one fact per memory), complete (self-contained without context), and precise (no ambiguity). " +
@@ -77,6 +81,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           context.getSessionId(),
           args.visibility,
           args.category,
+          context.getProjectPath?.(),
         );
         if (!result) return JSON.stringify({ ok: false, error: "The Cerebro server may be unavailable." });
         return JSON.stringify({ ok: true, id: result.id, tags: result.tags });
@@ -86,7 +91,10 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
     memory_search: tool({
       description:
         "Search the user's long-term memory by semantic similarity. " +
-        "Use to recall previously stored preferences, facts, or context.",
+        "Use to recall previously stored preferences, facts, or context. " +
+        "Searches are automatically filtered by the current project_path. " +
+        "Global-scope memories and memories without a project_path are always included in results. " +
+        "Private memories are visible only to the creating agent.",
       args: {
         query: tool.schema.string().describe("Natural-language search query"),
         limit: tool.schema
@@ -104,6 +112,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           args.limit ?? 10,
           args.scope,
           containerTags,
+          context.getProjectPath?.(),
         );
         if (results.length === 0) return JSON.stringify({ ok: true, count: 0, results: [] });
         const items = results.map((r) => ({
@@ -189,7 +198,9 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
 
     memory_ingest: tool({
       description:
-        "Ingest conversation messages for intelligent extraction. The system extracts atomic facts, deduplicates, and reconciles with existing memories.",
+        "Ingest conversation messages for intelligent extraction. The system extracts atomic facts, deduplicates, and reconciles with existing memories. " +
+        "Extracted memories are automatically scoped to the current project via project_path. " +
+        "Global-scope memories are visible across all projects.",
       args: {
         messages: tool.schema
           .array(
@@ -219,6 +230,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           tags: args.tags,
           sessionId: args.session_id,
           agentId: effectiveAgentId,
+          projectPath: context.getProjectPath?.(),
         });
         if (result === null) return JSON.stringify({ ok: false, error: "Ingestion failed" });
         return JSON.stringify({ ok: true, result });

@@ -121,7 +121,7 @@ impl ProfileService {
             Some(q) => {
                 let results = self
                     .store
-                    .fts_search(q, 10, None, None, None)
+                    .fts_search(q, 10, None, None, None, None)
                     .await
                     .unwrap_or_default();
                 Some(

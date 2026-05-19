@@ -396,7 +396,7 @@ pub async fn cross_reconcile(
                 None => continue,
             };
 
-            let similar = match bg_store.vector_search(query_vec, 6, 0.85, None, None, None, None).await {
+            let similar = match bg_store.vector_search(query_vec, 6, 0.85, None, None, None, None, None).await {
                 Ok(s) => s,
                 Err(e) => {
                     error!(task_id = %bg_task_id, error = %e, "cross-reconcile: vector search failed");

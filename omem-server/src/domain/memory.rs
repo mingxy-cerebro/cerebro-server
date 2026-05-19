@@ -6,6 +6,25 @@ use crate::domain::relation::MemoryRelation;
 use crate::domain::space::Provenance;
 use crate::domain::types::{MemoryState, MemoryType, Tier};
 
+/// Sanitize a project_path to prevent path traversal and SQL injection.
+///
+/// Rules:
+/// - Max 512 characters
+/// - No `..` (path traversal)
+/// - No `'`, `;`, `--` (SQL injection vectors)
+pub fn sanitize_project_path(path: &str) -> Result<String, String> {
+    if path.len() > 512 {
+        return Err("project_path too long (max 512 chars)".to_string());
+    }
+    if path.contains("..") {
+        return Err("project_path contains path traversal".to_string());
+    }
+    if path.contains('\'') || path.contains(';') || path.contains("--") {
+        return Err("project_path contains invalid characters".to_string());
+    }
+    Ok(path.to_string())
+}
+
 /// Lightweight digest of a memory for summary queries.
 /// Avoids loading full content and vectors.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,6 +86,8 @@ pub struct Memory {
     pub is_cluster_anchor: bool,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 impl Memory {
@@ -112,6 +133,7 @@ impl Memory {
             cluster_id: None,
             is_cluster_anchor: false,
             metadata: None,
+            project_path: None,
         }
     }
 
@@ -209,5 +231,89 @@ mod tests {
         let parsed = Uuid::parse_str(&mem.id);
         assert!(parsed.is_ok());
         assert_eq!(parsed.unwrap().get_version_num(), 4);
+    }
+
+    #[test]
+    fn test_memory_default_project_path_none() {
+        let mem = Memory::new(
+            "test project_path",
+            Category::new("events"),
+            MemoryType::Session,
+            "t-001",
+        );
+        assert_eq!(mem.project_path, None);
+    }
+
+    #[test]
+    fn sanitize_valid_path_passes() {
+        assert_eq!(
+            sanitize_project_path("/mnt/d/dev/project"),
+            Ok("/mnt/d/dev/project".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_empty_path_passes() {
+        assert_eq!(sanitize_project_path(""), Ok("".to_string()));
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal() {
+        assert_eq!(
+            sanitize_project_path("../etc/passwd"),
+            Err("project_path contains path traversal".to_string())
+        );
+        assert_eq!(
+            sanitize_project_path("foo/../../bar"),
+            Err("project_path contains path traversal".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_sql_injection() {
+        assert_eq!(
+            sanitize_project_path("'; DROP TABLE memories; --"),
+            Err("project_path contains invalid characters".to_string())
+        );
+        assert_eq!(
+            sanitize_project_path("path;rm -rf"),
+            Err("project_path contains invalid characters".to_string())
+        );
+        assert_eq!(
+            sanitize_project_path("path'OR'1"),
+            Err("project_path contains invalid characters".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_too_long() {
+        let long_path = "a".repeat(513);
+        assert_eq!(
+            sanitize_project_path(&long_path),
+            Err("project_path too long (max 512 chars)".to_string())
+        );
+        let max_path = "a".repeat(512);
+        assert_eq!(sanitize_project_path(&max_path), Ok(max_path));
+    }
+
+    #[test]
+    fn test_project_path_serde_roundtrip() {
+        let mut mem = Memory::new(
+            "serde test",
+            Category::new("preferences"),
+            MemoryType::Insight,
+            "t-002",
+        );
+        mem.project_path = Some("/home/user/project".to_string());
+
+        let json = serde_json::to_string(&mem).unwrap();
+        let parsed: Memory = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.project_path, Some("/home/user/project".to_string()));
+
+        mem.project_path = None;
+        let json2 = serde_json::to_string(&mem).unwrap();
+        let parsed2: Memory = serde_json::from_str(&json2).unwrap();
+        assert_eq!(parsed2.project_path, None);
     }
 }

@@ -594,6 +594,7 @@ impl LanceStore {
             Field::new("cluster_id", DataType::Utf8, true),
             Field::new("is_cluster_anchor", DataType::Boolean, true),
             Field::new("metadata", DataType::Utf8, true),
+            Field::new("project_path", DataType::Utf8, true),
         ]))
     }
 
@@ -1208,6 +1209,7 @@ impl LanceStore {
                 Arc::new(StringArray::from(vec![option_str(&memory.cluster_id)])),
                 Arc::new(arrow_array::BooleanArray::from(vec![memory.is_cluster_anchor])),
                 Arc::new(StringArray::from(vec![memory.metadata.as_ref().and_then(|m| serde_json::to_string(m).ok())])),
+                Arc::new(StringArray::from(vec![option_str(&memory.project_path)])),
             ],
         )
         .map_err(|e| OmemError::Storage(format!("failed to build RecordBatch: {e}")))
@@ -1263,6 +1265,27 @@ impl LanceStore {
                         .map(|a| a.value(row).to_string())
                 })
                 .unwrap_or_else(|| default.to_string())
+        };
+
+        let get_opt_str_safe = |name: &str| -> Option<String> {
+            batch
+                .column_by_name(name)
+                .and_then(|col| {
+                    col.as_any()
+                        .downcast_ref::<StringArray>()
+                        .and_then(|arr| {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                let val = arr.value(row);
+                                if val.is_empty() {
+                                    None
+                                } else {
+                                    Some(val.to_string())
+                                }
+                            }
+                        })
+                })
         };
 
         let get_f32 = |name: &str| -> Result<f32, OmemError> {
@@ -1377,6 +1400,7 @@ impl LanceStore {
             cluster_id: get_opt_str("cluster_id")?,
             is_cluster_anchor: get_bool_or("is_cluster_anchor", false),
             metadata: get_opt_str("metadata")?.and_then(|s| serde_json::from_str(&s).ok()),
+            project_path: get_opt_str_safe("project_path"),
         })
     }
 
@@ -1969,6 +1993,7 @@ impl LanceStore {
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
         category_filter: Option<&str>,
+        project_path_filter: Option<&str>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
         let table = self.table.clone();
         let mut query = table
@@ -2001,6 +2026,15 @@ impl LanceStore {
                 filter.push_str(" AND ");
             }
             filter.push_str(&format!("category = '{}'", escape_sql(cat)));
+        }
+        if let Some(pp) = project_path_filter {
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(&format!(
+                "(project_path IS NULL OR project_path = '{}')",
+                escape_sql(pp)
+            ));
         }
         if !filter.is_empty() {
             query = query.only_if(filter);
@@ -2041,6 +2075,7 @@ impl LanceStore {
         scope_filter: Option<&str>,
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
+        project_path_filter: Option<&str>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
         let table = self.table.clone();
 
@@ -2069,6 +2104,15 @@ impl LanceStore {
                 }
                 filter.push_str(&format!("tags LIKE '%\"{}\"%'", escape_sql(tag)));
             }
+        }
+        if let Some(pp) = project_path_filter {
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(&format!(
+                "(project_path IS NULL OR project_path = '{}')",
+                escape_sql(pp)
+            ));
         }
         if !filter.is_empty() {
             q = q.postfilter().only_if(filter);
@@ -2348,6 +2392,35 @@ impl LanceStore {
             .count_rows(Some(filter.to_string()))
             .await
             .map_err(|e| OmemError::Storage(format!("count_by_filter failed: {e}")))?;
+        Ok(count)
+    }
+
+    /// Batch update project_path for memories matching the given filter.
+    /// Returns the number of rows updated.
+    pub async fn batch_update_project_path(
+        &self,
+        project_path: &str,
+        filter: &str,
+    ) -> Result<usize, OmemError> {
+        let table = self.table.clone();
+        let count = table
+            .count_rows(Some(filter.to_string()))
+            .await
+            .map_err(|e| OmemError::Storage(format!("count before backfill failed: {e}")))?;
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        table
+            .update()
+            .only_if(filter.to_string())
+            .column("project_path", sql_str(project_path))
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("batch_update_project_path failed: {e}")))?;
+
+        self.after_mutation();
         Ok(count)
     }
 
@@ -2935,7 +3008,7 @@ mod tests {
         query_vec[0] = 1.0;
 
         let results = store
-            .vector_search(&query_vec, 3, 0.0, None, None, None, None)
+            .vector_search(&query_vec, 3, 0.0, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2961,7 +3034,7 @@ mod tests {
         store.create_fts_index().await.unwrap();
 
         let results = store
-            .fts_search("programming language", 10, None, None, None)
+            .fts_search("programming language", 10, None, None, None, None)
             .await
             .unwrap();
 
@@ -3334,5 +3407,295 @@ mod tests {
             count_after <= count_before + 2,
             "maybe_optimize should not create versions when count is low: before={count_before}, after={count_after}"
         );
+    }
+
+    #[test]
+    fn test_schema_evolution_project_path() {
+        let old_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("l0_abstract", DataType::Utf8, false),
+            Field::new("l1_overview", DataType::Utf8, false),
+            Field::new("l2_content", DataType::Utf8, false),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    VECTOR_DIM,
+                ),
+                true,
+            ),
+            Field::new("category", DataType::Utf8, false),
+            Field::new("memory_type", DataType::Utf8, false),
+            Field::new("state", DataType::Utf8, false),
+            Field::new("tier", DataType::Utf8, false),
+            Field::new("importance", DataType::Float32, false),
+            Field::new("confidence", DataType::Float32, false),
+            Field::new("access_count", DataType::Int32, false),
+            Field::new("tags", DataType::Utf8, false),
+            Field::new("scope", DataType::Utf8, false),
+            Field::new("agent_id", DataType::Utf8, true),
+            Field::new("session_id", DataType::Utf8, true),
+            Field::new("tenant_id", DataType::Utf8, false),
+            Field::new("source", DataType::Utf8, true),
+            Field::new("relations", DataType::Utf8, false),
+            Field::new("superseded_by", DataType::Utf8, true),
+            Field::new("invalidated_at", DataType::Utf8, true),
+            Field::new("created_at", DataType::Utf8, false),
+            Field::new("updated_at", DataType::Utf8, false),
+            Field::new("last_accessed_at", DataType::Utf8, true),
+            Field::new("space_id", DataType::Utf8, false),
+            Field::new("visibility", DataType::Utf8, false),
+            Field::new("owner_agent_id", DataType::Utf8, false),
+            Field::new("provenance", DataType::Utf8, true),
+            Field::new("version", DataType::UInt64, true),
+            Field::new("provenance_source_id", DataType::Utf8, true),
+            Field::new("tier_history", DataType::Utf8, true),
+            Field::new("cluster_id", DataType::Utf8, true),
+            Field::new("is_cluster_anchor", DataType::Boolean, true),
+            Field::new("metadata", DataType::Utf8, true),
+        ]));
+
+        let zero_vec: Vec<f32> = vec![0.0; VECTOR_DIM as usize];
+        let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec![Some(zero_vec.into_iter().map(Some).collect::<Vec<_>>())],
+            VECTOR_DIM,
+        );
+
+        let batch = RecordBatch::try_new(
+            old_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["test-id"])),
+                Arc::new(StringArray::from(vec!["test content"])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec!["test content"])),
+                Arc::new(vector_array),
+                Arc::new(StringArray::from(vec!["preferences"])),
+                Arc::new(StringArray::from(vec!["insight"])),
+                Arc::new(StringArray::from(vec!["active"])),
+                Arc::new(StringArray::from(vec!["peripheral"])),
+                Arc::new(Float32Array::from(vec![0.5])),
+                Arc::new(Float32Array::from(vec![0.5])),
+                Arc::new(Int32Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["[]"])),
+                Arc::new(StringArray::from(vec!["global"])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["t-001"])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["[]"])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["2024-01-01T00:00:00Z"])),
+                Arc::new(StringArray::from(vec!["2024-01-01T00:00:00Z"])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec!["global"])),
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(UInt64Array::from(vec![Some(1u64)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(arrow_array::BooleanArray::from(vec![Some(false)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .expect("failed to build old schema batch");
+
+        let memories = LanceStore::batch_to_memories(&[batch]).expect("batch_to_memories should succeed");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "test-id");
+        assert_eq!(memories[0].project_path, None, "old data without project_path column should default to None");
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_project_path_isolation() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "project A memory about rust");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_b = make_memory("t-001", "project B memory about python");
+        mem_b.project_path = Some("/project/B".to_string());
+        let mut mem_global = make_memory("t-001", "global memory about coding");
+        mem_global.project_path = None;
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_a, Some(&v)).await.unwrap();
+        store.create(&mem_b, Some(&v)).await.unwrap();
+        store.create(&mem_global, Some(&v)).await.unwrap();
+
+        let results_a = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/A"))
+            .await
+            .unwrap();
+
+        let ids_a: Vec<&str> = results_a.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids_a.contains(&mem_a.id.as_str()), "should include project A memory");
+        assert!(ids_a.contains(&mem_global.id.as_str()), "should include global memory (project_path IS NULL)");
+        assert!(!ids_a.contains(&mem_b.id.as_str()), "should NOT include project B memory");
+
+        let results_b = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/B"))
+            .await
+            .unwrap();
+
+        let ids_b: Vec<&str> = results_b.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids_b.contains(&mem_b.id.as_str()), "should include project B memory");
+        assert!(ids_b.contains(&mem_global.id.as_str()), "should include global memory");
+        assert!(!ids_b.contains(&mem_a.id.as_str()), "should NOT include project A memory");
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_no_project_path_filter_returns_all() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "project A memory");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_b = make_memory("t-001", "project B memory");
+        mem_b.project_path = Some("/project/B".to_string());
+        let mut mem_global = make_memory("t-001", "global memory");
+        mem_global.project_path = None;
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_a, Some(&v)).await.unwrap();
+        store.create(&mem_b, Some(&v)).await.unwrap();
+        store.create(&mem_global, Some(&v)).await.unwrap();
+
+        let results = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3, "without project_path filter, all memories should be returned");
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_project_path_null_treated_as_global() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_with_path = make_memory("t-001", "memory with project path");
+        mem_with_path.project_path = Some("/some/project".to_string());
+        let mut mem_null = make_memory("t-001", "memory with null project path");
+        mem_null.project_path = None;
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_with_path, Some(&v)).await.unwrap();
+        store.create(&mem_null, Some(&v)).await.unwrap();
+
+        let results = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/different/project"))
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_null.id.as_str()), "NULL project_path should match any filter");
+        assert!(!ids.contains(&mem_with_path.id.as_str()), "non-matching project_path should be excluded");
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_global_category_still_filtered_by_project_path() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_profile = make_memory("t-001", "user profile memory");
+        mem_profile.category = Category::new("profile");
+        mem_profile.project_path = Some("/project/X".to_string());
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_profile, Some(&v)).await.unwrap();
+
+        let results = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/Y"))
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = results.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(
+            !ids.contains(&mem_profile.id.as_str()),
+            "profile category memory with project_path=/X should be filtered out when searching /Y"
+        );
+
+        let results_same = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/X"))
+            .await
+            .unwrap();
+
+        let ids_same: Vec<&str> = results_same.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(
+            ids_same.contains(&mem_profile.id.as_str()),
+            "profile category memory with project_path=/X should appear when searching /X"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_empty_string_project_path_same_as_none() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_empty = make_memory("t-001", "memory with empty project path");
+        mem_empty.project_path = Some("".to_string());
+        let mut mem_none = make_memory("t-001", "memory with none project path");
+        mem_none.project_path = None;
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_empty, Some(&v)).await.unwrap();
+        store.create(&mem_none, Some(&v)).await.unwrap();
+
+        let results = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2, "both memories should be found without filter");
+
+        let results_filtered = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/any/path"))
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = results_filtered.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_none.id.as_str()), "None project_path should match any filter");
+        assert!(
+            !ids.contains(&mem_empty.id.as_str()),
+            "empty string project_path should NOT match (IS NULL won't catch it, and '' != '/any/path')"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fts_search_project_path_isolation() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "rust programming language for project A");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_b = make_memory("t-001", "rust programming language for project B");
+        mem_b.project_path = Some("/project/B".to_string());
+        let mut mem_global = make_memory("t-001", "rust programming language globally");
+        mem_global.project_path = None;
+
+        store.create(&mem_a, None).await.unwrap();
+        store.create(&mem_b, None).await.unwrap();
+        store.create(&mem_global, None).await.unwrap();
+
+        store.create_fts_index().await.unwrap();
+
+        let results_a = store
+            .fts_search("rust programming", 10, None, None, None, Some("/project/A"))
+            .await
+            .unwrap();
+
+        let ids_a: Vec<&str> = results_a.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids_a.contains(&mem_a.id.as_str()), "should include project A memory");
+        assert!(ids_a.contains(&mem_global.id.as_str()), "should include global memory");
+        assert!(!ids_a.contains(&mem_b.id.as_str()), "should NOT include project B memory");
     }
 }

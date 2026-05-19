@@ -142,6 +142,7 @@ impl IngestPipeline {
         let entity_context = request.entity_context.clone();
         let tenant_id = request.tenant_id.clone();
         let project_name = request.project_name.clone();
+        let project_path = request.project_path.clone();
         let bg_task_id = task_id.clone();
         let ingest_sem = self.ingest_semaphore.clone();
         let category_registry = self.category_registry.clone();
@@ -290,7 +291,7 @@ impl IngestPipeline {
                 }
             }
 
-            match reconciler.reconcile(&admitted_facts, &tenant_id, agent_id.clone(), Some(session_id.clone())).await {
+            match reconciler.reconcile(&admitted_facts, &tenant_id, agent_id.clone(), Some(session_id.clone()), project_path.clone()).await {
                 Ok(memories) => {
                     info!(
                         task_id = %bg_task_id,
@@ -583,6 +584,7 @@ mod tests {
             entity_context: None,
             mode,
             project_name: None,
+            project_path: None,
         }
     }
 
@@ -766,6 +768,7 @@ mod tests {
             entity_context: None,
             mode: IngestMode::Smart,
             project_name: None,
+            project_path: None,
         };
 
         let result = pipeline.ingest(request).await;
@@ -788,6 +791,7 @@ mod tests {
             entity_context: None,
             mode: IngestMode::Raw,
             project_name: None,
+            project_path: None,
         };
 
         let response = pipeline.ingest(request).await.expect("ingest");

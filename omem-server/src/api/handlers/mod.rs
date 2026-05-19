@@ -23,9 +23,10 @@ pub use imports::{
 };
 pub use lifecycle::trigger_lifecycle;
 pub use memory::{
-    batch_delete, batch_get_memories, batch_update_visibility, create_memory, delete_all_memories,
-    delete_memory, delete_tier_history_entry, get_memory, get_tier_changes, list_memories,
-    optimize_memories, reembed_memories, search_memories, session_ingest, update_memory,
+    backfill_project_path, batch_delete, batch_get_memories, batch_update_visibility,
+    create_memory, delete_all_memories, delete_memory, delete_tier_history_entry, get_memory,
+    get_tier_changes, list_memories, optimize_memories, reembed_memories, search_memories,
+    session_ingest, update_memory,
 };
 pub use merge::merge_memories;
 pub use profile::get_profile;
