@@ -212,6 +212,37 @@
       "description": "Default policy for agents not listed in agentMemoryPolicy",
       "enum": ["none", "readonly", "readwrite"],
       "default": "readwrite"
+    },
+    "soulWhisper": {
+      "type": "object",
+      "description": "Soul Whisper: inject memory reminders when LLM calls tools",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable/disable soul whisper injection",
+          "default": true
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool name whitelist. Use [\"*\"] to match all tools",
+          "default": ["*"]
+        },
+        "excludeTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names to exclude from whisper injection",
+          "default": ["memory_store", "memory_search", "memory_get", "memory_toggle", "memory_ingest"]
+        },
+        "maxToolNames": {
+          "type": "number",
+          "description": "Max tool names shown in tool-specific whisper. Exceeding this falls back to generic version",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -730,6 +730,10 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       sessionMessages.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
+      if (input.sessionID) {
+        const deleted = pendingToolCalls.delete(input.sessionID);
+        logDebug("compactingHook cleared session pendingToolCalls", { sessionID: input.sessionID, hadPending: deleted });
+      }
       // Evict stale injectedMemoryIds if over size cap (200 sessions)
       if (injectedMemoryIds.size > 200) {
         injectedMemoryIds.clear();
@@ -993,6 +997,69 @@ export function autocontinueHook(
 const processedMessageIds = new Set<string>();
 const pluginStartTime = Date.now();
 
+// ── Soul Whisper: pending tool call tracking (per-session isolation) ──
+const pendingToolCalls = new Map<string, Map<string, { toolName: string; timestamp: number }>>();
+
+export function soulWhisperToolTracker(config: OmemPluginConfig) {
+  return async (input: { tool: string; sessionID: string; callID: string }, _output: { args: any }) => {
+    if (config.soulWhisper?.enabled === false) {
+      logDebug("soulWhisperToolTracker disabled by config", { tool: input.tool });
+      return;
+    }
+
+    const sw = config.soulWhisper;
+    const toolName = input.tool;
+
+    const excludeTools = sw?.excludeTools ?? [];
+    if (excludeTools.includes(toolName)) {
+      logDebug("soulWhisperToolTracker excluded", { tool: toolName });
+      return;
+    }
+
+    const includeTools = sw?.tools ?? ["*"];
+    const isWildcard = includeTools.includes("*");
+    if (!isWildcard && !includeTools.includes(toolName)) {
+      logDebug("soulWhisperToolTracker not in whitelist", { tool: toolName, whitelist: includeTools });
+      return;
+    }
+
+    const sid = input.sessionID || "_default";
+    let sessionMap = pendingToolCalls.get(sid);
+    if (!sessionMap) {
+      sessionMap = new Map();
+      pendingToolCalls.set(sid, sessionMap);
+    }
+    sessionMap.set(input.callID, { toolName, timestamp: Date.now() });
+    logDebug("soulWhisperToolTracker recorded", { tool: toolName, callID: input.callID, sessionID: sid, totalSessions: pendingToolCalls.size, sessionCallCount: sessionMap.size });
+  };
+}
+
+function buildWhisperText(toolNames: string[], maxToolNames: number): string | null {
+  if (toolNames.length === 0) return null;
+
+  const lines: string[] = ["<cerebro-system-reminder>"];
+
+  if (toolNames.length <= maxToolNames) {
+    lines.push(`SOUL WHISPER — Detected tool call: ${toolNames.join(", ")}.`);
+    lines.push("Your memories (cerebro-context) may contain:");
+    lines.push("- Exact commands or flags someone already tested");
+    lines.push("- File paths or configurations that worked before");
+    lines.push("- Solutions to errors you previously encountered");
+    lines.push(`If a memory matches → use it. Then reply: 💜 受到灵魂的召唤——[what you used]`);
+  } else {
+    lines.push("SOUL WHISPER — Memories from past sessions are loaded above (see <cerebro-context>).");
+    lines.push("Before you act:");
+    lines.push("1. Scan cerebro-context for commands, paths, or patterns matching your current task");
+    lines.push("2. If found → use directly, do not re-derive from scratch");
+    lines.push(`3. If a memory guided your action → reply: 💜 受到灵魂的召唤——[what you used]`);
+  }
+
+  lines.push(`If memory summaries are insufficient → use memory_get("id") to fetch full content, or memory_search("query") to find more.`);
+  lines.push("</cerebro-system-reminder>");
+
+  return lines.join("\n");
+}
+
 const FETCH_POLICY_NUDGE = [
   "<cerebro-system-reminder>",
   "MEMORY REMINDER: You have injected memories above (see <cerebro-context>).",
@@ -1001,7 +1068,7 @@ const FETCH_POLICY_NUDGE = [
   "</cerebro-system-reminder>",
 ].join("\n");
 
-export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
+export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean, config?: OmemPluginConfig) {
   return async (_input: Record<string, unknown>, output: { messages: any[] }) => {
     let shouldNudge = getContextInjectedFlag();
     if (!shouldNudge && Array.isArray(output.messages)) {
@@ -1010,12 +1077,17 @@ export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
         m.parts.some((p: any) => typeof p.text === "string" && p.text.includes("<cerebro-context>"))
       );
     }
-    if (!shouldNudge) return;
+
+    const swEnabled = config?.soulWhisper?.enabled !== false;
+    const hasAnyPending = pendingToolCalls.size > 0;
+    if (!shouldNudge && !(swEnabled && hasAnyPending)) {
+      logDebug("fetchPolicyNudgeHook skipped", { shouldNudge, swEnabled, hasAnyPending });
+      return;
+    }
 
     const messages = output.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
-    // Find the last user message
     let lastUserIdx = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]?.info?.role === "user") {
@@ -1028,13 +1100,29 @@ export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
     const userMsg = messages[lastUserIdx];
     if (!Array.isArray(userMsg.parts)) return;
 
-    // Idempotency check
-    const nudgeId = `cerebro_nudge_${userMsg.info.sessionID || userMsg.info.id}`;
+    const sessionId = userMsg.info.sessionID || "_default";
+    const nudgeId = `cerebro_nudge_${sessionId}`;
     for (const part of userMsg.parts) {
       if (part.id === nudgeId) return;
     }
 
-    // Find the first text part position, insert synthetic part before it
+    const parts: string[] = [];
+    if (shouldNudge) parts.push(FETCH_POLICY_NUDGE);
+
+    const sessionCalls = swEnabled ? pendingToolCalls.get(sessionId) : undefined;
+    if (sessionCalls && sessionCalls.size > 0) {
+      const toolNames = [...new Set([...sessionCalls.values()].map(v => v.toolName))];
+      const maxToolNames = config?.soulWhisper?.maxToolNames ?? 3;
+      const whisperText = buildWhisperText(toolNames, maxToolNames);
+      if (whisperText) parts.push(whisperText);
+      pendingToolCalls.delete(sessionId);
+      logDebug("soulWhisper consumed session calls", { sessionId, callCount: sessionCalls.size, toolNames });
+    } else if (swEnabled) {
+      logDebug("soulWhisper no pending calls for session", { sessionId, globalSessionCount: pendingToolCalls.size });
+    }
+
+    if (parts.length === 0) return;
+
     const textPartIdx = userMsg.parts.findIndex((p: any) => p.type === "text" && typeof p.text === "string");
 
     const syntheticPart = {
@@ -1042,7 +1130,7 @@ export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
       messageID: userMsg.info.id,
       sessionID: userMsg.info.sessionID || "",
       type: "text" as const,
-      text: FETCH_POLICY_NUDGE,
+      text: parts.join("\n\n"),
       synthetic: true,
     };
 
@@ -1052,7 +1140,7 @@ export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean) {
       userMsg.parts.push(syntheticPart);
     }
 
-    logDebug("fetchPolicyNudgeHook injected", { sessionId: userMsg.info.sessionID || "", nudgeId });
+    logDebug("fetchPolicyNudgeHook injected", { sessionId, nudgeId, hasWhisper: sessionCalls != null && sessionCalls.size > 0, partsCount: parts.length });
   };
 }
 
@@ -1181,6 +1269,8 @@ export function sessionIdleHook(
       } finally {
         isCapturing = false;
         idleTimeout = null;
+        const deleted = pendingToolCalls.delete(sessionID);
+        if (deleted) logDebug("sessionIdleHook cleared session pendingToolCalls", { sessionID, hadPending: deleted });
       }
     }, 10000);
   };

@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, autocontinueHook, compactingHook, fetchPolicyNudgeHook, keywordDetectionHook, sessionIdleHook } from "./hooks.js";
+import { autoRecallHook, autocontinueHook, compactingHook, fetchPolicyNudgeHook, keywordDetectionHook, sessionIdleHook, soulWhisperToolTracker } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
@@ -151,7 +151,8 @@ const OmemPlugin: Plugin = async (input) => {
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId, getProjectPath: () => directory }),
     event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => mainSessionId, isAutoStoreEnabled, agentId, config, (name: string) => { cachedAgentName = name; }, directory),
-    "experimental.chat.messages.transform": fetchPolicyNudgeHook(() => contextInjectedThisTurn),
+    "experimental.chat.messages.transform": fetchPolicyNudgeHook(() => contextInjectedThisTurn, config),
+    "tool.execute.before": (() => { const tracker = soulWhisperToolTracker(config); return tracker; })(),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;
