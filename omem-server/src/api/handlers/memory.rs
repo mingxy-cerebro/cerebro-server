@@ -1090,7 +1090,8 @@ pub async fn backfill_project_path(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
-    let filter = "project_path IS NULL AND visibility != 'private'";
+    // Skip private (global by design) and preferences (cross-project by nature)
+    let filter = "project_path IS NULL AND visibility != 'private' AND category != 'preferences'";
     let updated_count = store.batch_update_project_path(&sanitized, filter).await?;
 
     Ok(Json(serde_json::json!({ "updated_count": updated_count })))
