@@ -109,6 +109,7 @@ fn default_order() -> String {
 pub struct UpdateMemoryBody {
     pub content: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub category: Option<String>,
     pub state: Option<String>,
     pub tier: Option<String>,
     pub tier_history: Option<String>,
@@ -711,6 +712,12 @@ pub async fn update_memory(
 
     if let Some(tags) = body.tags {
         memory.tags = tags;
+    }
+
+    if let Some(cat_str) = body.category {
+        memory.category = cat_str
+            .parse()
+            .map_err(|e: String| OmemError::Validation(e))?;
     }
 
     if let Some(state_str) = body.state {
