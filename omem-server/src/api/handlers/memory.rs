@@ -113,6 +113,7 @@ pub struct UpdateMemoryBody {
     pub tier: Option<String>,
     pub tier_history: Option<String>,
     pub session_id: Option<String>,
+    pub project_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -730,6 +731,12 @@ pub async fn update_memory(
 
     if let Some(sid) = body.session_id {
         memory.session_id = Some(sid);
+    }
+
+    if let Some(pp) = body.project_path {
+        memory.project_path = Some(sanitize_project_path(&pp).map_err(|e| {
+            OmemError::Validation(format!("invalid project_path: {e}"))
+        })?);
     }
 
     memory.updated_at = chrono::Utc::now().to_rfc3339();
