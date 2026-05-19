@@ -1690,7 +1690,7 @@ pub async fn session_ingest(
                 }
             };
 
-            if topic.scope == "private" {
+            if memory_type == "EMOTIONAL" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
 
