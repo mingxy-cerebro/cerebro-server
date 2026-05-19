@@ -1792,6 +1792,7 @@ impl LanceStore {
                 .column("tier_history", sql_opt_str(&mem.tier_history))
                 .column("cluster_id", sql_opt_str(&mem.cluster_id))
                 .column("is_cluster_anchor", if mem.is_cluster_anchor { "true" } else { "false" })
+                .column("project_path", sql_opt_str(&mem.project_path))
                 .execute()
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
