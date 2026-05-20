@@ -362,7 +362,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       let profileCountText = "";
       let profileBlock = "";
       const lastInjected = profileInjectedSessions.get(input.sessionID);
-      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
+      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
       const isFirstInjection = !lastInjected;
       if (profile && ttlExpired) {
         const prefs = ((profile as any)?.static_facts ?? [])
@@ -752,14 +752,18 @@ export function memoryInjectionHook(
         }
         shouldRecallRes = recallRes;
 
-        // build profile block
+        // build profile block (with TTL check)
         if (profile) {
-          const built = buildProfileBlock(profile);
-          if (built) {
-            profileBlock = built.block;
-            profileCountText = built.countText;
-            profileInjected = true;
-            profileInjectedSessions.set(input.sessionID, Date.now());
+          const lastInjected = profileInjectedSessions.get(input.sessionID);
+          const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
+          if (ttlExpired) {
+            const built = buildProfileBlock(profile);
+            if (built) {
+              profileBlock = built.block;
+              profileCountText = built.countText;
+              profileInjected = true;
+              profileInjectedSessions.set(input.sessionID, Date.now());
+            }
           }
         }
 
@@ -809,7 +813,8 @@ export function memoryInjectionHook(
           logDebug("memoryInjectionHook profile injected (no-recall)", { sessionId: input.sessionID });
         }
         injectedSessions.add(input.sessionID);
-        showToast(tui, "🧠 Profile Injected", profileCountText ? `Profile: ${profileCountText} · no recall needed` : "No memory recall needed", "success", toastDelayMs);
+        const cacheTag = isCacheHit ? " (cached)" : "";
+        showToast(tui, `🧠 Profile Injected${cacheTag}`, profileCountText ? `Profile: ${profileCountText} · no recall needed` : "No memory recall needed", "success", toastDelayMs);
       } else {
         const results = shouldRecallRes.memories ?? [];
         const clustered = shouldRecallRes.clustered;
@@ -901,12 +906,12 @@ export function memoryInjectionHook(
           if (clustered) {
             const clusterCount = clustered.cluster_summaries.length;
             const standaloneCount = clustered.standalone_memories.length;
-            toastTitle = `🧠 Context Injected · ${clusterCount} clusters${standaloneCount > 0 ? ` · ${standaloneCount} standalone` : ""}`;
+            toastTitle = `🧠 Context Injected${isCacheHit ? " (cached)" : ""} · ${clusterCount} clusters${standaloneCount > 0 ? ` · ${standaloneCount} standalone` : ""}`;
             toastMessage = profileInjected
               ? `Profile: ${profileCountText} · Clustered memory display`
               : `Clustered memory display`;
           } else {
-            toastTitle = `🧠 Context Injected · ${newResults.length} fragments`;
+            toastTitle = `🧠 Context Injected${isCacheHit ? " (cached)" : ""} · ${newResults.length} fragments`;
             toastMessage = profileInjected
               ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
               : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
@@ -916,41 +921,53 @@ export function memoryInjectionHook(
         }
       }
 
-      // cache miss: fire-and-forget createRecallEvent so web UI shows the recall record
-      if (!isCacheHit && shouldRecallRes.should_recall) {
-        const results = shouldRecallRes.memories ?? [];
-        const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
-        const newResults = results.filter((r) => !existingIds.has(r.memory.id));
-        const storedMemoryIds = results.map((r) => r.memory.id);
-        const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
-        const maxScore = storedMemoryIds.length > 0
-          ? Math.max(...(results.map((r) => r.score) ?? [0]))
-          : 0;
-        const bgBlock = shouldRecallRes.clustered
-          ? buildClusteredContextBlock(shouldRecallRes.clustered, maxContentLength)
-          : buildContextBlock(newResults, maxContentLength);
-        const items = [
-          ...(results.map((r) => ({
-            memory_id: r.memory.id, score: r.score,
-            refine_relevance: r.refine_relevance, refine_reasoning: r.refine_reasoning, is_kept: true,
-          }))),
-          ...(shouldRecallRes.discarded?.map((d) => ({
-            memory_id: d.memory_id, score: d.score,
-            refine_relevance: d.refine_relevance, refine_reasoning: d.refine_reasoning, is_kept: false,
-          })) ?? []),
-        ];
-        client.createRecallEvent({
-          session_id: input.sessionID!, recall_type: "auto", query_text,
-          max_score: maxScore, llm_confidence: shouldRecallRes.confidence ?? 0,
-          profile_injected: profileInjected,
-          kept_count: storedMemoryIds.length, discarded_count: storedDiscardedIds.length,
-          injected_count: newResults.length,
-          profile_content: profileInjected && profileBlock ? profileBlock : undefined,
-          injected_content: bgBlock ?? undefined,
-          items: items.length > 0 ? items : undefined,
-        }).catch((e: unknown) => {
-          logErr("memoryInjectionHook cache-miss createRecallEvent failed", { error: String(e) });
-        });
+      // cache miss: fire-and-forget createRecallEvent so web UI shows the record
+      if (!isCacheHit) {
+        if (shouldRecallRes.should_recall) {
+          const results = shouldRecallRes.memories ?? [];
+          const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
+          const newResults = results.filter((r) => !existingIds.has(r.memory.id));
+          const storedMemoryIds = results.map((r) => r.memory.id);
+          const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
+          const maxScore = storedMemoryIds.length > 0
+            ? Math.max(...(results.map((r) => r.score) ?? [0]))
+            : 0;
+          const bgBlock = shouldRecallRes.clustered
+            ? buildClusteredContextBlock(shouldRecallRes.clustered, maxContentLength)
+            : buildContextBlock(newResults, maxContentLength);
+          const items = [
+            ...(results.map((r) => ({
+              memory_id: r.memory.id, score: r.score,
+              refine_relevance: r.refine_relevance, refine_reasoning: r.refine_reasoning, is_kept: true,
+            }))),
+            ...(shouldRecallRes.discarded?.map((d) => ({
+              memory_id: d.memory_id, score: d.score,
+              refine_relevance: d.refine_relevance, refine_reasoning: d.refine_reasoning, is_kept: false,
+            })) ?? []),
+          ];
+          client.createRecallEvent({
+            session_id: input.sessionID!, recall_type: "auto", query_text,
+            max_score: maxScore, llm_confidence: shouldRecallRes.confidence ?? 0,
+            profile_injected: profileInjected,
+            kept_count: storedMemoryIds.length, discarded_count: storedDiscardedIds.length,
+            injected_count: newResults.length,
+            profile_content: profileInjected && profileBlock ? profileBlock : undefined,
+            injected_content: bgBlock ?? undefined,
+            items: items.length > 0 ? items : undefined,
+          }).catch((e: unknown) => {
+            logErr("memoryInjectionHook cache-miss createRecallEvent failed", { error: String(e) });
+          });
+        } else if (profileInjected) {
+          client.createRecallEvent({
+            session_id: input.sessionID!, recall_type: "auto", query_text,
+            max_score: 0, llm_confidence: shouldRecallRes.confidence ?? 0,
+            profile_injected: true,
+            kept_count: 0, discarded_count: 0, injected_count: 0,
+            profile_content: profileBlock || undefined,
+          }).catch((e: unknown) => {
+            logErr("memoryInjectionHook cache-miss profile-only createRecallEvent failed", { error: String(e) });
+          });
+        }
       }
 
       logDebug("memoryInjectionHook injection complete", { sessionId: input.sessionID, isCacheHit });
@@ -1016,7 +1033,7 @@ export function memoryInjectionHook(
 
           if (profile) {
             const lastInjected = profileInjectedSessions.get(bgSessionId);
-            const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
+            const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
             if (ttlExpired) {
               const built = buildProfileBlock(profile);
               if (built) {
