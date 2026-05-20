@@ -916,6 +916,43 @@ export function memoryInjectionHook(
         }
       }
 
+      // cache miss: fire-and-forget createRecallEvent so web UI shows the recall record
+      if (!isCacheHit && shouldRecallRes.should_recall) {
+        const results = shouldRecallRes.memories ?? [];
+        const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
+        const newResults = results.filter((r) => !existingIds.has(r.memory.id));
+        const storedMemoryIds = results.map((r) => r.memory.id);
+        const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
+        const maxScore = storedMemoryIds.length > 0
+          ? Math.max(...(results.map((r) => r.score) ?? [0]))
+          : 0;
+        const bgBlock = shouldRecallRes.clustered
+          ? buildClusteredContextBlock(shouldRecallRes.clustered, maxContentLength)
+          : buildContextBlock(newResults, maxContentLength);
+        const items = [
+          ...(results.map((r) => ({
+            memory_id: r.memory.id, score: r.score,
+            refine_relevance: r.refine_relevance, refine_reasoning: r.refine_reasoning, is_kept: true,
+          }))),
+          ...(shouldRecallRes.discarded?.map((d) => ({
+            memory_id: d.memory_id, score: d.score,
+            refine_relevance: d.refine_relevance, refine_reasoning: d.refine_reasoning, is_kept: false,
+          })) ?? []),
+        ];
+        client.createRecallEvent({
+          session_id: input.sessionID!, recall_type: "auto", query_text,
+          max_score: maxScore, llm_confidence: shouldRecallRes.confidence ?? 0,
+          profile_injected: profileInjected,
+          kept_count: storedMemoryIds.length, discarded_count: storedDiscardedIds.length,
+          injected_count: newResults.length,
+          profile_content: profileInjected && profileBlock ? profileBlock : undefined,
+          injected_content: bgBlock ?? undefined,
+          items: items.length > 0 ? items : undefined,
+        }).catch((e: unknown) => {
+          logErr("memoryInjectionHook cache-miss createRecallEvent failed", { error: String(e) });
+        });
+      }
+
       logDebug("memoryInjectionHook injection complete", { sessionId: input.sessionID, isCacheHit });
 
       // ========== Phase B: fire-and-forget async fetch for NEXT round (cache hit only) ==========
