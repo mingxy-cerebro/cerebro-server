@@ -47,6 +47,7 @@ export interface OmemPluginConfig {
   };
   agentMemoryPolicy?: Record<string, "none" | "readonly" | "readwrite">;
   defaultPolicy?: "none" | "readonly" | "readwrite";
+  injectionStrategy?: "parts" | "system";
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -92,6 +93,7 @@ const DEFAULTS: OmemPluginConfig = {
     excludeTools: ["memory_store", "memory_search", "memory_get", "memory_toggle", "memory_ingest"],
     maxToolNames: 3,
   },
+  injectionStrategy: "parts" as const,
 };
 
 // ── Flat-to-nested migration ─────────────────────────────────────────
@@ -176,6 +178,7 @@ function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>)
   result.soulWhisper = { ...base.soulWhisper!, ...overrides.soulWhisper };
   if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
   if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
+  result.injectionStrategy = overrides.injectionStrategy ?? base.injectionStrategy;
   return result;
 }
 
