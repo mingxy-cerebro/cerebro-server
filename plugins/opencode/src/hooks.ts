@@ -13,6 +13,14 @@ const MIN_CONTENT_LENGTH = 50;
 
 const projectNameCache = new Map<string, string>();
 
+function appendToSystem(system: string[], content: string) {
+  if (system.length > 0) {
+    system[0] += "\n\n" + content;
+  } else {
+    system.push(content);
+  }
+}
+
 async function detectProjectName(rootPath: string): Promise<string | undefined> {
   const cached = projectNameCache.get(rootPath);
   if (cached !== undefined) {
@@ -122,7 +130,7 @@ function showToast(tui: any, title: string, message: string, variant: string = "
     try {
       tui.showToast({ body: { title, message, variant, duration: 5000 } });
     } catch (err) {
-      console.error("[cerebro] showToast failed:", err);
+      logErr("showToast failed", { error: String(err) });
     }
   }, delayMs);
 }
@@ -164,6 +172,18 @@ const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
 const profileInjectedSessions = new Map<string, number>();
+const injectedSessions = new Set<string>();
+const compactingSummaryCooldown = new Map<string, number>();
+
+function hashString(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return hash.toString(36);
+}
 
 function formatRelativeAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -228,9 +248,9 @@ function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
 
 const FETCH_POLICY = [
   "<cerebro-fetch-policy>",
-  "Each memory in cerebro-context above is a SUMMARY only, not full content.",
-  `If a summary is insufficient for your task, you MUST use memory_get("id") to fetch the full content.`,
-  "Do NOT guess or fabricate details based on summaries alone.",
+  "IMPORTANT: Each memory above is a condensed summary. The full version contains critical details that may change your response quality.",
+  "You MUST use memory_get(\"id\") to retrieve the complete content before making decisions based on any summary.",
+  "Do NOT rely on condensed summaries alone — depth of recall determines quality of response.",
   "</cerebro-fetch-policy>",
 ].join("\n");
 
@@ -328,6 +348,43 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
+      // --- Profile Fetch (before query_text check, but injection deferred to after context) ---
+      const profile = await client.getProfile();
+      let profileInjected = false;
+      let profileCountText = "";
+      let profileBlock = "";
+      const lastInjected = profileInjectedSessions.get(input.sessionID);
+      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
+      const isFirstInjection = !lastInjected;
+      if (profile && ttlExpired) {
+        const prefs = ((profile as any)?.static_facts ?? [])
+          .filter((sf: any) => {
+            const t: string[] = sf.tags ?? [];
+            return t.includes("preferences");
+          })
+          .map((sf: any) => sf.l2_content ?? sf.content ?? "")
+          .filter(Boolean);
+        const profileLines = prefs.length > 0
+          ? prefs.map((c: string) => `  · ${c}`).join("\n")
+          : "  · (preferences queuing, will populate on next refresh)";
+        profileBlock = [
+          "<cerebro-profile>",
+          profileLines,
+          "</cerebro-profile>",
+        ].join("\n");
+        profileInjected = true;
+        profileInjectedSessions.set(input.sessionID, Date.now());
+        const p = profile as any;
+        const dynamicCount = p?.dynamic_context?.length ?? 0;
+        const staticCount = p?.static_facts?.length ?? 0;
+        profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
+        if (isFirstInjection) {
+          logDebug("autoRecallHook profile ready (first)", { dynamicCount, staticCount });
+        } else {
+          logDebug("autoRecallHook profile ready (TTL)", { dynamicCount, staticCount });
+        }
+      }
+
       // After compacting, sessionMessages is cleared but firstMessages gets repopulated
       // by keywordDetectionHook with compact summary — skip recall in this transient state
       if (userMessages.length === 0) {
@@ -338,7 +395,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
       const query_text = extractUserRequest(rawQuery);
       if (!query_text) {
-        logDebug("autoRecallHook filtered system injection", { rawQueryPrefix: rawQuery.slice(0, 60) });
+        logDebug("autoRecallHook filtered system injection (profile already injected above)", { rawQueryPrefix: rawQuery.slice(0, 60) });
         return;
       }
       const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
@@ -375,48 +432,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         return;
       }
       logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, discardedCount: shouldRecallRes.discarded?.length ?? 0, clustered: !!shouldRecallRes.clustered });
-
-      const profile = await client.getProfile();
-      let profileInjected = false;
-      let profileCountText = "";
-      let profileBlock = "";
-      const lastInjected = profileInjectedSessions.get(input.sessionID);
-      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
-      const isFirstInjection = !lastInjected;
-      if (profile && ttlExpired) {
-        const prefs = ((profile as any)?.static_facts ?? [])
-          .filter((sf: any) => {
-            const t: string[] = sf.tags ?? [];
-            return t.includes("preferences");
-          })
-          .map((sf: any) => sf.l2_content ?? sf.content ?? "")
-          .filter(Boolean);
-        const profileLines = prefs.length > 0
-          ? prefs.map((c: string) => `  · ${c}`).join("\n")
-          : "  · (preferences queuing, will populate on next refresh)";
-        profileBlock = [
-          "<cerebro-profile>",
-          profileLines,
-          "</cerebro-profile>",
-        ].join("\n");
-        const existingIdx = output.system.findIndex((s) => s.includes("<cerebro-profile>"));
-        if (existingIdx >= 0) {
-          output.system[existingIdx] = profileBlock;
-        } else {
-          output.system.push(profileBlock);
-        }
-        profileInjected = true;
-        profileInjectedSessions.set(input.sessionID, Date.now());
-        const p = profile as any;
-        const dynamicCount = p?.dynamic_context?.length ?? 0;
-        const staticCount = p?.static_facts?.length ?? 0;
-        profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
-        if (isFirstInjection) {
-          logDebug("autoRecallHook profile injected (first)", { dynamicCount, staticCount });
-        } else {
-          logDebug("autoRecallHook profile refreshed (TTL)", { dynamicCount, staticCount });
-        }
-      }
 
       const storedMemoryIds = shouldRecallRes.memories?.map((r) => r.memory.id) ?? [];
       const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
@@ -469,6 +484,10 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       };
 
       if (!shouldRecallRes.should_recall) {
+        if (profileBlock) {
+          appendToSystem(output.system, profileBlock);
+          logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
+        }
         if (profileInjected && isFirstInjection) {
           await createEventAndReturn(0, 0, 0);
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
@@ -483,6 +502,10 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
       if (newResults.length === 0) {
+        if (profileBlock) {
+          appendToSystem(output.system, profileBlock);
+          logDebug("autoRecallHook profile injected (dedup path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
+        }
         if (profileInjected && isFirstInjection) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
         }
@@ -510,8 +533,8 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         ? buildClusteredContextBlock(clustered, dynamicMaxContentLength)
         : buildContextBlock(newResults, dynamicMaxContentLength);
       if (block) {
-        output.system.push(block);
-        output.system.push(FETCH_POLICY);
+        appendToSystem(output.system, block);
+        appendToSystem(output.system, FETCH_POLICY);
         logDebug("autoRecallHook block injected to output.system", {
           sessionId: input.sessionID,
           blockPreview: block.slice(0, 200),
@@ -519,6 +542,13 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         });
       } else {
         logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
+      }
+
+      // Profile injected AFTER context so it appears at the end of system prompt
+      // where LLM attention is highest
+      if (profileBlock) {
+        appendToSystem(output.system, profileBlock);
+        logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
       }
 
       const newIds = newResults.map((r) => r.memory.id);
@@ -561,13 +591,355 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
 
       if (keywordDetectedSessions.has(input.sessionID)) {
-        output.system.push(KEYWORD_NUDGE);
+        appendToSystem(output.system, KEYWORD_NUDGE);
         keywordDetectedSessions.delete(input.sessionID);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes("[cerebro]")) {
         // Server returned error (500, etc.) with details
+        const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
+        if (cleanMsg.startsWith("500")) {
+          showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
+        } else if (cleanMsg.includes("timed out")) {
+          showToast(tui, "🧠 Cerebro Service Timeout", cleanMsg.substring(0, 100), "error");
+        } else {
+          showToast(tui, "🧠 Cerebro Error", cleanMsg.substring(0, 150), "error");
+        }
+      } else if (errMsg.includes("fetch") || errMsg.includes("network")) {
+        showToast(tui, "🧠 Cerebro Service Unavailable", "Network error · check API connection", "error");
+      } else {
+        showToast(tui, "🧠 Memory Recall Error", errMsg.substring(0, 100), "error");
+      }
+    }
+  };
+}
+
+export function memoryInjectionHook(
+  client: CerebroClient,
+  containerTags: string[],
+  tui: any,
+  config: Partial<OmemPluginConfig> = {},
+  getAgentName?: () => string,
+  directory?: string,
+) {
+  const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
+  const maxRecallResults = config.recall?.maxRecallResults ?? 10;
+  const fetchMultiplier = config.recall?.fetchMultiplier ?? 3;
+  const topkCapMultiplier = config.recall?.topkCapMultiplier ?? 2;
+  const mmrJaccardThreshold = config.recall?.mmrJaccardThreshold ?? 0.85;
+  const mmrPenaltyFactor = config.recall?.mmrPenaltyFactor ?? 0.5;
+  const phase2Multiplier = config.recall?.phase2Multiplier ?? 2;
+  const llmMaxEval = config.recall?.llmMaxEval ?? 15;
+  const refineStrategy = config.recall?.refineStrategy ?? "balanced";
+  const refineMediumChars = config.recall?.refineMediumChars ?? 200;
+  const maxContentLength = Math.max(MIN_CONTENT_LENGTH, config.content?.maxContentLength ?? 500);
+  const maxContentChars = Math.max(MIN_CONTENT_CHARS, config.content?.maxContentChars ?? 30000);
+  const toastDelayMs = config.ui?.toastDelayMs ?? 7000;
+
+  return async (
+    input: { sessionID?: string; messageID?: string; model: Model },
+    output: { message: UserMessage; parts: Part[] },
+  ) => {
+    if (!input.sessionID) return;
+
+    const agentId = getAgentName?.() || process.env.OMEM_AGENT_ID || "opencode";
+    const policy = resolveAgentPolicy(agentId, config);
+    if (policy === "none") return;
+
+    const isFirstInjection = !injectedSessions.has(input.sessionID);
+    const isKeywordTriggered = keywordDetectedSessions.has(input.sessionID);
+    if (!isFirstInjection && !isKeywordTriggered) return;
+
+    try {
+      logDebug("memoryInjectionHook start", { sessionId: input.sessionID, agentId, policy, isFirstInjection, isKeywordTriggered, similarityThreshold, maxRecallResults });
+      const messages = sessionMessages.get(input.sessionID) ?? [];
+      const userMessages = messages.filter((m) => m.role === "user");
+
+      // --- Profile Fetch ---
+      const profile = await client.getProfile();
+      let profileInjected = false;
+      let profileCountText = "";
+      let profileBlock = "";
+      const lastInjected = profileInjectedSessions.get(input.sessionID);
+      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 30 * 60 * 1000);
+      const profileIsFirstInjection = !lastInjected;
+      if (profile && ttlExpired) {
+        const prefs = ((profile as any)?.static_facts ?? [])
+          .filter((sf: any) => {
+            const t: string[] = sf.tags ?? [];
+            return t.includes("preferences");
+          })
+          .map((sf: any) => sf.l2_content ?? sf.content ?? "")
+          .filter(Boolean);
+        const profileLines = prefs.length > 0
+          ? prefs.map((c: string) => `  · ${c}`).join("\n")
+          : "  · (preferences queuing, will populate on next refresh)";
+        profileBlock = [
+          "<cerebro-profile>",
+          profileLines,
+          "</cerebro-profile>",
+        ].join("\n");
+        profileInjected = true;
+        profileInjectedSessions.set(input.sessionID, Date.now());
+        const p = profile as any;
+        const dynamicCount = p?.dynamic_context?.length ?? 0;
+        const staticCount = p?.static_facts?.length ?? 0;
+        profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
+        if (profileIsFirstInjection) {
+          logDebug("memoryInjectionHook profile ready (first)", { dynamicCount, staticCount });
+        } else {
+          logDebug("memoryInjectionHook profile ready (TTL)", { dynamicCount, staticCount });
+        }
+      }
+
+      if (userMessages.length === 0) {
+        logDebug("memoryInjectionHook skipped: no user messages in session (post-compacting?)", { sessionId: input.sessionID });
+        return;
+      }
+
+      const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
+      const query_text = extractUserRequest(rawQuery);
+      if (!query_text) {
+        logDebug("memoryInjectionHook filtered system injection (profile already injected above)", { rawQueryPrefix: rawQuery.slice(0, 60) });
+        return;
+      }
+      const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
+
+      const projectTags = containerTags.filter(t => t.startsWith("omem_project_"));
+
+      const conversationContext = userMessages.length >= 2
+        ? userMessages.slice(-4, -1).map((m) => {
+          const stripped = stripPrivateContent(m.content);
+          return stripped.length > 200 ? stripped.slice(0, 200) : stripped;
+        })
+        : undefined;
+
+      const shouldRecallRes = await client.shouldRecall(
+        query_text, last_query_text, input.sessionID,
+        similarityThreshold, maxRecallResults,
+        projectTags.length > 0 ? projectTags : undefined,
+        conversationContext && conversationContext.length > 0 ? conversationContext : undefined,
+        {
+          fetch_multiplier: fetchMultiplier,
+          topk_cap_multiplier: topkCapMultiplier,
+          mmr_jaccard_threshold: mmrJaccardThreshold,
+          mmr_penalty_factor: mmrPenaltyFactor,
+          phase2_multiplier: phase2Multiplier,
+          llm_max_eval: llmMaxEval,
+          refine_strategy: refineStrategy,
+          refine_medium_chars: refineMediumChars,
+        },
+        directory || process.env.OMEM_PROJECT_DIR,
+      );
+
+      if (!shouldRecallRes) {
+        showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
+        return;
+      }
+      logDebug("memoryInjectionHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, discardedCount: shouldRecallRes.discarded?.length ?? 0, clustered: !!shouldRecallRes.clustered });
+
+      const storedMemoryIds = shouldRecallRes.memories?.map((r) => r.memory.id) ?? [];
+      const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
+      const maxScore = storedMemoryIds.length > 0
+        ? Math.max(...(shouldRecallRes.memories?.map((r) => r.score) ?? [0]))
+        : 0;
+
+      const createEventAndReturn = async (
+        injectedCount: number,
+        keptCount: number,
+        discardedCount: number,
+        injectedContent?: string,
+      ): Promise<string | undefined> => {
+        try {
+          const items = [
+            ...(shouldRecallRes.memories?.map((r) => ({
+              memory_id: r.memory.id,
+              score: r.score,
+              refine_relevance: r.refine_relevance,
+              refine_reasoning: r.refine_reasoning,
+              is_kept: true,
+            })) ?? []),
+            ...(shouldRecallRes.discarded?.map((d) => ({
+              memory_id: d.memory_id,
+              score: d.score,
+              refine_relevance: d.refine_relevance,
+              refine_reasoning: d.refine_reasoning,
+              is_kept: false,
+            })) ?? []),
+          ];
+          const result = await client.createRecallEvent({
+            session_id: input.sessionID!,
+            recall_type: "auto",
+            query_text,
+            max_score: maxScore,
+            llm_confidence: shouldRecallRes.confidence ?? 0,
+            profile_injected: profileInjected,
+            kept_count: keptCount,
+            discarded_count: discardedCount,
+            injected_count: injectedCount,
+            profile_content: profileInjected && profileBlock ? profileBlock : undefined,
+            injected_content: injectedContent,
+            items: items.length > 0 ? items : undefined,
+          });
+          return result?.event_id;
+        } catch (e) {
+          logErr("memoryInjectionHook createRecallEvent failed", { error: String(e) });
+          return undefined;
+        }
+      };
+
+      // --- no-recall path: inject profile only ---
+      if (!shouldRecallRes.should_recall) {
+        const partsToInject: string[] = [];
+        if (profileBlock) partsToInject.push(profileBlock);
+        if (partsToInject.length > 0) {
+          const injectText = partsToInject.join("\n\n");
+          const contextPart: Part = {
+            id: `prt_cerebro-context-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: injectText,
+            synthetic: true,
+          };
+          output.parts.unshift(contextPart);
+          logDebug("memoryInjectionHook profile injected (no-recall path)", { sessionId: input.sessionID });
+        }
+        injectedSessions.add(input.sessionID);
+        if (profileInjected && profileIsFirstInjection) {
+          await createEventAndReturn(0, 0, 0);
+          showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
+        }
+        return;
+      }
+
+      const results = shouldRecallRes.memories ?? [];
+      const clustered = shouldRecallRes.clustered;
+
+      const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
+      const newResults = results.filter((r) => !existingIds.has(r.memory.id));
+      logDebug("memoryInjectionHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
+
+      // --- dedup path: inject profile only ---
+      if (newResults.length === 0) {
+        const partsToInject: string[] = [];
+        if (profileBlock) partsToInject.push(profileBlock);
+        if (partsToInject.length > 0) {
+          const injectText = partsToInject.join("\n\n");
+          const contextPart: Part = {
+            id: `prt_cerebro-context-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: injectText,
+            synthetic: true,
+          };
+          output.parts.unshift(contextPart);
+          logDebug("memoryInjectionHook profile injected (dedup path)", { sessionId: input.sessionID });
+        }
+        injectedSessions.add(input.sessionID);
+        if (profileInjected && profileIsFirstInjection) {
+          showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
+        }
+        return;
+      }
+
+      // --- Token Budget Calculation ---
+      const profileChars = profileInjected ? profileBlock.length : 0;
+      const budgetRemaining = maxContentChars - profileChars;
+      if (budgetRemaining < 0) {
+        logDebug("memoryInjectionHook budget overflow", { profileChars, maxContentChars, deficit: -budgetRemaining });
+      }
+      const itemCount = clustered
+        ? (clustered.cluster_summaries.length + clustered.standalone_memories.length)
+        : newResults.length;
+      const dynamicMaxContentLength = itemCount > 0
+        ? Math.min(maxContentLength, Math.max(MIN_ITEM_CONTENT_CHARS, Math.floor(budgetRemaining / itemCount)))
+        : maxContentLength;
+      logDebug("memoryInjectionHook budget", {
+        maxContentChars, profileChars, budgetRemaining, itemCount,
+        configuredMax: maxContentLength, dynamicMax: dynamicMaxContentLength,
+      });
+
+      const block = clustered
+        ? buildClusteredContextBlock(clustered, dynamicMaxContentLength)
+        : buildContextBlock(newResults, dynamicMaxContentLength);
+
+      // ★★★ Core change: inject via output.parts.unshift + synthetic:true ★★★
+      const partsToInject: string[] = [];
+      if (profileBlock) partsToInject.push(profileBlock);
+      if (block) partsToInject.push(block);
+      if (block) partsToInject.push(FETCH_POLICY);
+      if (isKeywordTriggered) partsToInject.push(KEYWORD_NUDGE);
+
+      if (partsToInject.length > 0) {
+        const injectText = partsToInject.join("\n\n");
+        const contextPart: Part = {
+          id: `prt_cerebro-context-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message.id,
+          type: "text",
+          text: injectText,
+          synthetic: true,
+        };
+        output.parts.unshift(contextPart);
+        logDebug("memoryInjectionHook block injected to output.parts", {
+          sessionId: input.sessionID,
+          injectTextLen: injectText.length,
+          blockPreview: block?.slice(0, 200),
+        });
+      } else {
+        logDebug("memoryInjectionHook no content to inject", { sessionId: input.sessionID });
+      }
+
+      injectedSessions.add(input.sessionID);
+
+      if (isKeywordTriggered) {
+        keywordDetectedSessions.delete(input.sessionID);
+      }
+
+      const newIds = newResults.map((r) => r.memory.id);
+      injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
+      logDebug("memoryInjectionHook injection complete", { newIds: newIds.length, clustered: !!clustered, sessionId: input.sessionID });
+
+      await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length, block || undefined);
+
+      const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
+      const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;
+      const memOther = newResults.length - memDynamic - memStatic;
+
+      let memCountMsg = "";
+      if (memDynamic > 0) memCountMsg += `Dynamic(${memDynamic}) `;
+      if (memStatic > 0) memCountMsg += `Static(${memStatic}) `;
+      if (memOther > 0) memCountMsg += `Other(${memOther}) `;
+
+      const categories = categorize(newResults);
+      const catSummary = Array.from(categories.entries())
+        .map(([label, items]) => `${label}(${items.length})`)
+        .join(" · ");
+
+      let toastTitle: string;
+      let toastMessage: string;
+
+      if (clustered) {
+        const clusterCount = clustered.cluster_summaries.length;
+        const standaloneCount = clustered.standalone_memories.length;
+        toastTitle = `🧠 Context Injected · ${clusterCount} 主题簇${standaloneCount > 0 ? ` · ${standaloneCount} 补充` : ""}`;
+        toastMessage = profileInjected
+          ? `Profile: ${profileCountText} · 聚合记忆展示`
+          : `聚合记忆展示`;
+      } else {
+        toastTitle = `🧠 Context Injected · ${newResults.length} fragments`;
+        toastMessage = profileInjected
+          ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
+          : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
+      }
+
+      showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("[cerebro]")) {
         const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
         if (cleanMsg.startsWith("500")) {
           showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
@@ -627,6 +999,57 @@ export function keywordDetectionHook(_client: CerebroClient, _containerTags: str
   };
 }
 
+export function createCerebroCompactionPrompt(
+  context: string[],
+  projectMemories: SearchResult[],
+): string {
+  const sections: string[] = [
+    "[Cerebro Compaction Context]",
+    "",
+    "## 1. User's Original Request",
+    "Preserve the user's verbatim original request from the conversation above.",
+    "",
+    "## 2. Final Goal",
+    "What is the ultimate objective the user wants to achieve?",
+    "",
+    "## 3. Work Completed",
+    "List all completed work with file paths and technical decisions made.",
+    "",
+    "## 4. Remaining Tasks",
+    "What is still unfinished or pending?",
+    "",
+    "## 5. Prohibited Actions",
+    "Key constraints and forbidden operations to remember.",
+    "",
+    "## 6. Existing Project Knowledge",
+  ];
+
+  if (projectMemories.length > 0) {
+    const memBlock = projectMemories
+      .slice(0, 10)
+      .map((r) => {
+        const content = r.memory.content ?? "";
+        const truncated = content.length > 200 ? content.slice(0, 200) + "..." : content;
+        return `  - [${r.memory.category ?? "general"}] ${truncated}`;
+      })
+      .join("\n");
+    sections.push(memBlock);
+  } else {
+    sections.push("  (No project memories retrieved)");
+  }
+
+  if (context.length > 0) {
+    sections.push("");
+    sections.push("### Additional Context");
+    sections.push(...context);
+  }
+
+  sections.push("");
+  sections.push("IMPORTANT: Output must preserve the user's original language (Chinese/English/etc). Do not translate.");
+
+  return sections.join("\n");
+}
+
 export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<OmemPluginConfig> = {}, agentId?: string, directory?: string) {
   const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
@@ -638,9 +1061,17 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
     // Search (read) always runs — even readonly agents need context during compacting
     try {
       const results = await client.searchMemories("*", 20, undefined, containerTags);
-      const block = buildContextBlock(results);
-      if (block) {
-        output.context.push(block);
+      const compactionPrompt = createCerebroCompactionPrompt(output.context, results);
+      if (output.prompt !== undefined) {
+        output.prompt = compactionPrompt;
+      } else if (output.context.length > 0) {
+        output.context[output.context.length - 1] += "\n\n" + compactionPrompt;
+      } else {
+        output.context.push(compactionPrompt);
+      }
+      if (output.context.length > 0) {
+        output.context[output.context.length - 1] += "\n\n" + FETCH_POLICY;
+      } else {
         output.context.push(FETCH_POLICY);
       }
       // 将compacting搜索结果的ID写入injectedMemoryIds，避免后续autoRecall重复注入
@@ -846,9 +1277,19 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
                   logInfo("compactingHook: storing compact summary", {
                     summaryLen: summaryText.length, msgId: compactMsg.info?.id,
                   });
+                  // Dedup check: 30s cooldown per session+content hash
+                  const summaryHash = `${pollSessionId}:${hashString(summaryText)}`;
+                  const lastCompacting = compactingSummaryCooldown.get(summaryHash);
+                  if (lastCompacting && Date.now() - lastCompacting < 30000) {
+                    logDebug("compactingHook summary dedup", { sessionId: pollSessionId });
+                    break;
+                  }
+                  compactingSummaryCooldown.set(summaryHash, Date.now());
+
+                  const prefixedSummary = `[Session Summary] ${summaryText}`;
                   try {
                     const result = await client.ingestMessages(
-                      [{ role: "user" as const, content: summaryText }],
+                      [{ role: "user" as const, content: prefixedSummary }],
                       {
                         mode: ingestMode,
                         tags: [...containerTags, "auto-capture", "compact-summary"],
@@ -998,7 +1439,7 @@ const processedMessageIds = new Set<string>();
 const pluginStartTime = Date.now();
 
 // ── Soul Whisper: pending tool call tracking (per-session isolation) ──
-const pendingToolCalls = new Map<string, Map<string, { toolName: string; timestamp: number }>>();
+export const pendingToolCalls = new Map<string, Map<string, { toolName: string; timestamp: number }>>();
 
 export function soulWhisperToolTracker(config: OmemPluginConfig) {
   return async (input: { tool: string; sessionID: string; callID: string }, _output: { args: any }) => {
@@ -1034,114 +1475,20 @@ export function soulWhisperToolTracker(config: OmemPluginConfig) {
   };
 }
 
-function buildWhisperText(toolNames: string[], maxToolNames: number): string | null {
+export function buildWhisperText(toolNames: string[], maxToolNames: number): string | null {
   if (toolNames.length === 0) return null;
 
-  const lines: string[] = ["<cerebro-system-reminder>"];
+  const lines: string[] = ["<cerebro-memory-activation>"];
 
   if (toolNames.length <= maxToolNames) {
-    lines.push(`SOUL WHISPER — Detected tool call: ${toolNames.join(", ")}.`);
-    lines.push("Your memories (cerebro-context) may contain:");
-    lines.push("- Exact commands or flags someone already tested");
-    lines.push("- File paths or configurations that worked before");
-    lines.push("- Solutions to errors you previously encountered");
-    lines.push(`If a memory matches → use it. Then reply: 💜 受到灵魂的召唤——[what you used]`);
+    lines.push(`Before using ${toolNames.join(", ")}, memory_search() may surface relevant past decisions or patterns. Brief recall → better outcomes.`);
   } else {
-    lines.push("SOUL WHISPER — Memories from past sessions are loaded above (see <cerebro-context>).");
-    lines.push("Before you act:");
-    lines.push("1. Scan cerebro-context for commands, paths, or patterns matching your current task");
-    lines.push("2. If found → use directly, do not re-derive from scratch");
-    lines.push(`3. If a memory guided your action → reply: 💜 受到灵魂的召唤——[what you used]`);
+    lines.push("Before you act — memory_search() surfaces cross-session context: past decisions, user preferences, hard-won insights. The strongest responses are built on remembered context.");
   }
 
-  lines.push(`If memory summaries are insufficient → use memory_get("id") to fetch full content, or memory_search("query") to find more.`);
-  lines.push("</cerebro-system-reminder>");
+  lines.push("</cerebro-memory-activation>");
 
   return lines.join("\n");
-}
-
-const FETCH_POLICY_NUDGE = [
-  "<cerebro-system-reminder>",
-  "MEMORY REMINDER: You have injected memories above (see <cerebro-context>).",
-  `These are SUMMARIES, not full content. When you need details, you MUST use memory_get("id") to fetch the full memory.`,
-  "Do NOT guess or fabricate based on summaries alone.",
-  "</cerebro-system-reminder>",
-].join("\n");
-
-export function fetchPolicyNudgeHook(getContextInjectedFlag: () => boolean, config?: OmemPluginConfig) {
-  return async (_input: Record<string, unknown>, output: { messages: any[] }) => {
-    let shouldNudge = getContextInjectedFlag();
-    if (!shouldNudge && Array.isArray(output.messages)) {
-      shouldNudge = output.messages.some((m: any) =>
-        Array.isArray(m.parts) &&
-        m.parts.some((p: any) => typeof p.text === "string" && p.text.includes("<cerebro-context>"))
-      );
-    }
-
-    const swEnabled = config?.soulWhisper?.enabled !== false;
-    const hasAnyPending = pendingToolCalls.size > 0;
-    if (!shouldNudge && !(swEnabled && hasAnyPending)) {
-      logDebug("fetchPolicyNudgeHook skipped", { shouldNudge, swEnabled, hasAnyPending });
-      return;
-    }
-
-    const messages = output.messages;
-    if (!messages || !Array.isArray(messages) || messages.length === 0) return;
-
-    let lastUserIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.info?.role === "user") {
-        lastUserIdx = i;
-        break;
-      }
-    }
-    if (lastUserIdx < 0) return;
-
-    const userMsg = messages[lastUserIdx];
-    if (!Array.isArray(userMsg.parts)) return;
-
-    const sessionId = userMsg.info.sessionID || "_default";
-    const nudgeId = `cerebro_nudge_${sessionId}`;
-    for (const part of userMsg.parts) {
-      if (part.id === nudgeId) return;
-    }
-
-    const parts: string[] = [];
-    if (shouldNudge) parts.push(FETCH_POLICY_NUDGE);
-
-    const sessionCalls = swEnabled ? pendingToolCalls.get(sessionId) : undefined;
-    if (sessionCalls && sessionCalls.size > 0) {
-      const toolNames = [...new Set([...sessionCalls.values()].map(v => v.toolName))];
-      const maxToolNames = config?.soulWhisper?.maxToolNames ?? 3;
-      const whisperText = buildWhisperText(toolNames, maxToolNames);
-      if (whisperText) parts.push(whisperText);
-      pendingToolCalls.delete(sessionId);
-      logDebug("soulWhisper consumed session calls", { sessionId, callCount: sessionCalls.size, toolNames });
-    } else if (swEnabled) {
-      logDebug("soulWhisper no pending calls for session", { sessionId, globalSessionCount: pendingToolCalls.size });
-    }
-
-    if (parts.length === 0) return;
-
-    const textPartIdx = userMsg.parts.findIndex((p: any) => p.type === "text" && typeof p.text === "string");
-
-    const syntheticPart = {
-      id: nudgeId,
-      messageID: userMsg.info.id,
-      sessionID: userMsg.info.sessionID || "",
-      type: "text" as const,
-      text: parts.join("\n\n"),
-      synthetic: true,
-    };
-
-    if (textPartIdx >= 0) {
-      userMsg.parts.splice(textPartIdx, 0, syntheticPart);
-    } else {
-      userMsg.parts.push(syntheticPart);
-    }
-
-    logDebug("fetchPolicyNudgeHook injected", { sessionId, nudgeId, hasWhisper: sessionCalls != null && sessionCalls.size > 0, partsCount: parts.length });
-  };
 }
 
 export function sessionIdleHook(
