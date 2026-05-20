@@ -249,7 +249,7 @@ function formatMemoryLine(r: SearchResult, maxContentLength: number): string {
 const FETCH_POLICY = [
   "<cerebro-fetch-policy>",
   "IMPORTANT: Each memory above is a condensed summary. The full version contains critical details that may change your response quality.",
-  "You MUST use memory_get(\"id\") to retrieve the complete content before making decisions based on any summary.",
+  "You MUST use memory_get(\"id\") to retrieve the complete content, or memory_search(\"query\") to find specific memories before making decisions based on any summary.",
   "Do NOT rely on condensed summaries alone — depth of recall determines quality of response.",
   "</cerebro-fetch-policy>",
 ].join("\n");
