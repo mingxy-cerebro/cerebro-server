@@ -1,7 +1,7 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
 import type { CerebroClient, SearchResult } from "./client.js";
 import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
-import { detectKeyword, KEYWORD_NUDGE } from "./keywords.js";
+import { detectSaveKeyword, KEYWORD_NUDGE } from "./keywords.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 import { stripPrivateContent } from "./privacy.js";
@@ -167,7 +167,7 @@ function extractUserRequest(content: string): string {
   return text;
 }
 
-const keywordDetectedSessions = new Set<string>();
+const saveKeywordDetectedSessions = new Set<string>();
 const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
@@ -590,9 +590,9 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
 
       showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
 
-      if (keywordDetectedSessions.has(input.sessionID)) {
+      if (saveKeywordDetectedSessions.has(input.sessionID)) {
         appendToSystem(output.system, KEYWORD_NUDGE);
-        keywordDetectedSessions.delete(input.sessionID);
+        saveKeywordDetectedSessions.delete(input.sessionID);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -647,12 +647,10 @@ export function memoryInjectionHook(
     const policy = resolveAgentPolicy(agentId, config);
     if (policy === "none") return;
 
-    const isFirstInjection = !injectedSessions.has(input.sessionID);
-    const isKeywordTriggered = keywordDetectedSessions.has(input.sessionID);
-    if (!isFirstInjection && !isKeywordTriggered) return;
+    const isSaveKeyword = saveKeywordDetectedSessions.has(input.sessionID);
 
     try {
-      logDebug("memoryInjectionHook start", { sessionId: input.sessionID, agentId, policy, isFirstInjection, isKeywordTriggered, similarityThreshold, maxRecallResults });
+      logDebug("memoryInjectionHook start", { sessionId: input.sessionID, agentId, policy, isSaveKeyword, similarityThreshold, maxRecallResults });
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
@@ -871,7 +869,7 @@ export function memoryInjectionHook(
       if (profileBlock) partsToInject.push(profileBlock);
       if (block) partsToInject.push(block);
       if (block) partsToInject.push(FETCH_POLICY);
-      if (isKeywordTriggered) partsToInject.push(KEYWORD_NUDGE);
+      if (isSaveKeyword) partsToInject.push(KEYWORD_NUDGE);
 
       if (partsToInject.length > 0) {
         const injectText = partsToInject.join("\n\n");
@@ -895,8 +893,8 @@ export function memoryInjectionHook(
 
       injectedSessions.add(input.sessionID);
 
-      if (isKeywordTriggered) {
-        keywordDetectedSessions.delete(input.sessionID);
+      if (isSaveKeyword) {
+        saveKeywordDetectedSessions.delete(input.sessionID);
       }
 
       const newIds = newResults.map((r) => r.memory.id);
@@ -974,8 +972,8 @@ export function keywordDetectionHook(_client: CerebroClient, _containerTags: str
       firstMessages.set(input.sessionID, textContent);
     }
 
-    if (detectKeyword(textContent)) {
-      keywordDetectedSessions.add(input.sessionID);
+    if (detectSaveKeyword(textContent)) {
+      saveKeywordDetectedSessions.add(input.sessionID);
       logDebug("keywordDetectionHook triggered", { sessionId: input.sessionID });
     }
 
@@ -1159,6 +1157,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       }
       // Cleanup tracked messages regardless of ingest result
       sessionMessages.delete(input.sessionID);
+      injectedSessions.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
       if (input.sessionID) {

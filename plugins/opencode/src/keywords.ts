@@ -1,4 +1,4 @@
-const KEYWORDS: readonly string[] = [
+const SAVE_KEYWORDS: readonly string[] = [
   "remember",
   "save this",
   "don't forget",
@@ -13,9 +13,9 @@ const KEYWORDS: readonly string[] = [
   "别忘了",
 ] as const;
 
-export function detectKeyword(text: string): boolean {
+export function detectSaveKeyword(text: string): boolean {
   const lower = text.toLowerCase();
-  return KEYWORDS.some((kw) => lower.includes(kw));
+  return SAVE_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
 export const KEYWORD_NUDGE =
