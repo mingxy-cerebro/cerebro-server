@@ -17,31 +17,6 @@ fn build_category_section(categories: &[CategoryConfig]) -> String {
 fn build_format_rules(categories: &[CategoryConfig]) -> String {
     let mut s = String::new();
 
-    // Categories with prompt_format = "preference"
-    let pref_cats: Vec<&CategoryConfig> = categories
-        .iter()
-        .filter(|c| c.prompt_format.as_deref() == Some("preference"))
-        .collect();
-    if !pref_cats.is_empty() {
-        let cat_names: Vec<&str> = pref_cats.iter().map(|c| c.name.as_str()).collect();
-        let cat_list = cat_names.join(", ");
-        s.push_str(&format!(
-            r###"### PREFERENCE Format (MANDATORY for categories: {cat_list})
-For facts classified as "{cat_list}", ALL three layers (l0_abstract, l1_overview, l2_content) MUST use this structured Markdown format:
-```
-## {{偏好主题}}
-- **偏好**: {{具体偏好描述}}
-- **置信度**: {{0.0-1.0}}
-- **类型**: static | evolving
-```
-- Each preference gets its own `## Title` section. Multiple preferences separated by blank lines.
-- `type`: static = stable preference; evolving = may change over time.
-- This format applies ONLY to categories "{cat_list}". Other categories keep their normal format.
-
-"###
-        ));
-    }
-
     // Categories with prompt_format = "work"
     let work_cats: Vec<&CategoryConfig> = categories
         .iter()
@@ -557,20 +532,7 @@ User says: "我是Stripe的后端工程师，在支付团队工作。"
 {"memories": [{"l0_abstract": "用户是Stripe支付团队的后端工程师", "l1_overview": "**职位**: 后端工程师\n**公司**: Stripe\n**团队**: 支付团队", "l2_content": "用户自我介绍为Stripe公司的后端工程师，具体在支付团队工作。", "category": "profile", "tags": ["business-logic"], "confidence": 4, "why": "Professional identity is stable and affects future technical context."}]}
 ```
 
-### Example 2 — Preference (Chinese Input → Chinese Output with PREFERENCE format)
-User says: "我习惯用Rust做系统编程，比C++安全多了。"
-NOTE: For category="preferences", all three layers use structured Markdown format.
-```
-## 编程语言偏好
-- **偏好**: 习惯使用Rust进行系统编程，认为比C++更安全
-- **置信度**: 0.8
-- **类型**: static
-```
-```json
-{"memories": [{"l0_abstract": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l1_overview": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "l2_content": "## 编程语言偏好\n- 偏好: 习惯使用Rust进行系统编程，认为比C++更安全\n- 置信度: 0.8\n- 类型: static", "category": "preferences", "tags": ["programming", "languages"], "confidence": 4, "why": "Stable language preference affects code generation and project setup decisions."}]}
-```
-
-### Example 3 — Case with Private Content (Chinese Input → Chinese Output + 私密标签)
+### Example 2 — Case with Private Content (Chinese Input → Chinese Output + 私密标签)
 User says: "我的服务器IP是47.93.199.242，root密码是Mengfanbo@0714，部署了omem服务。"
 ```json
 {"memories": [{"l0_abstract": "用户拥有服务器用于部署omem服务", "l1_overview": "**用途**: 部署omem服务\n**备注**: 服务器访问信息已保存", "l2_content": "用户拥有一台用于部署omem服务的服务器。", "category": "entities", "tags": ["infrastructure", "私密"], "confidence": 3, "why": "Server infrastructure ownership is durable and relevant for future deployment tasks."}]}
@@ -872,13 +834,12 @@ Return ONLY valid JSON:
 
 // ── Session Extract Prompt (分类提取模式) ────────────
 
-const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into THREE categories.
+const SESSION_EXTRACT_SYSTEM_PROMPT: &str = r###"You are a smart memory extraction engine. Extract valuable information from the conversation and classify into TWO categories.
 
 ## CLASSIFICATION PRIORITY (read FIRST, apply STRICTLY)
-When deciding between WORK and PREFERENCE:
+When in doubt about classification:
 1. Content about ANY specific project, code, file, deployment, bug, or technical implementation → **always WORK**
 2. Uncertain if lasting trait or one-time observation → **default to WORK** (safe choice)
-3. Only PREFERENCE when confident it describes a **STABLE, CROSS-SESSION user trait** (applies regardless of project)
 
 ## ALWAYS SKIP
 - compress/DCP logs, build/test results, CI/CD logs, deployment status
@@ -926,43 +887,6 @@ For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this st
 - **Content**: Migrated vector storage from custom implementation to LanceDB 0.27 with per-tenant LRU cache
 - **Scope**: store/manager.rs, store/lancedb.rs, ingest pipeline
 - **Decision**: LRU cache with max 20 entries balances memory and latency
-
-### PREFERENCE (scope "public", category "preferences")
-- Stable user traits: personality, communication style, coding style (e.g., "prefers functional over OOP"), cross-session tool/workflow habits.
-- KEY TEST: "Would this still be true if the user switched to a completely different project?" If NO → classify as WORK.
-- **HARD EXCLUSION → always WORK**: code/file/API specifics, deployment configs, bug reports, architecture decisions, project-specific tech choices, agent delegation results, build/test logs.
-- **Exception**: Cross-project coding principles (e.g., "never use unwrap in production") ARE valid PREFERENCEs when stated as general rules.
-- **NEGATIVE**: One-time instructions, temporary emotions, project-specific choices → NOT preferences.
-
-**PREFERENCE OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
-For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
-```
-## {偏好主题}
-- **偏好**: {具体偏好描述}
-- **置信度**: {0.0-1.0}
-- **类型**: static | evolving
-```
-- Each preference gets its own `## Title` section.
-- Multiple preferences are separated by blank lines.
-- `type`: static = stable preference unlikely to change; evolving = may change over time.
-- Example (Chinese input):
-```
-## 编程语言偏好
-- **偏好**: 喜欢Java和TypeScript，不喜欢Rust和Go
-- **置信度**: 0.8
-- **类型**: evolving
-
-## 代码质量
-- **偏好**: 要求通过团队评审保证质量
-- **置信度**: 0.9
-- **类型**: static
-```
-- Example (English input):
-```
-## Communication Style
-- **Preference**: Prefers concise answers over verbose explanations
-- **Confidence**: 0.9
-- **Type**: static
 ```
 
 ## CATEGORY VALUES (for WORK and EMOTIONAL)
@@ -985,7 +909,6 @@ For PREFERENCE memories, l0_abstract, l1_overview, and l2_content MUST all use t
 When "## Existing Memories" section exists:
 - **EMOTIONAL**: Merge and enrich, preserve emotional arc
 - **WORK**: Supersede old conclusions with newer ones
-- **PREFERENCE**: Strengthen (↑confidence) or contradict (update + mark "evolving")
 Do NOT re-extract information already perfectly captured.
 
 ## OUTPUT FORMAT
@@ -998,16 +921,16 @@ Return ONLY valid JSON array. Each element:
   "tags": string[],
   "scope": "public"|"private",
   "category": string,
-  "memory_type": "EMOTIONAL"|"WORK"|"PREFERENCE"
+  "memory_type": "EMOTIONAL"|"WORK"
 }
 
 - "topic": Short title (1 sentence) → maps to l0_abstract.
-- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: structured 2-3 line summary with key conclusions. For EMOTIONAL/PREFERENCE: brief gist.
-- "detail": Structured narrative in ≤500 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL/PREFERENCE: expanded narrative.
-- "summary": Full content → maps to content. WORK ≤800 chars, EMOTIONAL ≤500 chars, PREFERENCE ≤500 chars. WORK must use structured Markdown format.
+- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: structured 2-3 line summary with key conclusions. For EMOTIONAL: brief gist.
+- "detail": Structured narrative in ≤500 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
+- "summary": Full content → maps to content. WORK ≤800 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
 - "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
-- "scope": "public" for WORK/PREFERENCE, "private" for EMOTIONAL.
-- "category": WORK → pick from 6 categories above. PREFERENCE → always "preferences". EMOTIONAL → pick best fit.
+- "scope": "public" for WORK, "private" for EMOTIONAL.
+- "category": WORK → pick from 6 categories above. EMOTIONAL → pick best fit.
 - "memory_type": The classification label.
 
 Escape all double quotes and newlines inside JSON strings.
@@ -1015,31 +938,7 @@ Escape all double quotes and newlines inside JSON strings.
 Return [] ONLY for conversations that are purely casual small talk with zero factual content.
 "###;
 
-#[allow(dead_code)]
-const PREFERENCE_EXTRACT_SYSTEM_PROMPT: &str = r##"You are a user preference extraction engine. Analyze the conversation and extract ONLY genuine user preferences, personality traits, and lasting characteristics.
 
-## WHAT TO EXTRACT
-- Communication style (e.g., "prefers concise answers", "likes detailed explanations")
-- Technical preferences (e.g., "prefers dark mode", "uses vim keybindings")
-- Personality traits (e.g., "perfectionist about code quality", "values direct feedback")
-- Workflow habits (e.g., "works late at night", "prefers incremental commits")
-
-## WHAT NOT TO EXTRACT
-- Project-specific technical decisions (those are WORK memories)
-- Temporary states ("tired today", "busy this week")
-- Tool outputs, build results, AI analyses
-- Casual conversation with no lasting preference signal
-
-## OUTPUT FORMAT
-Return ONLY valid JSON array. Each element:
-{
-  "preference": string,
-  "confidence": number,
-  "category": string
-}
-
-Return [] if no clear preferences found.
-"##;
 
 /// Build the session extract prompt.
 /// `conversation` is the formatted conversation text.
@@ -1092,10 +991,9 @@ mod session_extract_tests {
     use super::*;
 
     #[test]
-    fn test_system_prompt_contains_three_categories() {
+    fn test_system_prompt_contains_two_categories() {
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("EMOTIONAL"));
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("WORK"));
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PREFERENCE"));
     }
 
     #[test]
@@ -1104,8 +1002,6 @@ mod session_extract_tests {
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Preserve emotional tone"));
         // WORK: denoise
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("DENOISE"));
-        // PREFERENCE: structured output
-        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("PREFERENCE OUTPUT FORMAT"));
     }
 
     #[test]

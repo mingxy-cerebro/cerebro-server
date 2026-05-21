@@ -853,7 +853,6 @@ mod tests {
             session_locks: Arc::new(dashmap::DashMap::new()),
             reranker: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
-            profile_cache: Arc::new(dashmap::DashMap::new()),
             sqlite_store: {
                 let s = Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite"));
                 {

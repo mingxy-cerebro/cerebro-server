@@ -8,7 +8,6 @@ pub mod ingest;
 pub mod lifecycle;
 pub mod llm;
 pub mod multimodal;
-pub mod profile;
 pub mod profile_v2;
 pub mod retrieve;
 pub mod store;

@@ -10,7 +10,6 @@ use crate::cluster::cluster_store::ClusterStore;
 use crate::config::OmemConfig;
 use crate::embed::EmbedService;
 use crate::llm::LlmService;
-use crate::profile::service::CachedProfile;
 use crate::profile_v2::induction::InductionEngine;
 use crate::profile_v2::injection::InjectionBuilder;
 use crate::profile_v2::service::ProfileV2Service;
@@ -40,7 +39,6 @@ pub struct AppState {
     /// Limits concurrent background ingest tasks (LLM extraction + reconciliation).
     /// Prevents OOM under burst load. Default: 10.
     pub ingest_semaphore: Arc<Semaphore>,
-    pub profile_cache: Arc<DashMap<String, CachedProfile>>,
     pub sqlite_store: Arc<SqliteStore>,
     pub category_registry: Arc<CategoryRegistry>,
     pub profile_v2_service: Arc<ProfileV2Service>,

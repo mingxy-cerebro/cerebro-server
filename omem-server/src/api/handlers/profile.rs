@@ -4,10 +4,9 @@ use axum::extract::{Extension, Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::api::server::{personal_space_id, AppState};
+use crate::api::server::AppState;
 use crate::domain::error::OmemError;
 use crate::domain::tenant::AuthInfo;
-use crate::profile::service::ProfileService;
 
 #[derive(Deserialize)]
 pub struct ProfileQuery {
@@ -15,39 +14,28 @@ pub struct ProfileQuery {
     pub q: String,
 }
 
-/// GET /v1/profile — Returns aggregated user profile from ProfileService.
+/// GET /v1/profile — Returns user profile via V2 injection builder.
+/// Maintains V1 API contract for openclaw/mcp compatibility.
 pub async fn get_profile(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
-    Query(params): Query<ProfileQuery>,
+    Query(_params): Query<ProfileQuery>,
 ) -> Result<Json<serde_json::Value>, OmemError> {
-    let store = state
-        .store_manager
-        .get_store(&personal_space_id(&auth.tenant_id))
-        .await?;
-    let profile_service = ProfileService::new(store, state.profile_cache.clone(), auth.tenant_id.clone())
-        .with_llm(state.llm.clone());
+    let result = state
+        .injection_builder
+        .build_injection(&auth.tenant_id, None)?;
 
-    let query = if params.q.is_empty() {
-        None
+    if result.content.is_empty() {
+        Ok(Json(serde_json::json!({
+            "static_facts": [],
+            "dynamic_context": [],
+            "search_results": null
+        })))
     } else {
-        Some(params.q.as_str())
-    };
-    let response = profile_service.get_profile(query).await?;
-
-    Ok(Json(serde_json::json!({
-        "static_facts": response.profile.static_facts,
-        "dynamic_context": response.profile.dynamic_context,
-        "search_results": response.search_results.map(|results| {
-            results.iter().map(|r| serde_json::json!({
-                "score": r.score,
-                "memory": {
-                    "id": r.memory.id,
-                    "content": r.memory.content,
-                    "category": r.memory.category.to_string(),
-                    "tags": r.memory.tags,
-                }
-            })).collect::<Vec<_>>()
-        })
-    })))
+        Ok(Json(serde_json::json!({
+            "static_facts": [],
+            "dynamic_context": [result.content],
+            "search_results": null
+        })))
+    }
 }

@@ -3,7 +3,6 @@ pub mod extractor;
 pub mod intelligence;
 pub mod noise;
 pub mod pipeline;
-pub mod preference_slots;
 pub mod privacy;
 pub mod prompts;
 pub mod reconciler;

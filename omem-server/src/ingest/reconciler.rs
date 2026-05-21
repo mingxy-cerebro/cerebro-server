@@ -10,7 +10,6 @@ use crate::domain::memory::Memory;
 use crate::domain::relation::{MemoryRelation, RelationType};
 use crate::domain::types::MemoryType;
 use crate::embed::EmbedService;
-use crate::ingest::preference_slots;
 use crate::ingest::prompts;
 use crate::ingest::types::{BatchDedupResult, ExtractedFact, ReconcileResult};
 use crate::llm::{complete_json, LlmService};
@@ -121,16 +120,7 @@ impl Reconciler {
             return Ok(created_memories);
         }
 
-        let mut remaining_facts: Vec<(usize, &ExtractedFact)> = Vec::new();
-
-        for (idx, fact) in facts.iter().enumerate() {
-            if self.preference_slot_guard(fact, &existing, agent_id.clone(), session_id.clone()).await? {
-                let mem = self.create_fact_memory(fact, tenant_id, agent_id.clone(), session_id.clone(), project_path.clone()).await?;
-                created_memories.push(mem);
-            } else {
-                remaining_facts.push((idx, fact));
-            }
-        }
+        let remaining_facts: Vec<(usize, &ExtractedFact)> = facts.iter().enumerate().collect();
 
         if remaining_facts.is_empty() {
             return Ok(created_memories);
@@ -327,37 +317,6 @@ impl Reconciler {
         Ok((merged, remaining))
     }
 
-    async fn preference_slot_guard(
-        &self,
-        fact: &ExtractedFact,
-        existing: &[Memory],
-        _agent_id: Option<String>,
-        _session_id: Option<String>,
-    ) -> Result<bool, OmemError> {
-        let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
-        if category != Category::new("preferences") {
-            return Ok(false);
-        }
-
-        let candidate_slot = match preference_slots::infer_preference_slot(&fact.l0_abstract) {
-            Some(s) => s,
-            None => return Ok(false),
-        };
-
-        for mem in existing {
-            if mem.category != Category::new("preferences") {
-                continue;
-            }
-            if let Some(existing_slot) = preference_slots::infer_preference_slot(&mem.l0_abstract) {
-                if preference_slots::is_same_brand_different_item(&candidate_slot, &existing_slot) {
-                    return Ok(true);
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn handle_supersede(
         &self,
@@ -497,7 +456,7 @@ impl Reconciler {
             .ok_or_else(|| OmemError::NotFound(format!("memory {real_id}")))?;
 
         let category: Category = fact.category.parse().unwrap_or_else(|_| Category::new("profile"));
-        if matches!(category.as_str(), "preferences" | "project") {
+        if matches!(category.as_str(), "project") {
             return self
                 .handle_supersede(fact, match_index, int_to_uuid, tenant_id, created_memories, agent_id.clone(), session_id.clone(), project_path.clone())
                 .await;
@@ -1554,24 +1513,24 @@ mod tests {
         let embed = Arc::new(MockEmbed);
 
         let mut existing = Memory::new(
-            "User prefers Python",
-            Category::new("preferences"),
+            "Project uses Python backend",
+            Category::new("project"),
             MemoryType::Insight,
             "t-001",
         );
-        existing.l0_abstract = "User prefers Python".to_string();
+        existing.l0_abstract = "Project uses Python backend".to_string();
         store
             .create(&existing, Some(&vec![0.0; 1024]))
             .await
             .expect("create");
 
-        let contradict_response = r#"{"decisions":[{"action":"CONTRADICT","fact_index":0,"match_index":0,"reason":"now prefers Rust"}]}"#;
+        let contradict_response = r#"{"decisions":[{"action":"CONTRADICT","fact_index":0,"match_index":0,"reason":"migrated to Rust"}]}"#;
         let llm = Arc::new(MockLlm::new(contradict_response));
 
         let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
         let facts = vec![make_fact(
-            "User now prefers Rust over Python",
-            "preferences",
+            "Project migrated to Rust backend",
+            "project",
         )];
 
         let result = reconciler
@@ -1579,7 +1538,7 @@ mod tests {
             .await
             .expect("reconcile");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].l0_abstract, "User now prefers Rust over Python");
+        assert_eq!(result[0].l0_abstract, "Project migrated to Rust backend");
 
         let old = store
             .get_by_id(&existing.id)
@@ -1635,37 +1594,6 @@ mod tests {
         assert_eq!(old.relations.len(), 1);
         assert_eq!(old.relations[0].relation_type, RelationType::Contradicts);
         assert_eq!(old.relations[0].target_id, result[0].id);
-    }
-
-    #[tokio::test]
-    async fn test_preference_slot_guard() {
-        let (store, _dir) = setup().await;
-        let embed = Arc::new(MockEmbed);
-
-        let mut existing = Memory::new(
-            "喜欢星巴克的拿铁",
-            Category::new("preferences"),
-            MemoryType::Insight,
-            "t-001",
-        );
-        existing.l0_abstract = "喜欢星巴克的拿铁".to_string();
-        store
-            .create(&existing, Some(&vec![0.0; 1024]))
-            .await
-            .expect("create");
-
-        let llm = Arc::new(MockLlm::new("should not be called"));
-
-        let reconciler = Reconciler::new(llm, store.clone(), embed, setup_registry(), "t-001".to_string());
-        let facts = vec![make_fact("喜欢星巴克的美式", "preferences")];
-
-        let result = reconciler
-            .reconcile(&facts, "t-001", None, None, None)
-            .await
-            .expect("reconcile");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].l0_abstract, "喜欢星巴克的美式");
-        assert_ne!(result[0].id, existing.id);
     }
 
     #[tokio::test]

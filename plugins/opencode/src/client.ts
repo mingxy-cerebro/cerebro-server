@@ -75,6 +75,19 @@ export interface ShouldRecallResponse {
   clustered?: ClusteredRecallResult;
 }
 
+export interface PreferenceDto {
+  id: string;
+  slot: string;
+  value: string;
+  confidence: number;
+  scope: string;
+  project_path?: string;
+  source: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface MemoryRelation {
   relation_type: string;
   target_id: string;
@@ -268,8 +281,10 @@ export class CerebroClient {
     });
   }
 
-  async getProfile(_query?: string): Promise<unknown> {
-    return this.request("/v1/profile");
+  async getProfile(projectPath?: string): Promise<PreferenceDto[]> {
+    const params = projectPath ? `?project_path=${encodeURIComponent(projectPath)}` : "";
+    const res = await this.request<PreferenceDto[]>(`/v2/profile${params}`);
+    return res ?? [];
   }
 
   async getInjection(projectPath?: string): Promise<{
@@ -283,6 +298,10 @@ export class CerebroClient {
 
   async getStats(): Promise<unknown> {
     return this.request("/v1/stats");
+  }
+
+  async getProfileStats(): Promise<unknown> {
+    return this.request("/v2/profile/stats");
   }
 
   async listRecent(limit = 20): Promise<MemoryDto[]> {

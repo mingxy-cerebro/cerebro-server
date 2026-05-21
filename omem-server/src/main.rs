@@ -172,7 +172,6 @@ async fn main() {
         session_locks: Arc::new(dashmap::DashMap::new()),
         reranker: omem_server::retrieve::reranker::Reranker::from_env(),
         ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
-        profile_cache: Arc::new(dashmap::DashMap::new()),
         sqlite_store,
         category_registry,
         profile_v2_service,

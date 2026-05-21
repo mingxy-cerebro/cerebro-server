@@ -168,9 +168,19 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "Get the user profile synthesized from stored memories. Shows preferences, patterns, and key information.",
       args: {},
       async execute() {
-        const profile = await client.getProfile();
-        if (!profile) return JSON.stringify({ ok: false, error: "Failed to get profile" });
-        return JSON.stringify({ ok: true, profile });
+        const preferences = await client.getProfile();
+        if (preferences.length === 0) return JSON.stringify({ ok: true, count: 0, preferences: [] });
+        return JSON.stringify({ ok: true, count: preferences.length, preferences });
+      },
+    }),
+
+    memory_profile_stats: tool({
+      description:
+        "View user profile statistics — total preferences, slot distribution, induction run counts, etc.",
+      args: {},
+      async execute() {
+        const stats = await client.getProfileStats();
+        return JSON.stringify({ ok: true, stats });
       },
     }),
 
