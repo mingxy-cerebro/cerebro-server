@@ -85,6 +85,12 @@ mod tests {
             sqlite_schema::create_tables(&conn).expect("sqlite tables");
         }
         let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
+        let profile_v2_sqlite = Arc::new(SqliteStore::new_in_memory().expect("profile sqlite"));
+        let profile_store = Arc::new(crate::profile_v2::store::ProfileStore::new(profile_v2_sqlite));
+        profile_store.init().expect("profile tables");
+        let profile_v2_service = Arc::new(crate::profile_v2::service::ProfileV2Service::new(profile_store.clone(), None, &OmemConfig::default()));
+        let induction_engine = Arc::new(crate::profile_v2::induction::InductionEngine::new(profile_v2_service.clone()));
+        let injection_builder = Arc::new(crate::profile_v2::injection::InjectionBuilder::new(profile_v2_service.clone()));
         let state = Arc::new(AppState {
             store_manager,
             tenant_store,
@@ -105,6 +111,9 @@ mod tests {
             profile_cache: Arc::new(dashmap::DashMap::new()),
             sqlite_store,
             category_registry,
+            profile_v2_service,
+            induction_engine,
+            injection_builder,
         });
 
         (build_router(state), dir)

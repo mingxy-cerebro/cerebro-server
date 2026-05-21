@@ -16,6 +16,8 @@ use crate::lifecycle::forgetting::AutoForgetter;
 use crate::lifecycle::tier::TierManager;
 use crate::lifecycle::decay::DecayConfig;
 use crate::lifecycle::tier::TierConfig;
+use crate::profile_v2::store::ProfileStore;
+use crate::profile_v2::types::{PreferenceStatus, ProfileChangelog};
 use crate::store::StoreManager;
 
 pub struct LifecycleScheduler {
@@ -35,6 +37,8 @@ pub struct LifecycleScheduler {
     forgetting_max_stale_deletions: usize,
     forgetting_access_count_protection: u32,
     forgetting_superseded_archive_days: u32,
+    profile_store: Option<Arc<ProfileStore>>,
+    profile_dormant_days: u32,
 }
 
 impl LifecycleScheduler {
@@ -60,6 +64,8 @@ impl LifecycleScheduler {
             forgetting_max_stale_deletions: 50,
             forgetting_access_count_protection: 5,
             forgetting_superseded_archive_days: 30,
+            profile_store: None,
+            profile_dormant_days: 90,
         }
     }
 
@@ -118,11 +124,24 @@ impl LifecycleScheduler {
         self
     }
 
+    pub fn with_profile_store(mut self, store: Arc<ProfileStore>, dormant_days: u32) -> Self {
+        self.profile_store = Some(store);
+        self.profile_dormant_days = dormant_days;
+        self
+    }
+
     pub async fn run(self: Arc<Self>) {
         if self.run_on_start {
             info!("lifecycle_scheduler_running_on_start");
             if let Err(e) = self.run_once().await {
                 warn!(error = %e, "lifecycle_scheduler_initial_run_failed");
+            }
+
+            // Cleanup expired induction locks on start
+            if let Some(ps) = &self.profile_store {
+                if let Err(e) = ps.cleanup_expired_locks() {
+                    warn!(error = %e, "profile_locks_cleanup_failed");
+                }
             }
         }
 
@@ -239,6 +258,19 @@ impl LifecycleScheduler {
         info!(session_stores_optimized = session_optimized, "scheduler_session_optimize_done");
 
         self.emit("lifecycle.complete", "system", json!({"stores": stores.len()}));
+
+        // Profile V2 maintenance tasks
+        if let Some(ps) = &self.profile_store {
+            if let Err(e) = self.check_dormant_preferences(ps).await {
+                warn!(error = %e, "profile_dormant_check_failed");
+            }
+            if let Err(e) = self.cleanup_deleted_preferences(ps).await {
+                warn!(error = %e, "profile_deleted_cleanup_failed");
+            }
+            if let Err(e) = ps.cleanup_expired_locks() {
+                warn!(error = %e, "profile_locks_cleanup_failed");
+            }
+        }
 
         Ok(())
     }
@@ -414,5 +446,86 @@ impl LifecycleScheduler {
                 warn!(error = %e, tenant_id, "scheduler_incremental_clustering_failed");
             }
         }
+    }
+
+    async fn check_dormant_preferences(&self, store: &ProfileStore) -> Result<(), crate::domain::error::OmemError> {
+        let stores = self.store_manager.all_stores().await?;
+        let dormant_threshold = chrono::Utc::now() - chrono::Duration::days(self.profile_dormant_days as i64);
+
+        for lance_store in &stores {
+            let tenant_id = match lance_store.list(1, 0).await {
+                Ok(memories) => memories.first().map(|m| m.tenant_id.clone()).unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            if tenant_id.is_empty() {
+                continue;
+            }
+
+            let prefs = store.get_preferences(&tenant_id, None)?;
+            let mut dormant_count = 0usize;
+            for pref in &prefs {
+                if pref.status == PreferenceStatus::Active || pref.status == PreferenceStatus::Reinforce {
+                    if pref.last_reinforced_at < dormant_threshold {
+                        store.update_status(&pref.id, "dormant")?;
+                        store.record_changelog(&ProfileChangelog {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            tenant_id: tenant_id.clone(),
+                            preference_id: pref.id.clone(),
+                            action: "dormant".to_string(),
+                            old_value: Some(pref.status.as_str().to_string()),
+                            new_value: None,
+                            source: "lifecycle".to_string(),
+                            created_at: chrono::Utc::now(),
+                        })?;
+                        dormant_count += 1;
+                    }
+                }
+            }
+            if dormant_count > 0 {
+                info!(tenant_id, dormant_count, "profile_preferences_marked_dormant");
+                store.invalidate_cache(&tenant_id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn cleanup_deleted_preferences(&self, store: &ProfileStore) -> Result<(), crate::domain::error::OmemError> {
+        let stores = self.store_manager.all_stores().await?;
+        let deleted_threshold = chrono::Utc::now() - chrono::Duration::days(180);
+
+        for lance_store in &stores {
+            let tenant_id = match lance_store.list(1, 0).await {
+                Ok(memories) => memories.first().map(|m| m.tenant_id.clone()).unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            if tenant_id.is_empty() {
+                continue;
+            }
+
+            let prefs = store.get_preferences(&tenant_id, None)?;
+            let mut deleted_count = 0usize;
+
+            for pref in &prefs {
+                if pref.status == PreferenceStatus::Dormant && pref.updated_at < deleted_threshold {
+                    store.record_changelog(&ProfileChangelog {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tenant_id: tenant_id.clone(),
+                        preference_id: pref.id.clone(),
+                        action: "deleted".to_string(),
+                        old_value: Some("dormant".to_string()),
+                        new_value: None,
+                        source: "lifecycle_cleanup".to_string(),
+                        created_at: chrono::Utc::now(),
+                    })?;
+                    store.delete_preference(&pref.id)?;
+                    deleted_count += 1;
+                }
+            }
+            if deleted_count > 0 {
+                info!(tenant_id, deleted_count, "profile_preferences_hard_deleted");
+                store.invalidate_cache(&tenant_id);
+            }
+        }
+        Ok(())
     }
 }

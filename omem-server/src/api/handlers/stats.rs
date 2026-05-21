@@ -865,6 +865,29 @@ mod tests {
             category_registry: Arc::new(crate::domain::category::CategoryRegistry::new(
                 Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite")),
             )),
+            profile_v2_service: {
+                let ps = Arc::new(crate::profile_v2::store::ProfileStore::new(
+                    Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite")),
+                ));
+                ps.init().expect("profile tables");
+                Arc::new(crate::profile_v2::service::ProfileV2Service::new(ps.clone(), None, &crate::config::OmemConfig::default()))
+            },
+            induction_engine: {
+                let ps = Arc::new(crate::profile_v2::store::ProfileStore::new(
+                    Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite")),
+                ));
+                ps.init().expect("profile tables");
+                let svc = Arc::new(crate::profile_v2::service::ProfileV2Service::new(ps.clone(), None, &crate::config::OmemConfig::default()));
+                Arc::new(crate::profile_v2::induction::InductionEngine::new(svc))
+            },
+            injection_builder: {
+                let ps = Arc::new(crate::profile_v2::store::ProfileStore::new(
+                    Arc::new(crate::store::sqlite::SqliteStore::new_in_memory().expect("sqlite")),
+                ));
+                ps.init().expect("profile tables");
+                let svc = Arc::new(crate::profile_v2::service::ProfileV2Service::new(ps.clone(), None, &crate::config::OmemConfig::default()));
+                Arc::new(crate::profile_v2::injection::InjectionBuilder::new(svc))
+            },
         });
 
         (state, store_dir, space_dir, tenant_dir)

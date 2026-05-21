@@ -11,6 +11,9 @@ use crate::config::OmemConfig;
 use crate::embed::EmbedService;
 use crate::llm::LlmService;
 use crate::profile::service::CachedProfile;
+use crate::profile_v2::induction::InductionEngine;
+use crate::profile_v2::injection::InjectionBuilder;
+use crate::profile_v2::service::ProfileV2Service;
 use crate::retrieve::reranker::Reranker;
 use crate::domain::category::CategoryRegistry;
 use crate::store::sqlite::SqliteStore;
@@ -40,6 +43,9 @@ pub struct AppState {
     pub profile_cache: Arc<DashMap<String, CachedProfile>>,
     pub sqlite_store: Arc<SqliteStore>,
     pub category_registry: Arc<CategoryRegistry>,
+    pub profile_v2_service: Arc<ProfileV2Service>,
+    pub induction_engine: Arc<InductionEngine>,
+    pub injection_builder: Arc<InjectionBuilder>,
 }
 
 /// Map tenant_id to their personal Space ID.

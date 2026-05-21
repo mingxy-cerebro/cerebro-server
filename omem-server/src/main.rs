@@ -7,9 +7,13 @@ use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
 use omem_server::cluster::cluster_store::ClusterStore;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
-use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_recall_llm_service, LlmService};
+use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_profile_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
 use omem_server::domain::category::CategoryRegistry;
+use omem_server::profile_v2::store::ProfileStore;
+use omem_server::profile_v2::service::ProfileV2Service;
+use omem_server::profile_v2::induction::InductionEngine;
+use omem_server::profile_v2::injection::InjectionBuilder;
 use omem_server::store::sqlite::SqliteStore;
 use omem_server::store::sqlite_schema;
 
@@ -79,6 +83,21 @@ async fn main() {
         sqlite_schema::create_tables(&conn).expect("failed to create SQLite tables");
     }
     let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
+
+    // Profile V2 initialization
+    let profile_store = Arc::new(ProfileStore::new(sqlite_store.clone()));
+    profile_store.init().expect("failed to init profile store");
+    let profile_llm: Option<Arc<dyn LlmService>> = match create_profile_llm_service(&config).await {
+        Ok(svc) => Some(Arc::from(svc)),
+        Err(_) => None,
+    };
+    let profile_v2_service = Arc::new(ProfileV2Service::new(profile_store.clone(), profile_llm, &config));
+    let induction_engine = Arc::new(InductionEngine::new(profile_v2_service.clone()));
+    let injection_builder = Arc::new(InjectionBuilder::new(profile_v2_service.clone()));
+    tracing::info!(
+        profile_enabled = config.profile_enabled,
+        "profile_v2_initialized"
+    );
 
     // Migration: seed categories for existing tenants
     match tenant_store.list_all().await {
@@ -156,6 +175,9 @@ async fn main() {
         profile_cache: Arc::new(dashmap::DashMap::new()),
         sqlite_store,
         category_registry,
+        profile_v2_service,
+        induction_engine,
+        injection_builder,
     });
 
     let app = build_router(state.clone());
@@ -190,6 +212,7 @@ async fn main() {
                 config.forgetting_superseded_archive_days,
             )
             .with_services(state.embed.clone(), Some(state.llm.clone()))
+            .with_profile_store(profile_store.clone(), config.profile_dormant_days)
         );
         tokio::spawn(async move { lifecycle_scheduler.run().await });
         tracing::info!(
