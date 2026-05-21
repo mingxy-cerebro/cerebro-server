@@ -740,7 +740,7 @@ export function memoryInjectionHook(
               mmr_penalty_factor: mmrPenaltyFactor,
               phase2_multiplier: phase2Multiplier,
               llm_max_eval: llmMaxEval,
-              refine_strategy: "none" as any,
+              refine_strategy: "loose" as any,
               refine_medium_chars: refineMediumChars,
               skip_llm_gate: true,
             },
