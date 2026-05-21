@@ -39,15 +39,11 @@ export interface OmemPluginConfig {
   ui: {
     toastDelayMs: number;
   };
-  soulWhisper?: {
-    enabled: boolean;
-    tools: string[];
-    excludeTools: string[];
-    maxToolNames: number;
+  profile?: {
+    ttlMs?: number;
   };
   agentMemoryPolicy?: Record<string, "none" | "readonly" | "readwrite">;
   defaultPolicy?: "none" | "readonly" | "readwrite";
-  injectionStrategy?: "parts" | "system";
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -87,13 +83,9 @@ const DEFAULTS: OmemPluginConfig = {
   ui: {
     toastDelayMs: 7000,
   },
-  soulWhisper: {
-    enabled: true,
-    tools: ["*"],
-    excludeTools: ["memory_store", "memory_search", "memory_get", "memory_toggle", "memory_ingest"],
-    maxToolNames: 3,
+  profile: {
+    ttlMs: 300000,
   },
-  injectionStrategy: "parts" as const,
 };
 
 // ── Flat-to-nested migration ─────────────────────────────────────────
@@ -175,10 +167,9 @@ function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>)
     logging: { ...base.logging, ...overrides.logging },
     ui: { ...base.ui, ...overrides.ui },
   };
-  result.soulWhisper = { ...base.soulWhisper!, ...overrides.soulWhisper };
+  result.profile = { ...base.profile!, ...overrides.profile };
   if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
   if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
-  result.injectionStrategy = overrides.injectionStrategy ?? base.injectionStrategy;
   return result;
 }
 

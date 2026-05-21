@@ -1,5 +1,5 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
-import type { CerebroClient, SearchResult, ShouldRecallResponse } from "./client.js";
+import type { CerebroClient, SearchResult } from "./client.js";
 import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
 import { detectSaveKeyword, KEYWORD_NUDGE } from "./keywords.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
@@ -124,7 +124,7 @@ async function detectProjectName(rootPath: string): Promise<string | undefined> 
   return result;
 }
 
-function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs: number = 7000) {
+export function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs: number = 7000) {
   if (!tui) return;
   setTimeout(() => {
     try {
@@ -172,26 +172,7 @@ const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
 export const profileInjectedSessions = new Map<string, number>();
-const injectedSessions = new Set<string>();
-const compactingSummaryCooldown = new Map<string, number>();
-
-// Per-session async cache for fire-and-forget recall results
-export const recallCache = new Map<string, {
-  profileBlock: string;
-  recallResult: ShouldRecallResponse;
-  profileData: { countText: string };
-  timestamp: number;
-}>();
-
-function hashString(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return hash.toString(36);
-}
+const summarizedSessions = new Set<string>();
 
 function formatRelativeAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -356,40 +337,28 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
-      // --- Profile Fetch (before query_text check, but injection deferred to after context) ---
-      const profile = await client.getProfile();
+      // --- Profile Fetch (V2 inject API with TTL gate) ---
+      const profileTtlMs = config.profile?.ttlMs ?? 300000; // default 5 minutes
+      const lastInjected = profileInjectedSessions.get(input.sessionID);
+      const profileTtlExpired = !lastInjected || (Date.now() - lastInjected > profileTtlMs);
+
+      let profileBlock = "";
       let profileInjected = false;
       let profileCountText = "";
-      let profileBlock = "";
-      const lastInjected = profileInjectedSessions.get(input.sessionID);
-      const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
-      const isFirstInjection = !lastInjected;
-      if (profile && ttlExpired) {
-        const prefs = ((profile as any)?.static_facts ?? [])
-          .filter((sf: any) => {
-            const t: string[] = sf.tags ?? [];
-            return t.includes("preferences");
-          })
-          .map((sf: any) => sf.l2_content ?? sf.content ?? "")
-          .filter(Boolean);
-        const profileLines = prefs.length > 0
-          ? prefs.map((c: string) => `  · ${c}`).join("\n")
-          : "  · (preferences queuing, will populate on next refresh)";
-        profileBlock = [
-          "<cerebro-profile>",
-          profileLines,
-          "</cerebro-profile>",
-        ].join("\n");
-        profileInjected = true;
-        profileInjectedSessions.set(input.sessionID, Date.now());
-        const p = profile as any;
-        const dynamicCount = p?.dynamic_context?.length ?? 0;
-        const staticCount = p?.static_facts?.length ?? 0;
-        profileCountText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
-        if (isFirstInjection) {
-          logDebug("autoRecallHook profile ready (first)", { dynamicCount, staticCount });
-        } else {
-          logDebug("autoRecallHook profile ready (TTL)", { dynamicCount, staticCount });
+
+      if (profileTtlExpired) {
+        try {
+          const injection = await client.getInjection(directory || process.env.OMEM_PROJECT_DIR);
+          if (injection?.content) {
+            profileBlock = injection.content;
+            profileCountText = `${injection.preference_count} preferences`;
+            profileInjected = true;
+            profileInjectedSessions.set(input.sessionID, Date.now());
+            logDebug("autoRecallHook profile ready (V2 injection)", { preferenceCount: injection.preference_count, estimatedTokens: injection.estimated_tokens });
+          }
+        } catch (e) {
+          logErr("autoRecallHook getInjection failed, skipping profile", { error: String(e) });
+          // profile failure does not block shouldRecall
         }
       }
 
@@ -496,8 +465,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
           appendToSystem(output.system, profileBlock);
           logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
         }
-        if (profileInjected && isFirstInjection) {
-          await createEventAndReturn(0, 0, 0);
+        if (profileInjected && !lastInjected) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
         }
         return;
@@ -514,7 +482,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
           appendToSystem(output.system, profileBlock);
           logDebug("autoRecallHook profile injected (dedup path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
         }
-        if (profileInjected && isFirstInjection) {
+        if (profileInjected && !lastInjected) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
         }
         return;
@@ -606,537 +574,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes("[cerebro]")) {
         // Server returned error (500, etc.) with details
-        const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-        if (cleanMsg.startsWith("500")) {
-          showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
-        } else if (cleanMsg.includes("timed out")) {
-          showToast(tui, "🧠 Cerebro Service Timeout", cleanMsg.substring(0, 100), "error");
-        } else {
-          showToast(tui, "🧠 Cerebro Error", cleanMsg.substring(0, 150), "error");
-        }
-      } else if (errMsg.includes("fetch") || errMsg.includes("network")) {
-        showToast(tui, "🧠 Cerebro Service Unavailable", "Network error · check API connection", "error");
-      } else {
-        showToast(tui, "🧠 Memory Recall Error", errMsg.substring(0, 100), "error");
-      }
-    }
-  };
-}
-
-export function buildProfileBlock(profile: any): { block: string; countText: string } | null {
-  const prefs = ((profile as any)?.static_facts ?? [])
-    .filter((sf: any) => {
-      const t: string[] = sf.tags ?? [];
-      return t.includes("preferences");
-    })
-    .map((sf: any) => sf.l2_content ?? sf.content ?? "")
-    .filter(Boolean);
-  const profileLines = prefs.length > 0
-    ? prefs.map((c: string) => `  · ${c}`).join("\n")
-    : "  · (preferences queuing, will populate on next refresh)";
-  const block = [
-    "<cerebro-profile>",
-    profileLines,
-    "</cerebro-profile>",
-  ].join("\n");
-  const p = profile as any;
-  const dynamicCount = p?.dynamic_context?.length ?? 0;
-  const staticCount = p?.static_facts?.length ?? 0;
-  const countText = `Dynamic(${dynamicCount}) · Static(${staticCount})`;
-  return { block, countText };
-}
-
-export function memoryInjectionHook(
-  client: CerebroClient,
-  containerTags: string[],
-  tui: any,
-  config: Partial<OmemPluginConfig> = {},
-  getAgentName?: () => string,
-  directory?: string,
-) {
-  const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
-  const maxRecallResults = config.recall?.maxRecallResults ?? 10;
-  const fetchMultiplier = config.recall?.fetchMultiplier ?? 3;
-  const topkCapMultiplier = config.recall?.topkCapMultiplier ?? 2;
-  const mmrJaccardThreshold = config.recall?.mmrJaccardThreshold ?? 0.85;
-  const mmrPenaltyFactor = config.recall?.mmrPenaltyFactor ?? 0.5;
-  const phase2Multiplier = config.recall?.phase2Multiplier ?? 2;
-  const llmMaxEval = config.recall?.llmMaxEval ?? 15;
-  const refineStrategy = config.recall?.refineStrategy ?? "balanced";
-  const refineMediumChars = config.recall?.refineMediumChars ?? 200;
-  const maxContentLength = Math.max(MIN_CONTENT_LENGTH, config.content?.maxContentLength ?? 500);
-  const maxContentChars = Math.max(MIN_CONTENT_CHARS, config.content?.maxContentChars ?? 30000);
-  const toastDelayMs = config.ui?.toastDelayMs ?? 7000;
-
-  return async (
-    input: { sessionID?: string; messageID?: string; model: Model },
-    output: { message: UserMessage; parts: Part[] },
-  ) => {
-    if (!input.sessionID) return;
-
-    const agentId = getAgentName?.() || process.env.OMEM_AGENT_ID || "opencode";
-    const policy = resolveAgentPolicy(agentId, config);
-    if (policy === "none") return;
-
-    const isSaveKeyword = saveKeywordDetectedSessions.has(input.sessionID);
-
-    try {
-      logDebug("memoryInjectionHook start", { sessionId: input.sessionID, agentId, policy, isSaveKeyword, similarityThreshold, maxRecallResults });
-      const messages = sessionMessages.get(input.sessionID) ?? [];
-      const userMessages = messages.filter((m) => m.role === "user");
-
-      if (userMessages.length === 0) {
-        logDebug("memoryInjectionHook skipped: no user messages in session (post-compacting?)", { sessionId: input.sessionID });
-        return;
-      }
-
-      const rawQuery = userMessages[userMessages.length - 1]?.content || firstMessages.get(input.sessionID) || "";
-      const query_text = extractUserRequest(rawQuery);
-      if (!query_text) {
-        logDebug("memoryInjectionHook filtered system injection", { rawQueryPrefix: rawQuery.slice(0, 60) });
-        return;
-      }
-      const last_query_text = userMessages.length >= 2 ? userMessages[userMessages.length - 2].content : undefined;
-
-      const projectTags = containerTags.filter(t => t.startsWith("omem_project_"));
-
-      const conversationContext = userMessages.length >= 2
-        ? userMessages.slice(-4, -1).map((m) => {
-          const stripped = stripPrivateContent(m.content);
-          return stripped.length > 200 ? stripped.slice(0, 200) : stripped;
-        })
-        : undefined;
-
-      // ========== Phase A: unified data fetch + injection ==========
-      let shouldRecallRes: ShouldRecallResponse;
-      let profileBlock = "";
-      let profileInjected = false;
-      let profileCountText = "";
-      let isCacheHit = false;
-
-      const cached = recallCache.get(input.sessionID);
-
-      if (cached && cached.recallResult) {
-        isCacheHit = true;
-        shouldRecallRes = cached.recallResult;
-        if (cached.profileBlock) {
-          profileBlock = cached.profileBlock;
-          profileInjected = true;
-          profileCountText = cached.profileData?.countText ?? "";
-        }
-      } else {
-        // cache miss: synchronous await (first message takes 5-8s, but gets injection)
-        const [profile, recallRes] = await Promise.all([
-          client.getProfile(),
-          client.shouldRecall(
-            query_text, last_query_text, input.sessionID,
-            similarityThreshold, maxRecallResults,
-            projectTags.length > 0 ? projectTags : undefined,
-            conversationContext && conversationContext.length > 0 ? conversationContext : undefined,
-            {
-              fetch_multiplier: fetchMultiplier,
-              topk_cap_multiplier: topkCapMultiplier,
-              mmr_jaccard_threshold: mmrJaccardThreshold,
-              mmr_penalty_factor: mmrPenaltyFactor,
-              phase2_multiplier: phase2Multiplier,
-              llm_max_eval: llmMaxEval,
-              refine_strategy: "loose" as any,
-              refine_medium_chars: refineMediumChars,
-              skip_llm_gate: true,
-            },
-            directory || process.env.OMEM_PROJECT_DIR,
-          ),
-        ]);
-        if (!recallRes) {
-          showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API", "error", toastDelayMs);
-          return;
-        }
-        shouldRecallRes = recallRes;
-
-        // build profile block (with TTL check)
-        if (profile) {
-          const lastInjected = profileInjectedSessions.get(input.sessionID);
-          const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
-          if (ttlExpired) {
-            const built = buildProfileBlock(profile);
-            if (built) {
-              profileBlock = built.block;
-              profileCountText = built.countText;
-              profileInjected = true;
-              profileInjectedSessions.set(input.sessionID, Date.now());
-            }
-          }
-        }
-
-        // write cache for next round
-        recallCache.set(input.sessionID, {
-          profileBlock,
-          recallResult: shouldRecallRes,
-          profileData: { countText: profileCountText },
-          timestamp: Date.now(),
-        });
-
-        // LRU eviction
-        if (recallCache.size > 50) {
-          let oldestKey: string | null = null;
-          let oldestTime = Infinity;
-          for (const [k, v] of recallCache) {
-            if (v.timestamp < oldestTime) { oldestTime = v.timestamp; oldestKey = k; }
-          }
-          if (oldestKey) recallCache.delete(oldestKey);
-        }
-
-        // defensive check
-        if (shouldRecallRes.should_recall && !Array.isArray(shouldRecallRes.memories)) {
-          logErr("memoryInjectionHook shouldRecall returned incomplete data", { shouldRecall: shouldRecallRes.should_recall, hasMemories: !!shouldRecallRes.memories });
-          return;
-        }
-
-        logDebug("memoryInjectionHook cache miss, fetched synchronously", { sessionId: input.sessionID, shouldRecall: shouldRecallRes.should_recall, memCount: shouldRecallRes.memories?.length ?? 0 });
-      }
-
-      // ========== unified injection logic (cache hit + cache miss share this) ==========
-      if (!shouldRecallRes.should_recall) {
-        // no-recall path: inject profile only
-        const partsToInject: string[] = [];
-        if (profileBlock) partsToInject.push(profileBlock);
-        if (partsToInject.length > 0) {
-          const injectText = partsToInject.join("\n\n");
-          const contextPart: Part = {
-            id: `prt_cerebro-context-${Date.now()}`,
-            sessionID: input.sessionID,
-            messageID: output.message.id,
-            type: "text",
-            text: injectText,
-            synthetic: true,
-          };
-          output.parts.unshift(contextPart);
-          logDebug("memoryInjectionHook profile injected (no-recall)", { sessionId: input.sessionID });
-        }
-        injectedSessions.add(input.sessionID);
-        const cacheTag = isCacheHit ? " (cached)" : "";
-        showToast(tui, `🧠 Profile Injected${cacheTag}`, profileCountText ? `Profile: ${profileCountText} · no recall needed` : "No memory recall needed", "success", toastDelayMs);
-      } else {
-        const results = shouldRecallRes.memories ?? [];
-        const clustered = shouldRecallRes.clustered;
-        const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
-        const newResults = results.filter((r) => !existingIds.has(r.memory.id));
-        logDebug("memoryInjectionHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
-
-        if (newResults.length === 0) {
-          const partsToInject: string[] = [];
-          if (profileBlock) partsToInject.push(profileBlock);
-          if (partsToInject.length > 0) {
-            const injectText = partsToInject.join("\n\n");
-            const contextPart: Part = {
-              id: `prt_cerebro-context-${Date.now()}`,
-              sessionID: input.sessionID,
-              messageID: output.message.id,
-              type: "text",
-              text: injectText,
-              synthetic: true,
-            };
-            output.parts.unshift(contextPart);
-            logDebug("memoryInjectionHook profile injected (dedup)", { sessionId: input.sessionID });
-          }
-          injectedSessions.add(input.sessionID);
-        } else {
-          const profileChars = profileInjected ? profileBlock.length : 0;
-          const budgetRemaining = maxContentChars - profileChars;
-          const itemCount = clustered
-            ? (clustered.cluster_summaries.length + clustered.standalone_memories.length)
-            : newResults.length;
-          const dynamicMaxContentLength = itemCount > 0
-            ? Math.min(maxContentLength, Math.max(MIN_ITEM_CONTENT_CHARS, Math.floor(budgetRemaining / itemCount)))
-            : maxContentLength;
-
-          const block = clustered
-            ? buildClusteredContextBlock(clustered, dynamicMaxContentLength)
-            : buildContextBlock(newResults, dynamicMaxContentLength);
-
-          const partsToInject: string[] = [];
-          if (block) partsToInject.push(block);
-          if (block) partsToInject.push(FETCH_POLICY);
-          if (profileBlock) partsToInject.push(profileBlock);
-          if (isSaveKeyword) partsToInject.push(KEYWORD_NUDGE);
-
-          if (partsToInject.length > 0) {
-            const injectText = partsToInject.join("\n\n");
-            const contextPart: Part = {
-              id: `prt_cerebro-context-${Date.now()}`,
-              sessionID: input.sessionID,
-              messageID: output.message.id,
-              type: "text",
-              text: injectText,
-              synthetic: true,
-            };
-            output.parts.unshift(contextPart);
-            logDebug("memoryInjectionHook block injected", {
-              sessionId: input.sessionID,
-              injectTextLen: injectText.length,
-              blockPreview: block?.slice(0, 200),
-            });
-          }
-
-          injectedSessions.add(input.sessionID);
-
-          if (isSaveKeyword) {
-            saveKeywordDetectedSessions.delete(input.sessionID);
-          }
-
-          const newIds = newResults.map((r) => r.memory.id);
-          injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
-
-          const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
-          const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;
-          const memOther = newResults.length - memDynamic - memStatic;
-
-          let memCountMsg = "";
-          if (memDynamic > 0) memCountMsg += `Dynamic(${memDynamic}) `;
-          if (memStatic > 0) memCountMsg += `Static(${memStatic}) `;
-          if (memOther > 0) memCountMsg += `Other(${memOther}) `;
-
-          const categories = categorize(newResults);
-          const catSummary = Array.from(categories.entries())
-            .map(([label, items]) => `${label}(${items.length})`)
-            .join(" · ");
-
-          let toastTitle: string;
-          let toastMessage: string;
-
-          if (clustered) {
-            const clusterCount = clustered.cluster_summaries.length;
-            const standaloneCount = clustered.standalone_memories.length;
-            toastTitle = `🧠 Context Injected${isCacheHit ? " (cached)" : ""} · ${clusterCount} clusters${standaloneCount > 0 ? ` · ${standaloneCount} standalone` : ""}`;
-            toastMessage = profileInjected
-              ? `Profile: ${profileCountText} · Clustered memory display`
-              : `Clustered memory display`;
-          } else {
-            toastTitle = `🧠 Context Injected${isCacheHit ? " (cached)" : ""} · ${newResults.length} fragments`;
-            toastMessage = profileInjected
-              ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
-              : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
-          }
-
-          showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
-        }
-      }
-
-      // cache miss: fire-and-forget createRecallEvent so web UI shows the record
-      if (!isCacheHit) {
-        if (shouldRecallRes.should_recall) {
-          const results = shouldRecallRes.memories ?? [];
-          const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
-          const newResults = results.filter((r) => !existingIds.has(r.memory.id));
-          const storedMemoryIds = results.map((r) => r.memory.id);
-          const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
-          const maxScore = storedMemoryIds.length > 0
-            ? Math.max(...(results.map((r) => r.score) ?? [0]))
-            : 0;
-          const bgBlock = shouldRecallRes.clustered
-            ? buildClusteredContextBlock(shouldRecallRes.clustered, maxContentLength)
-            : buildContextBlock(newResults, maxContentLength);
-          const items = [
-            ...(results.map((r) => ({
-              memory_id: r.memory.id, score: r.score,
-              refine_relevance: r.refine_relevance, refine_reasoning: r.refine_reasoning, is_kept: true,
-            }))),
-            ...(shouldRecallRes.discarded?.map((d) => ({
-              memory_id: d.memory_id, score: d.score,
-              refine_relevance: d.refine_relevance, refine_reasoning: d.refine_reasoning, is_kept: false,
-            })) ?? []),
-          ];
-          client.createRecallEvent({
-            session_id: input.sessionID!, recall_type: "auto", query_text,
-            max_score: maxScore, llm_confidence: shouldRecallRes.confidence ?? 0,
-            profile_injected: profileInjected,
-            kept_count: storedMemoryIds.length, discarded_count: storedDiscardedIds.length,
-            injected_count: newResults.length,
-            profile_content: profileInjected && profileBlock ? profileBlock : undefined,
-            injected_content: bgBlock ?? undefined,
-            items: items.length > 0 ? items : undefined,
-          }).catch((e: unknown) => {
-            logErr("memoryInjectionHook cache-miss createRecallEvent failed", { error: String(e) });
-          });
-        } else if (profileInjected) {
-          client.createRecallEvent({
-            session_id: input.sessionID!, recall_type: "auto", query_text,
-            max_score: 0, llm_confidence: shouldRecallRes.confidence ?? 0,
-            profile_injected: true,
-            kept_count: 0, discarded_count: 0, injected_count: 0,
-            profile_content: profileBlock || undefined,
-          }).catch((e: unknown) => {
-            logErr("memoryInjectionHook cache-miss profile-only createRecallEvent failed", { error: String(e) });
-          });
-        }
-      }
-
-      logDebug("memoryInjectionHook injection complete", { sessionId: input.sessionID, isCacheHit });
-
-      // ========== Phase B: fire-and-forget async fetch for NEXT round (cache hit only) ==========
-      if (isCacheHit) {
-      const bgSessionId = input.sessionID;
-      const bgQueryText = query_text;
-      const bgLastQueryText = last_query_text;
-      const bgConversationContext = conversationContext;
-      const bgProjectTags = projectTags.length > 0 ? projectTags : undefined;
-      const bgDirectory = directory || process.env.OMEM_PROJECT_DIR;
-
-      Promise.allSettled([
-        client.getProfile(),
-        client.shouldRecall(
-          bgQueryText, bgLastQueryText, bgSessionId,
-          similarityThreshold, maxRecallResults,
-          bgProjectTags,
-          bgConversationContext && bgConversationContext.length > 0 ? bgConversationContext : undefined,
-          {
-            fetch_multiplier: fetchMultiplier,
-            topk_cap_multiplier: topkCapMultiplier,
-            mmr_jaccard_threshold: mmrJaccardThreshold,
-            mmr_penalty_factor: mmrPenaltyFactor,
-            phase2_multiplier: phase2Multiplier,
-            llm_max_eval: llmMaxEval,
-            refine_strategy: refineStrategy,
-            refine_medium_chars: refineMediumChars,
-          },
-          bgDirectory,
-        ),
-      ])
-        .then(([profileRes, recallRes]) => {
-          if (recallRes.status === 'rejected') {
-            logErr("memoryInjectionHook shouldRecall failed", { error: String(recallRes.reason) });
-            return;
-          }
-          const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
-          const shouldRecallRes = recallRes.value;
-          if (!shouldRecallRes) {
-            showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
-            return;
-          }
-          logDebug("memoryInjectionHook background fetch complete", {
-            sessionId: bgSessionId,
-            shouldRecall: shouldRecallRes.should_recall,
-            confidence: shouldRecallRes.confidence,
-            memCount: shouldRecallRes.memories?.length ?? 0,
-          });
-
-          if (shouldRecallRes.should_recall && !Array.isArray(shouldRecallRes.memories)) {
-            logErr("memoryInjectionHook shouldRecall returned incomplete data", {
-              shouldRecall: shouldRecallRes.should_recall,
-              hasMemories: !!shouldRecallRes.memories,
-            });
-            return;
-          }
-
-          let bgProfileBlock = "";
-          let bgProfileCountText = "";
-          let bgProfileInjected = false;
-
-          if (profile) {
-            const lastInjected = profileInjectedSessions.get(bgSessionId);
-            const ttlExpired = !lastInjected || (Date.now() - lastInjected > 10 * 60 * 1000);
-            if (ttlExpired) {
-              const built = buildProfileBlock(profile);
-              if (built) {
-                bgProfileBlock = built.block;
-                bgProfileCountText = built.countText;
-                bgProfileInjected = true;
-              }
-            }
-          }
-
-          recallCache.set(bgSessionId, {
-            profileBlock: bgProfileBlock,
-            recallResult: shouldRecallRes,
-            profileData: { countText: bgProfileCountText },
-            timestamp: Date.now(),
-          });
-
-          if (recallCache.size > 50) {
-            let oldestKey: string | null = null;
-            let oldestTime = Infinity;
-            for (const [k, v] of recallCache) {
-              if (v.timestamp < oldestTime) {
-                oldestTime = v.timestamp;
-                oldestKey = k;
-              }
-            }
-            if (oldestKey) recallCache.delete(oldestKey);
-          }
-
-          if (shouldRecallRes.should_recall) {
-            const results = shouldRecallRes.memories ?? [];
-            const existingIds = injectedMemoryIds.get(bgSessionId) ?? new Set<string>();
-            const newResults = results.filter((r) => !existingIds.has(r.memory.id));
-            if (newResults.length > 0) {
-              const newIds = newResults.map((r) => r.memory.id);
-              injectedMemoryIds.set(bgSessionId, new Set([...existingIds, ...newIds]));
-            }
-
-            const storedMemoryIds = shouldRecallRes.memories?.map((r) => r.memory.id) ?? [];
-            const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
-            const maxScore = storedMemoryIds.length > 0
-              ? Math.max(...(shouldRecallRes.memories?.map((r) => r.score) ?? [0]))
-              : 0;
-
-            const bgBlock = shouldRecallRes.clustered
-              ? buildClusteredContextBlock(shouldRecallRes.clustered, maxContentLength)
-              : buildContextBlock(newResults, maxContentLength);
-            const bgInjectedContent = bgBlock ?? undefined;
-
-            const items = [
-              ...(shouldRecallRes.memories?.map((r) => ({
-                memory_id: r.memory.id,
-                score: r.score,
-                refine_relevance: r.refine_relevance,
-                refine_reasoning: r.refine_reasoning,
-                is_kept: true,
-              })) ?? []),
-              ...(shouldRecallRes.discarded?.map((d) => ({
-                memory_id: d.memory_id,
-                score: d.score,
-                refine_relevance: d.refine_relevance,
-                refine_reasoning: d.refine_reasoning,
-                is_kept: false,
-              })) ?? []),
-            ];
-
-            client.createRecallEvent({
-              session_id: bgSessionId,
-              recall_type: "auto",
-              query_text: bgQueryText,
-              max_score: maxScore,
-              llm_confidence: shouldRecallRes.confidence ?? 0,
-              profile_injected: bgProfileInjected,
-              kept_count: storedMemoryIds.length,
-              discarded_count: storedDiscardedIds.length,
-              injected_count: newResults.length,
-              profile_content: bgProfileInjected && bgProfileBlock ? bgProfileBlock : undefined,
-              injected_content: bgInjectedContent,
-              items: items.length > 0 ? items : undefined,
-            }).catch((e: unknown) => {
-              logErr("memoryInjectionHook background createRecallEvent failed", { error: String(e) });
-            });
-          }
-        })
-        .catch((err: unknown) => {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          logErr("memoryInjectionHook background fetch failed", { error: errMsg });
-          if (errMsg.includes("[cerebro]")) {
-            const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-            if (cleanMsg.startsWith("500")) {
-              showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
-            } else if (cleanMsg.includes("timed out")) {
-              showToast(tui, "🧠 Cerebro Service Timeout", cleanMsg.substring(0, 100), "error");
-            }
-          } else if (errMsg.includes("fetch") || errMsg.includes("network")) {
-            showToast(tui, "🧠 Cerebro Service Unavailable", "Network error · check API connection", "error");
-          }
-        });
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes("[cerebro]")) {
         const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
         if (cleanMsg.startsWith("500")) {
           showToast(tui, "🧠 Cerebro Server Error", cleanMsg.substring(0, 200), "error");
@@ -1297,7 +734,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (input.sessionID) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
-        recallCache.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       }
       return;
@@ -1329,7 +765,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
-        recallCache.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
@@ -1358,13 +793,10 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       }
       // Cleanup tracked messages regardless of ingest result
       sessionMessages.delete(input.sessionID);
-      injectedSessions.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
-      recallCache.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
       if (input.sessionID) {
-        const deleted = pendingToolCalls.delete(input.sessionID);
-        logDebug("compactingHook cleared session pendingToolCalls", { sessionID: input.sessionID, hadPending: deleted });
+        logDebug("compactingHook cleared session state", { sessionID: input.sessionID });
       }
       // Evict stale injectedMemoryIds if over size cap (200 sessions)
       if (injectedMemoryIds.size > 200) {
@@ -1372,156 +804,10 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       }
     }
 
-    // Phase 2: compact inserts "[restore checkpointed" user message — poll for that marker
-    if (sdkClient && input.sessionID) {
-      const pollSessionId = input.sessionID;
-      const pollEffectiveSessionId = effectiveSessionId;
-      const pollProjectName = projectName;
-      const pollProjectPath = projectPath;
-      const pollAgentId = effectiveAgentId;
-
-      let baselineMsgIds: Set<string> = new Set();
-      try {
-        const preResp = await sdkClient.session.messages({ path: { id: pollSessionId } });
-        if (preResp?.data) {
-          baselineMsgIds = new Set(preResp.data.map((m: any) => m.info?.id).filter(Boolean));
-        }
-        logInfo("compactingHook: summary poll starting", { baselineCount: baselineMsgIds.size, sessionId: pollSessionId });
-      } catch (e) {
-        logErr("compactingHook: baseline snapshot failed", { error: String(e) });
-      }
-
-      if (baselineMsgIds.size > 0) {
-        const maxAttempts = 12;
-        const pollInterval = 5000;
-        const COMPACT_MARKER = "[restore checkpointed";
-
-        (async () => {
-          for (let i = 0; i < maxAttempts; i++) {
-            await new Promise(r => setTimeout(r, pollInterval));
-            try {
-              const resp = await sdkClient.session.messages({ path: { id: pollSessionId } });
-              if (!resp?.data) continue;
-
-              const currentCount = resp.data.length;
-              logDebug("compactingHook: summary poll tick", {
-                attempt: i + 1, currentCount, baselineCount: baselineMsgIds.size,
-              });
-
-              const compactMsg = resp.data.find((m: any) => {
-                if (m.info?.role !== "user") return false;
-                if (baselineMsgIds.has(m.info?.id)) return false;
-                const textParts = (m.parts || [])
-                  .filter((p: any) => p.type === "text" && p.text)
-                  .map((p: any) => p.text);
-                return textParts.join("\n").includes(COMPACT_MARKER);
-              });
-
-              if (compactMsg) {
-                const compactIdx = resp.data.findIndex((m: any) => m.info?.id === compactMsg.info?.id);
-                const userTextParts = (compactMsg.parts || [])
-                  .filter((p: any) => p.type === "text" && p.text)
-                  .map((p: any) => p.text);
-                const userFullText = userTextParts.join("\n").trim();
-
-                logInfo("compactingHook: compact completed detected", {
-                  attempt: i + 1, msgId: compactMsg.info?.id,
-                  compactIdx, userTextLen: userFullText.length,
-                  partsCount: (compactMsg.parts || []).length,
-                  partTypes: (compactMsg.parts || []).map((p: any) => p.type),
-                  firstPartLen: userTextParts[0]?.length ?? 0,
-                  msgsAfterCompact: resp.data.length - compactIdx - 1,
-                });
-
-                if (userFullText.length > 0) {
-                  logDebug("compactingHook: compact msg full text", {
-                    text: userFullText.substring(0, 500),
-                  });
-                }
-
-                let summaryText: string | undefined;
-
-                const markerLineIdx = userFullText.indexOf(COMPACT_MARKER);
-                if (markerLineIdx >= 0) {
-                  const afterMarker = userFullText.substring(markerLineIdx);
-                  const firstNewline = afterMarker.indexOf("\n");
-                  const candidate = firstNewline >= 0 ? afterMarker.substring(firstNewline + 1).trim() : "";
-                  if (candidate.length > 100) {
-                    summaryText = candidate;
-                  }
-                }
-
-                if (!summaryText && compactIdx >= 0) {
-                  for (let j = compactIdx + 1; j < resp.data.length; j++) {
-                    const msg = resp.data[j];
-                    if (msg.info?.role !== "assistant") continue;
-                    const assistParts = (msg.parts || [])
-                      .filter((p: any) => p.type === "text" && p.text)
-                      .map((p: any) => p.text);
-                    const assistText = assistParts.join("\n").trim();
-                    logDebug("compactingHook: assistant msg after compact", {
-                      idx: j, textLen: assistText.length, partTypes: (msg.parts || []).map((p: any) => p.type),
-                      preview: assistText.substring(0, 200),
-                    });
-                    if (assistText.length > 200) {
-                      summaryText = assistText;
-                      break;
-                    }
-                  }
-                }
-
-                if (!summaryText && userFullText.length > 100) {
-                  summaryText = userFullText;
-                }
-
-                if (summaryText) {
-                  logInfo("compactingHook: storing compact summary", {
-                    summaryLen: summaryText.length, msgId: compactMsg.info?.id,
-                  });
-                  // Dedup check: 30s cooldown per session+content hash
-                  const summaryHash = `${pollSessionId}:${hashString(summaryText)}`;
-                  const lastCompacting = compactingSummaryCooldown.get(summaryHash);
-                  if (lastCompacting && Date.now() - lastCompacting < 30000) {
-                    logDebug("compactingHook summary dedup", { sessionId: pollSessionId });
-                    break;
-                  }
-                  compactingSummaryCooldown.set(summaryHash, Date.now());
-
-                  const prefixedSummary = `[Session Summary] ${summaryText}`;
-                  try {
-                    const result = await client.ingestMessages(
-                      [{ role: "user" as const, content: prefixedSummary }],
-                      {
-                        mode: ingestMode,
-                        tags: [...containerTags, "auto-capture", "compact-summary"],
-                        sessionId: pollEffectiveSessionId,
-                        projectName: pollProjectName,
-                        agentId: pollAgentId,
-                        projectPath: pollProjectPath,
-                      },
-                    );
-                    logInfo("compactingHook: compact summary store result", {
-                      result: result === null ? "null(blocked)" : "ok",
-                    });
-                    if (result !== null) {
-                      showToast(tui, "📦 Compact Summary Stored", "Session summary archived to memory", "success");
-                    }
-                  } catch (e) {
-                    logErr("compactingHook: compact summary store failed", { error: String(e) });
-                  }
-                } else {
-                  logInfo("compactingHook: no summary text found after compact marker", {
-                    userTextLen: userFullText.length, compactIdx,
-                  });
-                }
-                break;
-              }
-            } catch (e) {
-              logErr("compactingHook: summary poll error", { error: String(e), attempt: i + 1 });
-            }
-          }
-        })();
-      }
+    // After compacting, clear profile TTL so next autoRecallHook re-injects profile
+    if (input.sessionID) {
+      profileInjectedSessions.delete(input.sessionID);
+      logDebug("compactingHook cleared profile TTL for re-injection", { sessionID: input.sessionID });
     }
   };
 }
@@ -1639,65 +925,12 @@ export function autocontinueHook(
 const processedMessageIds = new Set<string>();
 const pluginStartTime = Date.now();
 
-// ── Soul Whisper: pending tool call tracking (per-session isolation) ──
-export const pendingToolCalls = new Map<string, Map<string, { toolName: string; timestamp: number }>>();
-
-export function soulWhisperToolTracker(config: OmemPluginConfig) {
-  return async (input: { tool: string; sessionID: string; callID: string }, _output: { args: any }) => {
-    if (config.soulWhisper?.enabled === false) {
-      logDebug("soulWhisperToolTracker disabled by config", { tool: input.tool });
-      return;
-    }
-
-    const sw = config.soulWhisper;
-    const toolName = input.tool;
-
-    const excludeTools = sw?.excludeTools ?? [];
-    if (excludeTools.includes(toolName)) {
-      logDebug("soulWhisperToolTracker excluded", { tool: toolName });
-      return;
-    }
-
-    const includeTools = sw?.tools ?? ["*"];
-    const isWildcard = includeTools.includes("*");
-    if (!isWildcard && !includeTools.includes(toolName)) {
-      logDebug("soulWhisperToolTracker not in whitelist", { tool: toolName, whitelist: includeTools });
-      return;
-    }
-
-    const sid = input.sessionID || "_default";
-    let sessionMap = pendingToolCalls.get(sid);
-    if (!sessionMap) {
-      sessionMap = new Map();
-      pendingToolCalls.set(sid, sessionMap);
-    }
-    sessionMap.set(input.callID, { toolName, timestamp: Date.now() });
-    logDebug("soulWhisperToolTracker recorded", { tool: toolName, callID: input.callID, sessionID: sid, totalSessions: pendingToolCalls.size, sessionCallCount: sessionMap.size });
-  };
-}
-
-export function buildWhisperText(toolNames: string[], maxToolNames: number): string | null {
-  if (toolNames.length === 0) return null;
-
-  const lines: string[] = ["<cerebro-memory-activation>"];
-
-  if (toolNames.length <= maxToolNames) {
-    lines.push(`Before using ${toolNames.join(", ")}, memory_search() may surface relevant past decisions or patterns. Brief recall → better outcomes.`);
-  } else {
-    lines.push("Before you act — memory_search() surfaces cross-session context: past decisions, user preferences, hard-won insights. The strongest responses are built on remembered context.");
-  }
-
-  lines.push("</cerebro-memory-activation>");
-
-  return lines.join("\n");
-}
-
 export function sessionIdleHook(
   cerebroClient: CerebroClient,
-  _containerTags: string[],
+  containerTags: string[],
   tui: any,
   sdkClient: any,
-  _ingestMode: "smart" | "raw" = "smart",
+  ingestMode: "smart" | "raw" = "smart",
   threshold: number = 0,
   getMainSessionId?: () => string | undefined,
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
@@ -1709,7 +942,120 @@ export function sessionIdleHook(
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   let isCapturing = false;
 
+  async function handleSummaryCapture(props: any) {
+    const info = props?.info;
+    if (!info) return;
+    if (info.role !== "assistant" || !info.summary || !info.finish) return;
+
+    const sessionID = info.sessionID;
+    if (!sessionID) return;
+
+    if (summarizedSessions.has(sessionID)) return;
+    summarizedSessions.add(sessionID);
+
+    if (!sdkClient) {
+      logInfo("handleSummaryCapture skipped: no sdkClient", { sessionID });
+      return;
+    }
+
+    logInfo("handleSummaryCapture triggered", { sessionID });
+
+    if (getMainSessionId) {
+      const mainId = getMainSessionId();
+      if (mainId && sessionID !== mainId) {
+        logInfo("handleSummaryCapture: non-main session skipped", { sessionID, mainSessionId: mainId });
+        return;
+      }
+    }
+
+    const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
+    const policy = resolveAgentPolicy(effectiveAgentId, config);
+    if (policy !== "readwrite") {
+      logInfo("handleSummaryCapture blocked by policy", { agentId: effectiveAgentId, policy });
+      return;
+    }
+
+    if (isAutoStoreEnabled && !isAutoStoreEnabled(sessionID)) return;
+
+    try {
+      const resp = await sdkClient.session.messages({ path: { id: sessionID } });
+      const messages = resp?.data ?? resp;
+
+      const summaryMsg = (messages as Array<{ info: any; parts?: Array<{ type: string; text?: string }> }>).find((m) =>
+        m.info?.role === "assistant" && m.info?.summary === true
+      );
+
+      if (!summaryMsg?.parts) {
+        logInfo("handleSummaryCapture: no summary parts found", { sessionID });
+        return;
+      }
+
+      const textParts = summaryMsg.parts.filter((p) => p.type === "text" && p.text).map((p) => p.text);
+      const summaryContent = textParts.join("\n").trim();
+
+      if (!summaryContent || summaryContent.length < 100) {
+        logInfo("handleSummaryCapture: summary too short", { sessionID, length: summaryContent?.length ?? 0 });
+        return;
+      }
+
+      const effectiveSessionId = getMainSessionId?.() || sessionID;
+
+      let projectName: string | undefined;
+      let projectPath: string | undefined;
+      try {
+        const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
+        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
+        projectName = sessionInfo?.data?.directory
+          ? await detectProjectName(sessionInfo.data.directory)
+          : undefined;
+      } catch (e) {
+        logErr("handleSummaryCapture detectProjectName failed", { error: String(e) });
+      }
+      if (!projectPath) {
+        projectPath = directory || process.env.OMEM_PROJECT_DIR;
+      }
+
+      const prefixedSummary = `[Session Summary] ${summaryContent}`;
+      const result = await cerebroClient.ingestMessages(
+        [{ role: "user" as const, content: prefixedSummary }],
+        {
+          mode: ingestMode,
+          tags: [...containerTags, "auto-capture", "compact-summary"],
+          sessionId: effectiveSessionId,
+          projectName,
+          agentId: effectiveAgentId,
+          projectPath,
+        },
+      );
+
+      logInfo("handleSummaryCapture store result", { result: result === null ? "null(blocked)" : "ok" });
+      if (result !== null) {
+        showToast(tui, "📦 Compact Summary Stored", "Session summary archived", "success");
+      }
+    } catch (err) {
+      logErr("handleSummaryCapture failed", { error: String(err) });
+    }
+  }
+
   return async (input: { event: { type: string; properties?: any } }) => {
+    if (input.event.type === "message.updated") {
+      await handleSummaryCapture(input.event.properties);
+      return;
+    }
+
+    if (input.event.type === "session.deleted") {
+      const sessionInfo = input.event.properties?.info;
+      const sid = sessionInfo?.id;
+      if (sid) {
+        summarizedSessions.delete(sid);
+        sessionMessages.delete(sid);
+        profileInjectedSessions.delete(sid);
+        firstMessages.delete(sid);
+        logDebug("sessionIdleHook: session.deleted cleanup", { sessionID: sid });
+      }
+      return;
+    }
+
     if (input.event.type !== "session.idle") return;
 
     logDebug("sessionIdleHook event.properties dump", { keys: Object.keys(input.event.properties || {}), raw: JSON.stringify(input.event.properties).substring(0, 2000) });
@@ -1817,8 +1163,6 @@ export function sessionIdleHook(
       } finally {
         isCapturing = false;
         idleTimeout = null;
-        const deleted = pendingToolCalls.delete(sessionID);
-        if (deleted) logDebug("sessionIdleHook cleared session pendingToolCalls", { sessionID, hadPending: deleted });
       }
     }, 10000);
   };

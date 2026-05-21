@@ -213,33 +213,16 @@
       "enum": ["none", "readonly", "readwrite"],
       "default": "readwrite"
     },
-    "soulWhisper": {
+    "profile": {
       "type": "object",
-      "description": "Soul Whisper: inject memory reminders when LLM calls tools",
+      "description": "Profile injection configuration",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Enable/disable soul whisper injection",
-          "default": true
-        },
-        "tools": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Tool name whitelist. Use [\"*\"] to match all tools",
-          "default": ["*"]
-        },
-        "excludeTools": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Tool names to exclude from whisper injection",
-          "default": ["memory_store", "memory_search", "memory_get", "memory_toggle", "memory_ingest"]
-        },
-        "maxToolNames": {
+        "ttlMs": {
           "type": "number",
-          "description": "Max tool names shown in tool-specific whisper. Exceeding this falls back to generic version",
-          "default": 3,
-          "minimum": 1,
-          "maximum": 10
+          "description": "Profile injection TTL (milliseconds). Within TTL, profile injection is skipped but context injection proceeds normally",
+          "default": 300000,
+          "minimum": 0,
+          "maximum": 3600000
         }
       },
       "additionalProperties": false

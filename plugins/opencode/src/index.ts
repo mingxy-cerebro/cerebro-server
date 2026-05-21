@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, memoryInjectionHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, soulWhisperToolTracker, pendingToolCalls, buildWhisperText, recallCache, profileInjectedSessions, buildProfileBlock } from "./hooks.js";
+import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, showToast as hooksShowToast } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
@@ -42,24 +42,6 @@ export function setAutoStoreEnabled(sessionId: string, enabled: boolean): void {
 
 (globalThis as any).__cerebro_autoStoreMap = autoStoreSessions;
 
-function showToast(tui: any, title: string, message?: string, variant: string = "info", duration: number = 5000) {
-  if (!tui) return;
-  setTimeout(() => {
-    try {
-      const body: any = { variant, duration };
-      if (message) {
-        body.title = title;
-        body.message = message;
-      } else {
-        body.message = title;
-      }
-      tui.showToast({ body });
-    } catch (err) {
-      logError("showToast failed", { error: String(err) });
-    }
-  }, 3000);
-}
-
 const OmemPlugin: Plugin = async (input) => {
   const { directory, client } = input;
   // Proxy: dynamically resolve client.tui on each access so toast works
@@ -85,14 +67,14 @@ const OmemPlugin: Plugin = async (input) => {
   // 启动时检测连接状态
   try {
     await cerebroClient.getStats();
-    showToast(tui, "🧠 Cerebro · Connected", `Version v${pluginVersion}`, "success", 6000);
+    hooksShowToast(tui, "🧠 Cerebro · Connected", `Version v${pluginVersion}`, "success", 6000);
     logInfo(`Connected to ${config.connection.apiUrl}`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logError(`Connection failed: ${errMsg}`);
     if (errMsg.includes("[cerebro]")) {
       const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-      showToast(
+      hooksShowToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Server Error`,
         cleanMsg.substring(0, 150),
@@ -100,7 +82,7 @@ const OmemPlugin: Plugin = async (input) => {
         8000
       );
     } else {
-      showToast(
+      hooksShowToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Connection Failed`,
         `Unable to reach ${config.connection.apiUrl}`,
@@ -119,50 +101,7 @@ const OmemPlugin: Plugin = async (input) => {
   let mainSessionLocked = false;
   let cachedAgentName: string | undefined;
 
-  const soulWhisperSystemHook = async (input: any, output: any) => {
-    // ── Soul Whisper: inject to system prompt (v2 — system.transform) ──
-    if (config.soulWhisper?.enabled !== false) {
-      const sid = input.sessionID || "_default";
-      const sessionCalls = pendingToolCalls.get(sid);
-      if (sessionCalls && sessionCalls.size > 0) {
-        const toolNames = [...new Set([...sessionCalls.values()].map(v => v.toolName))];
-        const maxToolNames = config.soulWhisper?.maxToolNames ?? 3;
-        const whisperText = buildWhisperText(toolNames, maxToolNames);
-        if (whisperText) {
-          if (output.system.length > 0) {
-            output.system[0] += "\n\n" + whisperText;
-          } else {
-            output.system.push(whisperText);
-          }
-          logDebug("soulWhisper injected to output.system", { sessionId: sid, toolNames });
-        }
-        pendingToolCalls.delete(sid);
-      }
-    }
-  };
-
-  // ── Fallback strategy: "parts" (new) vs "system" (legacy) ──
-  const strategy = config.injectionStrategy ?? "parts";
-
-  const chatMessageHook = strategy === "parts"
-    ? async (input: any, output: any) => {
-        // New path: keyword detection + memory injection
-        await keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId)(input, output);
-        await memoryInjectionHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory)(input, output);
-      }
-    : async (input: any, output: any) => {
-        // Fallback: keyword detection only (memory injection via system.transform legacy autoRecallHook)
-        await keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId)(input, output);
-      };
-
-  const systemTransformHook = strategy === "parts"
-    ? soulWhisperSystemHook
-    : async (input: any, output: any) => {
-        // Fallback: legacy autoRecallHook + soulWhisper
-        const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
-        await recallHook(input, output);
-        await soulWhisperSystemHook(input, output);
-      };
+  const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
 
   return {
     config: async (cfg: any) => {
@@ -173,40 +112,19 @@ const OmemPlugin: Plugin = async (input) => {
       };
     },
     "experimental.chat.system.transform": async (input: any, output: any) => {
-      logDebug("transform input", { sessionID: input.sessionID, strategy });
+      logDebug("transform input", { sessionID: input.sessionID });
       if (input.sessionID && !mainSessionLocked) {
         mainSessionId = input.sessionID;
         mainSessionLocked = true;
         logInfo("mainSessionId locked", { sessionId: input.sessionID });
       }
-      const sid = input.sessionID;
-      if (sid) {
-        const cached = recallCache.get(sid);
-        if (!cached || !cached.profileBlock) {
-          cerebroClient.getProfile().then(profile => {
-            if (profile) {
-              const built = buildProfileBlock(profile);
-              if (built) {
-                recallCache.set(sid, {
-                  profileBlock: built.block,
-                  recallResult: null as any,
-                  profileData: { countText: built.countText },
-                  timestamp: Date.now(),
-                });
-                profileInjectedSessions.set(sid, Date.now());
-              }
-            }
-          }).catch(() => {});
-        }
-      }
-      return systemTransformHook(input, output);
+      return recallHook(input, output);
     },
-    "chat.message": chatMessageHook,
+    "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId),
     "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId, getProjectPath: () => directory }),
     event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => mainSessionId, isAutoStoreEnabled, agentId, config, (name: string) => { cachedAgentName = name; }, directory),
-    "tool.execute.before": (() => { const tracker = soulWhisperToolTracker(config); return tracker; })(),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {
         output.env.OMEM_PROJECT_DIR = directory;

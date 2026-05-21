@@ -272,6 +272,15 @@ export class CerebroClient {
     return this.request("/v1/profile");
   }
 
+  async getInjection(projectPath?: string): Promise<{
+    content: string;
+    preference_count: number;
+    estimated_tokens: number;
+  } | null> {
+    const params = projectPath ? `?project_path=${encodeURIComponent(projectPath)}` : "";
+    return this.request(`/v2/profile/inject${params}`);
+  }
+
   async getStats(): Promise<unknown> {
     return this.request("/v1/stats");
   }
