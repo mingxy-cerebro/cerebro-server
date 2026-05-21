@@ -42,6 +42,10 @@ pub struct PreferenceQuery {
 
 #[derive(Deserialize)]
 pub struct TriggerInductionBody {
+    /// Optional candidate texts for induction. If empty, the engine will skip
+    /// (below threshold). Caller should provide relevant memory contents.
+    #[serde(default)]
+    pub candidate_texts: Vec<String>,
     pub project_path: Option<String>,
 }
 
@@ -403,11 +407,9 @@ pub async fn get_injection(
 pub async fn trigger_induction(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
-    Json(_body): Json<TriggerInductionBody>,
+    Json(body): Json<TriggerInductionBody>,
 ) -> Result<impl IntoResponse, OmemError> {
-    // TODO (T10): Query LanceStore for candidate memories to use as induction input.
-    // For now, pass empty candidates — the engine will skip if below threshold.
-    let candidates: Vec<String> = Vec::new();
+    let candidates = body.candidate_texts;
 
     let result = state
         .induction_engine
