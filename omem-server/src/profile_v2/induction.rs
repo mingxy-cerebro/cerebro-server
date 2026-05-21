@@ -13,7 +13,7 @@ use super::service::ProfileV2Service;
 use super::store::ProfileStore;
 
 const INDUCTION_SYSTEM_PROMPT: &str = "\
-你是偏好归纳引擎。从用户的行为记忆中提取偏好。每条偏好对应一个slot和一个具体值，描述15-30字。仅从提供的记忆中提取，不编造。输出JSON数组。
+你是偏好归纳引擎。从用户的行为记忆中提取偏好。每条偏好对应一个slot和一个具体值。仅从提供的记忆中提取，不编造。输出JSON数组。
 
 可用slot: communication_style, tone, code_style, error_handling, naming_convention, testing_strategy, workflow_preference, commit_style, emoji_preference, self_reference, address_style, language, framework_preference, preferred_tools, custom:*（自定义slot格式）
 
@@ -24,7 +24,11 @@ const INDUCTION_SYSTEM_PROMPT: &str = "\
 - confidence: 0.5-0.9（从单条记忆推断0.5-0.6，多条一致0.7-0.9）
 - scope: 涉及特定项目用project，跨项目通用用global
 - 每条记忆最多提取3条偏好
-- 没有明确偏好的记忆跳过";
+- 没有明确偏好的记忆跳过
+- value必须在150字以内，同时保留关键细节（命令模板、文件路径、工具名、配置值等操作性信息），不要泛泛概括也不要啰嗦
+- 好的value示例：「用PowerShell编译：powershell.exe -Command \"& { $env:JAVA_HOME=\\\"C:\\\\Program Files\\\\Java\\\\jdk17\\\"; mvn -f D:\\\\dev\\\\project\\\\nf\\\\pom.xml clean package -DskipTests }\"」
+- 差的value示例：「使用PowerShell调用Maven编译」——太笼统无操作价值
+- 去重：如果多条记忆指向同一偏好，合并为一条输出，取信息最完整的描述，confidence取多条中最高值";
 
 pub struct InductionResult {
     pub run_id: String,
@@ -221,7 +225,22 @@ impl InductionEngine {
             }
 
             let matching = existing_prefs.iter().find(|p| {
-                p.slot == item.slot && p.value == item.value && p.status != PreferenceStatus::Deleted
+                if p.slot != item.slot || p.status == PreferenceStatus::Deleted {
+                    return false;
+                }
+                // Exact match
+                if p.value == item.value {
+                    return true;
+                }
+                // Keyword overlap: same slot + 40%+ keyword overlap = duplicate
+                let kw_existing = extract_keywords(&p.value);
+                let kw_new = extract_keywords(&item.value);
+                let union_count = kw_existing.union(&kw_new).count();
+                if union_count == 0 {
+                    return false;
+                }
+                let overlap_count = kw_existing.intersection(&kw_new).count();
+                overlap_count as f32 / union_count as f32 > 0.4
             });
 
             if let Some(existing) = matching {
@@ -310,6 +329,22 @@ impl InductionEngine {
         }
         Ok(())
     }
+}
+
+fn extract_keywords(text: &str) -> std::collections::HashSet<String> {
+    let mut keywords = std::collections::HashSet::new();
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len().saturating_sub(1) {
+        let a = chars[i];
+        let b = chars[i + 1];
+        if ('\u{4e00}'..='\u{9fff}').contains(&a) && ('\u{4e00}'..='\u{9fff}').contains(&b) {
+            keywords.insert(format!("{a}{b}"));
+        }
+    }
+    for m in regex::Regex::new(r"[a-zA-Z_]{3,}").unwrap().find_iter(text) {
+        keywords.insert(m.as_str().to_lowercase());
+    }
+    keywords
 }
 
 #[cfg(test)]
