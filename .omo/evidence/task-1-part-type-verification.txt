@@ -1,0 +1,97 @@
+Task: 验证 OpenCode SDK TextPart.synthetic 字段 & Part 构造方式
+Date: 2026-05-20
+Status: VERIFIED ✅
+
+================================================================
+1. SDK TextPart 类型定义
+================================================================
+
+Source: @opencode-ai/sdk (v1) gen/types.gen.d.ts (line 142-149)
+
+  export type TextPart = {
+      id: string;
+      sessionID: string;
+      messageID: string;
+      type: "text";
+      text: string;
+      synthetic?: boolean;    // ← 存在！可选 boolean
+      ignored?: boolean;
+      time?: { start: number; end?: number; };
+      metadata?: { ... };
+  };
+
+Source: @opencode-ai/sdk (v2) gen/types.gen.d.ts (line 536-542)
+  同样包含 synthetic?: boolean
+
+结论: synthetic 字段存在，类型为 boolean | undefined ✅
+
+================================================================
+2. TextPartInput 类型（用于构造）
+================================================================
+
+Source: gen/types.gen.d.ts (line 1231-1235)
+
+  export type TextPartInput = {
+      ... 
+      synthetic?: boolean;    // ← 也存在！
+  };
+
+结论: TextPartInput 也有 synthetic 可选字段 ✅
+
+================================================================
+3. Part 联合类型
+================================================================
+
+v1: export type Part = TextPart | { ... 其他 Part 类型 }
+v2: export type Part = TextPart | SubtaskPart | ReasoningPart | FilePart | ToolPart | StepStartPart | StepFinishPart | SnapshotPart | PatchPart | AgentPart | RetryPart | CompactionPart;
+
+结论: Part 包含 TextPart，synthetic 可通过类型推导访问 ✅
+
+================================================================
+4. supermemory 的构造方式
+================================================================
+
+File: /mnt/d/dev/github/project/supermemory/src/index.ts (line 159-168)
+
+  const contextPart: Part = {
+    id: `prt_supermemory-context-${Date.now()}`,
+    sessionID: input.sessionID,
+    messageID: output.message.id,
+    type: "text",
+    text: memoryContext,
+    synthetic: true,
+  };
+  output.parts.unshift(contextPart);
+
+结论: 直接构造 Part，synthetic: true，无需 as any ✅
+
+================================================================
+5. opencode-mem 的构造方式
+================================================================
+
+File: /mnt/d/dev/github/project/opencode-mem/src/index.ts (line 216-224)
+
+  const contextPart: Part = {
+    id: `prt-memory-context-${Date.now()}`,
+    sessionID: input.sessionID,
+    messageID: output.message.id,
+    type: "text",
+    text: memoryContext,
+    synthetic: true,
+  } as any;
+  output.parts.unshift(contextPart);
+
+结论: 同样构造 Part + synthetic: true，但用了 as any（可能版本差异）✅
+
+================================================================
+6. 最终结论
+================================================================
+
+✅ TextPart.synthetic?: boolean 字段确认存在
+✅ TextPartInput.synthetic?: boolean 也存在
+✅ { type:"text", text:"...", synthetic:true } 构造方式可用
+✅ 两个参考项目（supermemory、opencode-mem）均使用此构造方式
+✅ output.parts.unshift(contextPart) 是标准注入姿势
+
+注意: opencode-mem 使用了 `as any` 强转，supermemory 没有。
+      建议直接用 Part 类型标注，无需 as any（SDK 类型已支持）。

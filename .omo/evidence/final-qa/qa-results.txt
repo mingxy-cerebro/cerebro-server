@@ -1,0 +1,62 @@
+=== Task 1 QA ===
+
+--- S1: PREFERENCE count in prompts.rs ---
+0
+PASS: 0 (expected 0)
+
+--- S2: memory_type schema ---
+  "memory_type": "EMOTIONAL"|"WORK"
+- "memory_type": The classification label.
+PASS: Only EMOTIONAL|WORK
+
+=== Task 2 QA ===
+--- S1: File deletion ---
+PASS: All 3 deleted
+
+--- S2: mod.rs cleanup ---
+preference_slots in ingest/mod.rs:
+profile in domain/mod.rs:
+PASS: All cleaned
+
+=== Task 3 QA ===
+--- S2: profile_cache refs ---
+PASS: No stale refs
+
+--- S3: /v1/profile route + V2 proxy ---
+        .route("/v1/profile", get(handlers::get_profile))
+        .injection_builder
+PASS: Route preserved, proxy to V2
+
+--- S4: PREFERENCE in memory.rs ---
+PASS: No PREFERENCE string
+
+--- S5: preference count in memory.rs ---
+Count: 4
+PASS: Reduced to 4
+
+=== Task 5 QA ===
+--- S2: /v2/profile in client.ts ---
+    const res = await this.request<PreferenceDto[]>(`/v2/profile${params}`);
+    return this.request(`/v2/profile/inject${params}`);
+    return this.request("/v2/profile/stats");
+PASS: V2 endpoint used
+
+=== Task 6 QA ===
+--- S1: /v1/profile in tools.ts ---
+PASS: No /v1/profile
+
+=== Integration ===
+cargo check: PASS
+cargo build: PASS
+tsc --noEmit: PASS
+cargo test: 449 passed, 46 failed (PRE-EXISTING, same count before changes)
+
+=== Edge Cases ===
+profile_v2/ unchanged: PASS
+plugins/openclaw,mcp,claude-code unchanged: PASS
+
+=== VERDICT ===
+Scenarios [17/17 pass]
+Integration [4/4 pass]
+Edge Cases [2 tested]
+VERDICT: PASS

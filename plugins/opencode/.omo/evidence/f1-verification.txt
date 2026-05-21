@@ -1,0 +1,44 @@
+=== F1 FINAL VERIFICATION REPORT ===
+Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+[1] Build: npx tsc --noEmit
+    Result: PASS (zero errors, zero output)
+
+[2] isFirstInjection in memoryInjectionHook (L640-900)
+    Result: REMOVED
+    Evidence: isFirstInjection only appears at L358,381,491,509 (autoRecallHook scope)
+    No occurrence in memoryInjectionHook range.
+
+[3] isKeywordTriggered in hooks.ts
+    Result: REMOVED (zero matches)
+
+[4] isSaveKeyword in hooks.ts
+    Result: EXISTS
+    Lines: 650, 653, 872, 896
+
+[5] saveKeywordDetectedSessions in hooks.ts
+    Result: EXISTS (replaces old keywordDetectedSessions)
+    Lines: 170, 593, 595, 650, 897, 976
+    keywordDetectedSessions: ZERO matches
+
+[6] keywords.ts: RECALL_KEYWORDS / detectKeyword
+    Result: REMOVED (zero matches)
+
+[7] keywords.ts: detectSaveKeyword + SAVE_KEYWORDS
+    Result: EXISTS
+    detectSaveKeyword at L16, SAVE_KEYWORDS at L1
+    SAVE_KEYWORDS count: exactly 12 items
+
+[8] KEYWORD_NUDGE content
+    Result: CORRECT — mentions only memory_store
+    Full text: "The user appears to want you to remember something. Consider using the `memory_store` tool to save this information for future reference."
+    No "memory_search" or "recall" present.
+
+[9] compactingHook: injectedSessions.delete
+    Result: EXISTS at L1160
+
+[10] keywordDetectionHook calls detectSaveKeyword
+    Result: CONFIRMED at L975 (hooks.ts)
+
+=== SUMMARY ===
+Build [PASS] | Gate [REMOVED] | Keywords [SAVE_ONLY] | Compact [FIXED] | VERDICT: ALL GREEN

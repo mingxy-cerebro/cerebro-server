@@ -158,7 +158,15 @@ export class CerebroClient {
 
       if (res.status === 204) return null;
 
-      return (await res.json()) as T;
+      const text = await res.text();
+      const trimmed = text.replace(/^\uFEFF/, "").trim();
+      if (!trimmed) return null;
+      try {
+        return JSON.parse(trimmed) as T;
+      } catch (parseErr) {
+        logError("JSON parse failed", { method: init.method ?? "GET", path, status: res.status, bodyLen: text.length, bodyPreview: text.slice(0, 200) });
+        throw parseErr;
+      }
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         logWarn("Request timed out", { method: init.method ?? "GET", path, timeoutMs: timeoutMs ?? this.getCfg("connection", "requestTimeoutMs", 15000) });

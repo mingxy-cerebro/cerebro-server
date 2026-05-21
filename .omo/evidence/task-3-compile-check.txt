@@ -1,0 +1,1 @@
+cargo check -p omem-server PASSED with 0 errors, 1 warning (unused import: create_profile_llm_service — expected, T9 will use it)

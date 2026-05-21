@@ -1,0 +1,157 @@
+{
+  "active_plan": "/mnt/d/dev/github/project/omem-server-source/.omo/plans/fix-chat-message-blocking.md",
+  "started_at": "2026-05-21T01:53:00.000Z",
+  "session_ids": [
+    "ses_1b97b864fffeZrJOq9fvftBaAf",
+    "ses_1b974fcb0ffeSiM3ss8f7E8OWy",
+    "ses_1b970d901ffeoiriT0e0teHBrv",
+    "ses_1b9699d77ffedIZrjpNxzf2dL5",
+    "ses_1b9699cf0ffe8A73ZYswi3QKCj",
+    "ses_1b963582bffe7mLeybnzO1sakv",
+    "ses_1b9635814ffeAWKBGWELe6IHGx"
+  ],
+  "plan_name": "fix-chat-message-blocking",
+  "worktree_path": null,
+  "session_origins": {
+    "ses_1b97b864fffeZrJOq9fvftBaAf": "direct",
+    "ses_1b974fcb0ffeSiM3ss8f7E8OWy": "appended",
+    "ses_1b970d901ffeoiriT0e0teHBrv": "appended",
+    "ses_1b9699d77ffedIZrjpNxzf2dL5": "appended",
+    "ses_1b9699cf0ffe8A73ZYswi3QKCj": "appended",
+    "ses_1b963582bffe7mLeybnzO1sakv": "appended",
+    "ses_1b9635814ffeAWKBGWELe6IHGx": "appended"
+  },
+  "task_sessions": {},
+  "active_work_id": "fix-chat-message-blocking",
+  "updated_at": "2026-05-20T18:18:52.410Z",
+  "schema_version": 2,
+  "works": {
+    "phase3-memory-isolation-legacy": {
+      "work_id": "phase3-memory-isolation-legacy",
+      "active_plan": "/mnt/d/dev/github/project/omem-server-source/.omo/plans/phase3-memory-isolation.md",
+      "plan_name": "phase3-memory-isolation",
+      "started_at": "2026-05-19T02:12:30Z",
+      "updated_at": "2026-05-19T11:29:21.854Z",
+      "session_ids": [],
+      "session_origins": {},
+      "worktree_path": null,
+      "task_sessions": {},
+      "ended_at": "2026-05-19T05:08:38.424Z",
+      "elapsed_ms": 10568424,
+      "status": "completed"
+    },
+    "hook-refactor": {
+      "work_id": "hook-refactor",
+      "active_plan": "/mnt/d/dev/github/project/omem-server-source/.omo/plans/hook-refactor.md",
+      "plan_name": "hook-refactor",
+      "started_at": "2026-05-20T14:35:00Z",
+      "updated_at": "2026-05-20T15:02:42.003Z",
+      "session_ids": [
+        "ses_1ba305126ffesuNoJceIe7NyTp",
+        "ses_1ba16f243ffedMIUlUsBLplLQi"
+      ],
+      "session_origins": {
+        "ses_1ba305126ffesuNoJceIe7NyTp": "direct",
+        "ses_1ba16f243ffedMIUlUsBLplLQi": "appended"
+      },
+      "worktree_path": null,
+      "task_sessions": {},
+      "status": "completed",
+      "ended_at": "2026-05-20T14:58:54.489Z",
+      "elapsed_ms": 1434489
+    },
+    "fetch-policy-strong": {
+      "work_id": "fetch-policy-strong",
+      "active_plan": "/mnt/d/dev/github/project/omem-server-source/.omo/plans/fetch-policy-strong.md",
+      "plan_name": "fetch-policy-strong",
+      "started_at": "2026-05-20T15:52:48.955Z",
+      "updated_at": "2026-05-20T17:28:46.592Z",
+      "session_ids": [
+        "ses_1b9e90fe8ffepAN4q1XJn2EFcp",
+        "ses_1b9e4df20ffe6KFD1ibdZRlrO0",
+        "ses_1b9e4defeffei3eez2vJIOk2JN",
+        "ses_1b9cb91ccffeSC8PBu7qRr5TtS",
+        "ses_1b9c0267effeH65yXPo4intqFX",
+        "ses_1b9abf549ffef6KiKZDS3vcUJm",
+        "ses_1b9abf473ffeA5XfV1z9jdj60a",
+        "ses_1b997a553ffeSMZ3zNLdZLNCdI",
+        "ses_1b99577fcffemcqOCndWqJ6QNr",
+        "ses_1b99135e3ffeItfRCvq01pYqZN"
+      ],
+      "session_origins": {
+        "ses_1b9e90fe8ffepAN4q1XJn2EFcp": "direct",
+        "ses_1b9e4df20ffe6KFD1ibdZRlrO0": "appended",
+        "ses_1b9e4defeffei3eez2vJIOk2JN": "appended",
+        "ses_1b9cb91ccffeSC8PBu7qRr5TtS": "appended",
+        "ses_1b9c0267effeH65yXPo4intqFX": "appended",
+        "ses_1b9abf549ffef6KiKZDS3vcUJm": "appended",
+        "ses_1b9abf473ffeA5XfV1z9jdj60a": "appended",
+        "ses_1b997a553ffeSMZ3zNLdZLNCdI": "appended",
+        "ses_1b99577fcffemcqOCndWqJ6QNr": "appended",
+        "ses_1b99135e3ffeItfRCvq01pYqZN": "appended"
+      },
+      "worktree_path": null,
+      "task_sessions": {
+        "todo:1": {
+          "task_key": "todo:1",
+          "task_label": "1",
+          "task_title": "升级 FETCH_POLICY + 灵魂低语 Prompt 文本",
+          "session_id": "ses_1b9e800d5ffeGv2EnOztV2272Y",
+          "agent": "Sisyphus-Junior",
+          "category": "quick",
+          "started_at": "2026-05-20T15:54:55.150Z",
+          "status": "completed",
+          "updated_at": "2026-05-20T15:56:49.517Z",
+          "ended_at": "2026-05-20T15:56:49.517Z",
+          "elapsed_ms": 114367
+        },
+        "final-wave:f1": {
+          "task_key": "final-wave:f1",
+          "task_label": "F1",
+          "task_title": "**编译 + 内容验证** — `quick`",
+          "session_id": "ses_1b9e4defeffei3eez2vJIOk2JN",
+          "agent": "Momus - Plan Critic",
+          "started_at": "2026-05-20T15:57:40.312Z",
+          "status": "completed",
+          "updated_at": "2026-05-20T15:58:12.529Z",
+          "ended_at": "2026-05-20T15:58:12.529Z",
+          "elapsed_ms": 32217
+        }
+      },
+      "status": "completed",
+      "ended_at": "2026-05-20T15:59:10.437Z",
+      "elapsed_ms": 381482
+    },
+    "fix-chat-message-blocking": {
+      "work_id": "fix-chat-message-blocking",
+  "active_plan": null,
+      "plan_name": "fix-chat-message-blocking",
+      "started_at": "2026-05-21T01:53:00.000Z",
+      "updated_at": "2026-05-20T18:18:52.410Z",
+      "session_ids": [
+        "ses_1b97b864fffeZrJOq9fvftBaAf",
+        "ses_1b974fcb0ffeSiM3ss8f7E8OWy",
+        "ses_1b970d901ffeoiriT0e0teHBrv",
+        "ses_1b9699d77ffedIZrjpNxzf2dL5",
+        "ses_1b9699cf0ffe8A73ZYswi3QKCj",
+        "ses_1b963582bffe7mLeybnzO1sakv",
+        "ses_1b9635814ffeAWKBGWELe6IHGx"
+      ],
+      "session_origins": {
+        "ses_1b97b864fffeZrJOq9fvftBaAf": "direct",
+        "ses_1b974fcb0ffeSiM3ss8f7E8OWy": "appended",
+        "ses_1b970d901ffeoiriT0e0teHBrv": "appended",
+        "ses_1b9699d77ffedIZrjpNxzf2dL5": "appended",
+        "ses_1b9699cf0ffe8A73ZYswi3QKCj": "appended",
+        "ses_1b963582bffe7mLeybnzO1sakv": "appended",
+        "ses_1b9635814ffeAWKBGWELe6IHGx": "appended"
+      },
+      "worktree_path": null,
+      "task_sessions": {},
+      "status": "active"
+    }
+  },
+  "status": "completed",
+  "ended_at": "2026-05-21T02:30:00.000Z",
+  "elapsed_ms": 2220000
+}

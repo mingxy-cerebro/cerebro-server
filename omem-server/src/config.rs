@@ -190,7 +190,7 @@ impl Default for OmemConfig {
             profile_cache_ttl_secs: 1800,
             profile_induction_cooldown_secs: 600,
             profile_induction_threshold: 5,
-            profile_injection_budget_tokens: 500,
+            profile_injection_budget_tokens: 3000,
             profile_max_global_preferences: 20,
             profile_max_project_preferences: 10,
             profile_dormant_days: 90,

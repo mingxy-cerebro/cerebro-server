@@ -100,6 +100,17 @@ impl InjectionBuilder {
             selected.push(pref);
         }
 
+        let truncated_count = combined.len() - selected.len();
+        if truncated_count > 0 {
+            tracing::debug!(
+                "profile injection budget trimmed: {}/{} preferences, {}/{} bytes used",
+                selected.len(),
+                combined.len(),
+                total_chars,
+                max_chars,
+            );
+        }
+
         // 5. 格式化为 <cerebro-profile> XML块
         let content = if selected.is_empty() {
             String::new()

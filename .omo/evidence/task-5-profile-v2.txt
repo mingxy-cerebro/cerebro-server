@@ -1,0 +1,46 @@
+=== Task 5 Evidence ===
+Date: 2026-05-22T01:12:14+08:00
+
+--- tsc --noEmit ---
+EXIT_CODE: 0
+
+--- grep /v1/profile (should be empty) ---
+(no matches - PASS)
+
+--- grep getInjection ---
+  async getInjection(projectPath?: string): Promise<{
+
+--- git diff ---
+diff --git a/plugins/opencode/src/client.ts b/plugins/opencode/src/client.ts
+index e5ce10d..4fa546e 100644
+--- a/plugins/opencode/src/client.ts
++++ b/plugins/opencode/src/client.ts
+@@ -75,6 +75,19 @@ export interface ShouldRecallResponse {
+   clustered?: ClusteredRecallResult;
+ }
+ 
++export interface PreferenceDto {
++  id: string;
++  slot: string;
++  value: string;
++  confidence: number;
++  scope: string;
++  project_path?: string;
++  source: string;
++  status: string;
++  created_at: string;
++  updated_at: string;
++}
++
+ export interface MemoryRelation {
+   relation_type: string;
+   target_id: string;
+@@ -269,7 +282,7 @@ export class CerebroClient {
+   }
+ 
+   async getProfile(_query?: string): Promise<unknown> {
+-    return this.request("/v1/profile");
++    return this.request("/v2/profile");
+   }
+ 
+   async getInjection(projectPath?: string): Promise<{

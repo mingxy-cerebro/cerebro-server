@@ -1,0 +1,6 @@
+plugins/opencode/src/client.ts:78:export interface PreferenceDto {
+plugins/opencode/src/client.ts:284:  async getProfile(projectPath?: string): Promise<PreferenceDto[]> {
+plugins/opencode/src/client.ts:286:    const res = await this.request<PreferenceDto[]>(`/v2/profile${params}`);
+plugins/opencode/src/client.ts:296:    return this.request(`/v2/profile/inject${params}`);
+plugins/opencode/src/tools.ts:166:    memory_profile: tool({
+plugins/opencode/src/tools.ts:171:        const preferences = await client.getProfile();

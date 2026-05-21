@@ -1,0 +1,31 @@
+Task 6-8: Hook Registration Refactor + Fallback Strategy
+=========================================================
+
+## Changes Made
+
+### 1. Import Line (L7)
+- Restored `autoRecallHook` (removed `_` prefix)
+- Added `memoryInjectionHook` import
+
+### 2. Fallback Strategy (L144-164)
+- Added `strategy = config.injectionStrategy ?? "parts"` 
+- `chatMessageHook`: "parts" → keywordDetection + memoryInjection; "system" → keywordDetection only
+- `systemTransformHook`: "parts" → soulWhisperSystemHook only; "system" → autoRecallHook + soulWhisperSystemHook
+
+### 3. Hook Registration
+- `chat.message`: now uses `chatMessageHook` (conditional)
+- `experimental.chat.system.transform`: now uses `systemTransformHook` (conditional), logs strategy
+- `session.compacting`: UNTOUCHED (verified)
+- `tool.execute.before`: UNTOUCHED (verified)
+- `autocontinueHook`: UNTOUCHED (verified)
+
+## Compile Verification
+- `npx tsc --noEmit`: index.ts ZERO errors
+- hooks.ts has 2 pre-existing unused variable warnings (not from this task)
+
+## QA Results
+- memoryInjectionHook: imported L7, used L151 ✅
+- injectionStrategy: L145, L147, L158, L176 ✅
+- chat.message merged: L150-151 (keyword+memory), L184 (chatMessageHook) ✅
+- Fallback mode: L154-155 (keyword only), L161-163 (autoRecallHook+soulWhisper) ✅
+- session.compacting: L185 UNTOUCHED ✅

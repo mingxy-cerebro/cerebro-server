@@ -1,0 +1,30 @@
+Task 4: V2 Config Usage Analysis
+==================================
+Date: 2026-05-22
+
+All 12 profile_* config fields in OmemConfig are used by V2 profile:
+
+1. profile_enabled          → ProfileConfig.enabled + create_profile_llm_service() guard
+2. profile_llm_provider     → create_profile_llm_service() → main.rs:90 → ProfileV2Service
+3. profile_llm_api_key      → create_profile_llm_service() → OpenAICompatLlm::new_profile()
+4. profile_llm_model        → create_profile_llm_service() → OpenAICompatLlm::new_profile()
+5. profile_llm_base_url     → create_profile_llm_service() → OpenAICompatLlm::new_profile()
+6. profile_cache_ttl_secs   → ProfileConfig.cache_ttl_secs (InjectionBuilder uses this)
+7. profile_induction_cooldown_secs → ProfileConfig.induction_cooldown_secs
+8. profile_induction_threshold     → ProfileConfig.induction_threshold
+9. profile_injection_budget_tokens → ProfileConfig.injection_budget_tokens
+10. profile_max_global_preferences → ProfileConfig.max_global_preferences
+11. profile_max_project_preferences → ProfileConfig.max_project_preferences
+12. profile_dormant_days            → ProfileConfig.dormant_days
+
+V2 usage chain:
+- config.rs fields → main.rs creates ProfileV2Service with config + LLM from create_profile_llm_service()
+- profile_v2/service.rs ProfileConfig::from(&OmemConfig) extracts all non-LLM fields
+- profile_v2/induction.rs + injection.rs access via ProfileV2Service.config()
+
+grep evidence for profile_cache_ttl_secs in config.rs:
+    pub profile_cache_ttl_secs: u64,          (struct field)
+    profile_cache_ttl_secs: 1800,             (default)
+    profile_cache_ttl_secs: env::var(...)     (from_env)
+
+CONCLUSION: No V1-only config fields found. All profile_* fields are V2-shared. No deletions needed.

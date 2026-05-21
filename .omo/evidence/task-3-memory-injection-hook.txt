@@ -1,0 +1,36 @@
+EVIDENCE: task-3-memory-injection-hook
+Date: 2026-05-20
+Status: COMPLETE
+
+## Changes Made
+1. Added `injectedSessions` Set (line 175) — tracks sessions that have been injected via memoryInjectionHook
+2. Added `memoryInjectionHook` export function (lines 605-917) — new injection method using parts.unshift + synthetic:true
+
+## Key Differences from autoRecallHook
+- Input type: { sessionID, messageID, model } (added messageID)
+- Output type: { message: UserMessage, parts: Part[] } (uses parts, not system)
+- Injection: output.parts.unshift(contextPart) + synthetic:true (NOT appendToSystem)
+- injectOn: uses injectedSessions Set for first-injection / keyword-trigger logic
+- injectText assembly: profileBlock + block + FETCH_POLICY + KEYWORD_NUDGE (joined with \n\n)
+
+## Verification Results
+
+### TypeScript Compilation
+- `npx tsc` — PASSED (zero errors)
+- `npx tsc --noEmit` — PASSED (zero errors)
+
+### grep Verification
+- memoryInjectionHook: found at L605 (export function) + 17 references
+- output.parts.unshift: 3 occurrences (no-recall path, dedup path, main path)
+- synthetic: true: 3 occurrences (matching 3 unshift calls)
+- isFirstInjection: L637 (injectedSessions-based) + existing autoRecallHook refs
+- injectedSessions: L175 (declaration) + L637/L796/L828/L883 (usage)
+
+## autoRecallHook Status
+- UNCHANGED — preserved in full at original location (lines 307-603)
+
+## dist/ Verification
+- npx tsc compiled successfully to dist/hooks.js
+- grep "memoryInjectionHook" dist/hooks.js — confirmed present
+- grep "output.parts.unshift" dist/hooks.js — confirmed present
+- grep "synthetic: true" dist/hooks.js — confirmed present

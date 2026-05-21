@@ -1,0 +1,35 @@
+Task 7: Upgrade compactingHook with 6-section prompt and enhanced summary logic
+Date: 2026-05-20
+File: plugins/opencode/src/hooks.ts
+
+Changes:
+1. Added hashString() helper function (L178)
+2. Added compactingSummaryCooldown Map (L176)
+3. Added createCerebroCompactionPrompt() exported function (L1000)
+   - 6-section structured prompt template
+   - Injects project memories (top 10, truncated at 200 chars)
+   - Appends additional context from output.context
+   - Language preservation instruction
+4. Modified compactingHook injection logic (L1062)
+   - Replaced buildContextBlock with createCerebroCompactionPrompt
+   - Added output.prompt support (sets prompt if available)
+   - FETCH_POLICY injection preserved
+   - injectedMemoryIds preservation logic unchanged
+5. Enhanced summary save logic (L1275-1287)
+   - 30-second cooldown dedup via compactingSummaryCooldown
+   - [Session Summary] prefix on summary content
+   - Uses hashString for content-hash based dedup
+
+Verification:
+- npx tsc --noEmit: 0 errors
+- All new symbols grep-verified:
+  - createCerebroCompactionPrompt: L1000, L1062
+  - Session Summary: L1287
+  - compactingSummaryCooldown: L176, L1280, L1285
+  - hashString: L178, L1279
+
+No changes to:
+- poll mechanism
+- FETCH_POLICY injection
+- compactingHook function signature
+- output.context poll mechanism

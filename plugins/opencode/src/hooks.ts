@@ -15,7 +15,7 @@ const projectNameCache = new Map<string, string>();
 
 function appendToSystem(system: string[], content: string) {
   if (system.length > 0) {
-    system[0] += "\n\n" + content;
+    system[system.length - 1] += "\n\n" + content;
   } else {
     system.push(content);
   }
@@ -172,6 +172,7 @@ const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
 export const profileInjectedSessions = new Map<string, number>();
+const lastProfileBlock = new Map<string, { content: string; count: number }>();
 const summarizedSessions = new Set<string>();
 
 function formatRelativeAge(isoDate: string): string {
@@ -367,7 +368,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
-      // --- Profile Fetch (V2 inject API with TTL gate) ---
+      // --- Profile Fetch (V2 inject API with TTL gate + module-level cache) ---
       const profileTtlMs = config.profile?.ttlMs ?? 300000; // default 5 minutes
       const lastInjected = profileInjectedSessions.get(input.sessionID);
       const profileTtlExpired = !lastInjected || (Date.now() - lastInjected > profileTtlMs);
@@ -377,18 +378,37 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       let profileCountText = "";
 
       if (profileTtlExpired) {
-        try {
-          const injection = await client.getInjection(directory || process.env.OMEM_PROJECT_DIR);
-          if (injection?.content) {
-            profileBlock = injection.content;
-            profileCountText = `${injection.preference_count} preferences`;
-            profileInjected = true;
-            profileInjectedSessions.set(input.sessionID, Date.now());
-            logDebug("autoRecallHook profile ready (V2 injection)", { preferenceCount: injection.preference_count, estimatedTokens: injection.estimated_tokens });
+        const maxRetries = 2;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            const injection = await client.getInjection(directory || process.env.OMEM_PROJECT_DIR);
+            if (injection?.content) {
+              profileBlock = injection.content;
+              profileCountText = `${injection.preference_count} preferences`;
+              profileInjected = true;
+              profileInjectedSessions.set(input.sessionID, Date.now());
+              lastProfileBlock.set(input.sessionID, { content: profileBlock, count: injection.preference_count });
+              logDebug("autoRecallHook profile fetched (V2 injection)", { preferenceCount: injection.preference_count, estimatedTokens: injection.estimated_tokens });
+            }
+            break;
+          } catch (e) {
+            if (attempt < maxRetries) {
+              logDebug("autoRecallHook getInjection retry", { attempt: attempt + 1, error: String(e) });
+            } else {
+              logErr("autoRecallHook getInjection failed after retries", { error: String(e) });
+              showToast(tui, "⚠️ Profile Inject Failed", "Preference injection skipped · will retry next turn", "error", toastDelayMs);
+            }
           }
-        } catch (e) {
-          logErr("autoRecallHook getInjection failed, skipping profile", { error: String(e) });
-          // profile failure does not block shouldRecall
+        }
+      }
+
+      // TTL未过期时从module缓存恢复（compact后profileBlock局部变量丢失但缓存仍在）
+      if (!profileBlock) {
+        const cached = lastProfileBlock.get(input.sessionID);
+        if (cached?.content) {
+          profileBlock = cached.content;
+          profileCountText = `${cached.count} preferences (cached)`;
+          logDebug("autoRecallHook profile restored from cache", { sessionId: input.sessionID, count: cached.count });
         }
       }
 

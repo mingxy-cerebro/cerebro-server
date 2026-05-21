@@ -1,0 +1,11 @@
+Task: Add injectionStrategy config field to OmemPluginConfig
+
+Changes in plugins/opencode/src/config.ts:
+
+1. Interface (L50): injectionStrategy?: "parts" | "system";
+2. DEFAULTS (L96): injectionStrategy: "parts" as const,
+3. deepMerge (L181): result.injectionStrategy = overrides.injectionStrategy ?? base.injectionStrategy;
+
+Verification:
+- npx tsc --noEmit: no injectionStrategy-related errors (pre-existing errors in index.ts are unrelated)
+- grep confirms 3 placements at L50, L96, L181

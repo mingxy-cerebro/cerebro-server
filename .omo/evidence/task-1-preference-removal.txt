@@ -1,0 +1,33 @@
+=== Task 1: PREFERENCE Removal Verification ===
+Date: 2026-05-22T00:59:00+08:00
+
+## 1. grep PREFERENCE in prompts.rs
+0
+Expected: 0
+
+## 2. grep memory_type in prompts.rs
+924:  "memory_type": "EMOTIONAL"|"WORK"
+934:- "memory_type": The classification label.
+Expected: Only EMOTIONAL|WORK
+
+## 3. preference_slot refs in reconciler.rs
+0
+0
+Expected: 0
+
+## 4. cargo check
+PASSED (0 errors)
+
+## 5. cargo test - reconciler
+17 tests: 14 passed, 3 pre-existing failures (same as baseline)
+- test_fast_session_merge_no_session_id (pre-existing)
+- test_session_fast_merge (pre-existing)
+- test_uuid_to_int_mapping (pre-existing)
+
+## 6. cargo test - prompts
+10 tests: 10 passed, 0 failed
+
+## Summary
+All PREFERENCE references removed from prompts.rs and reconciler.rs.
+No new test failures introduced.
+

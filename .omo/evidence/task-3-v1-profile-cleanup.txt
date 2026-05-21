@@ -1,0 +1,64 @@
+Phase 6b Task 3 — V1 Profile Residual Cleanup
+=================================================
+Date: 2026-05-22
+Status: COMPLETED
+
+## Summary
+Cleaned AppState V1 profile residuals, rewrote /v1/profile handler as V2 proxy,
+removed PREFERENCE logic from memory.rs. 7 files modified.
+
+## Files Changed
+
+### 1. omem-server/src/api/server.rs
+- Removed `use crate::profile::service::CachedProfile;` import
+- Removed `pub profile_cache: Arc<DashMap<String, CachedProfile>>` field from AppState
+- Kept `use dashmap::DashMap;` (still used by SessionLockMap)
+- V2 fields (profile_v2_service, induction_engine, injection_builder) UNTOUCHED
+
+### 2. omem-server/src/main.rs
+- Removed `profile_cache: Arc::new(dashmap::DashMap::new())` from AppState init (L175)
+- V2 profile initialization preserved intact
+
+### 3. omem-server/src/api/handlers/stats.rs
+- Removed `profile_cache: Arc::new(dashmap::DashMap::new())` from test setup_app (L856)
+
+### 4. omem-server/src/api/mod.rs
+- Removed `profile_cache: Arc::new(dashmap::DashMap::new())` from test setup_app (L111)
+
+### 5. omem-server/src/api/handlers/profile.rs
+- REWRITTEN: Now calls state.injection_builder.build_injection() (V2)
+- Maps InjectionResult.content to V1-compatible { static_facts, dynamic_context, search_results }
+- Preserves V1 API contract for openclaw/mcp compatibility
+
+### 6. omem-server/src/api/handlers/memory.rs
+- L1591: Removed "PREFERENCE" from valid memory_type match arm
+  "EMOTIONAL" | "WORK" | "PREFERENCE" =>  →  "EMOTIONAL" | "WORK" =>
+  (LLM outputting illegal "PREFERENCE" now falls back to scope-based WORK/EMOTIONAL)
+- L1649-1651: Removed preference_extract tag injection block (3 lines)
+- L1909-2022: Removed entire PREFERENCE dedup logic (113 lines)
+
+### 7. omem-server/src/api/router.rs
+- NOT modified (preserved /v1/profile route for openclaw/mcp compat)
+
+## Verification
+
+### grep for profile_cache / CachedProfile / ProfileService (V1)
+- All references in server.rs, main.rs, mod.rs, stats.rs, profile.rs: REMOVED
+- config.rs profile_cache_ttl_secs: PRESERVED (V2 uses it in profile_v2/service.rs)
+
+### cargo check -p omem-server
+- PASSED (compilation clean)
+
+### cargo test -p omem-server
+- 449 passed, 45 failed (all pre-existing)
+- Key test: test_profile_returns_empty PASSED
+- All memory handler tests PASSED
+
+### Pre-existing failures breakdown (45 total, none introduced by this task):
+- 14: reqwest "No provider set" (WSL TLS env issue)
+- 12: regex look-around not supported (extractor tests)
+- 5: api::tests space/member/tenant tests (pre-existing)
+- 3: reconciler tests (pre-existing)
+- 2: llm::service strip_thinking_tags tests
+- 2: embed factory tests (reqwest TLS)
+- Others: github connector, reranker, relation serde

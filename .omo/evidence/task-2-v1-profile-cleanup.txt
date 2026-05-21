@@ -1,0 +1,28 @@
+Phase 6b Task 2: V1 Profile 文件清理 - 证据记录
+==================================================
+执行时间: $(date -Iseconds)
+
+## 删除的文件
+1. omem-server/src/ingest/preference_slots.rs (171行) → 已删除 ✓
+2. omem-server/src/profile/service.rs (783行) → 已删除 ✓
+3. omem-server/src/profile/mod.rs → 已删除 ✓
+4. omem-server/src/domain/profile.rs (161行) → 已删除 ✓
+
+## mod 声明清理
+- ingest/mod.rs: 移除 `pub mod preference_slots;` ✓
+- domain/mod.rs: 移除 `pub mod profile;` ✓ (profile_v2 未受影响)
+- lib.rs: 移除 `pub mod profile;` ✓ (profile_v2 未受影响)
+
+## 验证结果
+1. ls preference_slots.rs → No such file or directory ✓
+2. ls profile/ → No such file or directory ✓
+3. ls domain/profile.rs → No such file or directory ✓
+4. grep preference_slots in ingest/mod.rs → 无匹配 ✓
+5. grep "pub mod profile;" in domain/mod.rs → 无匹配 ✓
+6. grep "pub mod profile;" in lib.rs → 无匹配 ✓
+7. profile_v2 仍在 lib.rs 中 ✓
+
+## 未触碰的文件（确认安全）
+- api/handlers/profile.rs → 保留（T3 处理）
+- config.rs → 未修改
+- profile_v2/ 目录 → 未触碰
