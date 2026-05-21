@@ -233,7 +233,8 @@ pub async fn create_memory(
                 state.config.admission_admit_threshold,
                 state.category_registry.clone(),
                 auth.tenant_id.clone(),
-            ).await?.with_ingest_semaphore(state.ingest_semaphore.clone());
+            ).await?.with_ingest_semaphore(state.ingest_semaphore.clone())
+             .with_induction_engine(state.induction_engine.clone());
 
         let response = ingest_pipeline.ingest(request).await?;
         return Ok((StatusCode::ACCEPTED, Json(serde_json::json!(response))).into_response());

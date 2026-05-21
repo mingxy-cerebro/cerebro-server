@@ -19,6 +19,7 @@ use crate::ingest::reconciler::Reconciler;
 use crate::ingest::session::{SessionMessage, SessionStore};
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest, IngestResponse};
 use crate::llm::LlmService;
+use crate::profile_v2::induction::InductionEngine;
 use crate::store::LanceStore;
 
 const BYTE_BUDGET: usize = 200_000;
@@ -36,6 +37,7 @@ pub struct IngestPipeline {
     embed: Arc<dyn EmbedService>,
     ingest_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     category_registry: Arc<CategoryRegistry>,
+    induction_engine: Option<Arc<InductionEngine>>,
 }
 
 impl IngestPipeline {
@@ -74,11 +76,17 @@ impl IngestPipeline {
             embed,
             ingest_semaphore: None,
             category_registry,
+            induction_engine: None,
         })
     }
 
     pub fn with_ingest_semaphore(mut self, sem: Arc<tokio::sync::Semaphore>) -> Self {
         self.ingest_semaphore = Some(sem);
+        self
+    }
+
+    pub fn with_induction_engine(mut self, engine: Arc<InductionEngine>) -> Self {
+        self.induction_engine = Some(engine);
         self
     }
 
@@ -146,6 +154,7 @@ impl IngestPipeline {
         let bg_task_id = task_id.clone();
         let ingest_sem = self.ingest_semaphore.clone();
         let category_registry = self.category_registry.clone();
+        let induction_engine = self.induction_engine.clone();
 
         let categories: Vec<CategoryConfig> = category_registry
             .get_active_categories(&tenant_id)
@@ -340,6 +349,18 @@ impl IngestPipeline {
                                 warn!(error = %e, memory_id = %mem.id, "cluster assignment failed");
                             }
                         }
+                    }
+
+                    if let Some(engine) = induction_engine {
+                        let candidate_texts: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+                        let ind_tenant = tenant_id.clone();
+                        tokio::spawn(async move {
+                            match engine.trigger_induction(&ind_tenant, "session_end", &candidate_texts).await {
+                                Ok(Some(result)) => info!(run_id = %result.run_id, extracted = result.extracted_count, "profile_induction_triggered"),
+                                Ok(None) => debug!("profile_induction_skipped"),
+                                Err(e) => warn!(error = %e, "profile_induction_failed"),
+                            }
+                        });
                     }
                 }
                 Err(e) => {
