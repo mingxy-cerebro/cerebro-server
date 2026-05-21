@@ -60,6 +60,16 @@ pub async fn create_cluster_llm_service(config: &OmemConfig) -> Result<Box<dyn L
     }
 }
 
+pub async fn create_profile_llm_service(config: &OmemConfig) -> Result<Box<dyn LlmService>, OmemError> {
+    if !config.profile_enabled || config.profile_llm_api_key.is_empty() {
+        return Ok(Box::new(NoopLlm));
+    }
+    match config.profile_llm_provider.as_str() {
+        "openai-compatible" => Ok(Box::new(OpenAICompatLlm::new_profile(config)?)),
+        _ => Ok(Box::new(NoopLlm)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

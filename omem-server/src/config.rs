@@ -107,6 +107,20 @@ pub struct OmemConfig {
     pub recall_refine_medium_chars: usize,
     /// LLM refine timeout in seconds. Default: 15
     pub recall_llm_refine_timeout_secs: u64,
+
+    // Profile V2 configuration
+    pub profile_enabled: bool,
+    pub profile_llm_provider: String,
+    pub profile_llm_api_key: String,
+    pub profile_llm_model: String,
+    pub profile_llm_base_url: String,
+    pub profile_cache_ttl_secs: u64,
+    pub profile_induction_cooldown_secs: u64,
+    pub profile_induction_threshold: usize,
+    pub profile_injection_budget_tokens: usize,
+    pub profile_max_global_preferences: usize,
+    pub profile_max_project_preferences: usize,
+    pub profile_dormant_days: u32,
 }
 
 impl Default for OmemConfig {
@@ -171,6 +185,18 @@ impl Default for OmemConfig {
             recall_refine_strategy: "balanced".to_string(),
             recall_refine_medium_chars: 200,
             recall_llm_refine_timeout_secs: 15,
+            profile_enabled: true,
+            profile_llm_provider: "openai-compatible".to_string(),
+            profile_llm_api_key: String::new(),
+            profile_llm_model: "deepseek-v4-flash".to_string(),
+            profile_llm_base_url: "https://opencode.ai/zen/v1".to_string(),
+            profile_cache_ttl_secs: 1800,
+            profile_induction_cooldown_secs: 600,
+            profile_induction_threshold: 5,
+            profile_injection_budget_tokens: 500,
+            profile_max_global_preferences: 20,
+            profile_max_project_preferences: 10,
+            profile_dormant_days: 90,
         }
     }
 }
@@ -351,6 +377,46 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.recall_llm_refine_timeout_secs),
+            profile_enabled: env::var("OMEM_PROFILE_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_enabled),
+            profile_llm_provider: env::var("OMEM_PROFILE_LLM_PROVIDER")
+                .unwrap_or(defaults.profile_llm_provider),
+            profile_llm_api_key: env::var("OMEM_PROFILE_LLM_API_KEY")
+                .unwrap_or(defaults.profile_llm_api_key),
+            profile_llm_model: env::var("OMEM_PROFILE_LLM_MODEL")
+                .unwrap_or(defaults.profile_llm_model),
+            profile_llm_base_url: env::var("OMEM_PROFILE_LLM_BASE_URL")
+                .unwrap_or(defaults.profile_llm_base_url),
+            profile_cache_ttl_secs: env::var("OMEM_PROFILE_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_cache_ttl_secs),
+            profile_induction_cooldown_secs: env::var("OMEM_PROFILE_INDUCTION_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_induction_cooldown_secs),
+            profile_induction_threshold: env::var("OMEM_PROFILE_INDUCTION_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_induction_threshold),
+            profile_injection_budget_tokens: env::var("OMEM_PROFILE_INJECTION_BUDGET_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_injection_budget_tokens),
+            profile_max_global_preferences: env::var("OMEM_PROFILE_MAX_GLOBAL_PREFERENCES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_max_global_preferences),
+            profile_max_project_preferences: env::var("OMEM_PROFILE_MAX_PROJECT_PREFERENCES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_max_project_preferences),
+            profile_dormant_days: env::var("OMEM_PROFILE_DORMANT_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.profile_dormant_days),
         };
 
         // Validate lifecycle parameters — warn and fallback to defaults on invalid values
