@@ -70,8 +70,6 @@ pub struct ShouldRecallRequest {
     #[serde(default)]
     pub refine_strategy: Option<String>,
     #[serde(default)]
-    pub refine_medium_chars: Option<usize>,
-    #[serde(default)]
     pub project_path: Option<String>,
     #[serde(default)]
     pub skip_llm_gate: Option<bool>,
@@ -338,7 +336,6 @@ pub async fn should_recall(
         mmr_penalty_factor: body.mmr_penalty_factor.or(Some(state.config.search_mmr_penalty_factor)),
         llm_max_eval: body.llm_max_eval.or(Some(state.config.recall_llm_max_eval)),
         refine_strategy: body.refine_strategy.clone().or(Some(state.config.recall_refine_strategy.clone())),
-        refine_medium_chars: body.refine_medium_chars.or(Some(state.config.recall_refine_medium_chars)),
         refine_timeout_secs: Some(state.config.recall_llm_refine_timeout_secs),
     };
 
@@ -351,7 +348,6 @@ pub async fn should_recall(
         phase2_multiplier,
         llm_max_eval = ?overrides.llm_max_eval,
         refine_strategy = ?overrides.refine_strategy,
-        refine_medium_chars = ?overrides.refine_medium_chars,
         refine_timeout_secs = ?overrides.refine_timeout_secs,
         "should_recall_overrides"
     );

@@ -103,8 +103,6 @@ pub struct OmemConfig {
     pub recall_llm_max_eval: usize,
     /// Refine strategy: strict / balanced / loose. Default: balanced
     pub recall_refine_strategy: String,
-    /// Medium relevance truncation chars. Default: 200
-    pub recall_refine_medium_chars: usize,
     /// LLM refine timeout in seconds. Default: 15
     pub recall_llm_refine_timeout_secs: u64,
 
@@ -183,7 +181,6 @@ impl Default for OmemConfig {
             recall_phase2_multiplier: 2,
             recall_llm_max_eval: 15,
             recall_refine_strategy: "balanced".to_string(),
-            recall_refine_medium_chars: 200,
             recall_llm_refine_timeout_secs: 15,
             profile_enabled: true,
             profile_llm_provider: "openai-compatible".to_string(),
@@ -369,10 +366,6 @@ impl OmemConfig {
                 .unwrap_or(defaults.recall_llm_max_eval),
             recall_refine_strategy: env::var("OMEM_RECALL_REFINE_STRATEGY")
                 .unwrap_or(defaults.recall_refine_strategy),
-            recall_refine_medium_chars: env::var("OMEM_RECALL_REFINE_MEDIUM_CHARS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.recall_refine_medium_chars),
             recall_llm_refine_timeout_secs: env::var("OMEM_RECALL_LLM_REFINE_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())

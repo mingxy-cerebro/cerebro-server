@@ -363,7 +363,6 @@ export class CerebroClient {
       phase2_multiplier?: number;
       llm_max_eval?: number;
       refine_strategy?: string;
-      refine_medium_chars?: number;
       skip_llm_gate?: boolean;
     },
     projectPath?: string,

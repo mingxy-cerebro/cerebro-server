@@ -144,13 +144,6 @@
           "description": "LLM refinement strategy: strict (high only), balanced (high+medium), loose (keep all)",
           "enum": ["strict", "balanced", "loose"],
           "default": "balanced"
-        },
-        "refineMediumChars": {
-          "type": "number",
-          "description": "Character limit for medium-relevance content truncation",
-          "default": 200,
-          "minimum": 50,
-          "maximum": 2000
         }
       },
       "additionalProperties": false

@@ -22,7 +22,6 @@ pub struct SearchOverrides {
     pub mmr_penalty_factor: Option<f32>,
     pub llm_max_eval: Option<usize>,
     pub refine_strategy: Option<String>,
-    pub refine_medium_chars: Option<usize>,
     pub refine_timeout_secs: Option<u64>,
 }
 
@@ -202,7 +201,6 @@ impl RetrievalPipeline {
             .and_then(|o| o.refine_strategy.clone())
             .unwrap_or_else(|| "balanced".to_string())
             .to_lowercase();
-        let refine_medium_chars = overrides.and_then(|o| o.refine_medium_chars).unwrap_or(200);
         let refine_timeout_secs = overrides.and_then(|o| o.refine_timeout_secs).unwrap_or(15);
 
         tracing::info!(
@@ -212,7 +210,6 @@ impl RetrievalPipeline {
             mmr_penalty_factor,
             llm_max_eval,
             refine_strategy = %refine_strategy,
-            refine_medium_chars,
             refine_timeout_secs,
             "recall_search_params"
         );
@@ -290,7 +287,6 @@ impl RetrievalPipeline {
                 request.conversation_context.as_deref(),
                 llm_max_eval,
                 &refine_strategy,
-                refine_medium_chars,
                 refine_timeout_secs,
             )
             .await;
@@ -952,7 +948,6 @@ impl RetrievalPipeline {
         conversation_context: Option<&[String]>,
         max_eval: usize,
         refine_strategy: &str,
-        medium_chars: usize,
         timeout_secs: u64,
     ) -> (Vec<SearchResult>, Vec<SearchResult>, StageTrace) {
         let stage_start = Instant::now();
@@ -1105,19 +1100,8 @@ impl RetrievalPipeline {
                     if refine_strategy == "strict" {
                         // strict: treat medium same as irrelevant — discard
                         r.memory.content.clear();
-                    } else {
-                        // balanced: replace with l1_overview or truncate to medium_chars
-                        r.memory.content = if !r.memory.l1_overview.is_empty() {
-                            std::mem::take(&mut r.memory.l1_overview)
-                        } else {
-                            let end = r.memory.content
-                                .char_indices()
-                                .nth(medium_chars)
-                                .map(|(i, _)| i)
-                                .unwrap_or(r.memory.content.len());
-                            r.memory.content[..end].to_string()
-                        };
                     }
+                    // balanced: keep content intact, only mark refine_relevance
                 }
             }
         }

@@ -29,7 +29,6 @@ export interface OmemPluginConfig {
     phase2Multiplier: number;
     llmMaxEval: number;
     refineStrategy: "strict" | "balanced" | "loose";
-    refineMediumChars: number;
   };
   logging: {
     logEnabled: boolean;
@@ -73,7 +72,6 @@ const DEFAULTS: OmemPluginConfig = {
     phase2Multiplier: 2,
     llmMaxEval: 15,
     refineStrategy: "balanced",
-    refineMediumChars: 200,
   },
   logging: {
     logEnabled: true,
@@ -140,7 +138,6 @@ function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
       phase2Multiplier: DEFAULTS.recall.phase2Multiplier,
       llmMaxEval: DEFAULTS.recall.llmMaxEval,
       refineStrategy: DEFAULTS.recall.refineStrategy,
-      refineMediumChars: DEFAULTS.recall.refineMediumChars,
     },
     logging: {
       logEnabled: flat.logEnabled ?? DEFAULTS.logging.logEnabled,
