@@ -8,6 +8,7 @@ pub mod lifecycle;
 pub mod memory;
 pub mod merge;
 pub mod profile;
+pub mod profile_v2;
 pub mod scheduler;
 pub mod session_recalls;
 pub mod sharing;
@@ -63,4 +64,9 @@ pub use clusters::{
 pub use events::sse_events;
 pub use scheduler::{
     get_scheduler_status, pause_clustering, pause_lifecycle, resume_clustering, resume_lifecycle,
+};
+pub use profile_v2::{
+    get_changelog, get_full_profile, get_induction_runs, get_injection, get_preference,
+    get_preferences, get_profile_stats, get_profile_versions, trigger_induction,
+    create_preference, update_preference, delete_preference,
 };

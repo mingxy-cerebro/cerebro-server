@@ -140,6 +140,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/scheduler/lifecycle/resume", post(handlers::resume_lifecycle))
         .route("/v1/scheduler/clustering/pause", post(handlers::pause_clustering))
         .route("/v1/scheduler/clustering/resume", post(handlers::resume_clustering))
+        // Profile V2 endpoints
+        .route(
+            "/v2/profile/preferences",
+            get(handlers::get_preferences).post(handlers::create_preference),
+        )
+        .route(
+            "/v2/profile/preferences/{id}",
+            get(handlers::get_preference)
+                .put(handlers::update_preference)
+                .delete(handlers::delete_preference),
+        )
+        .route("/v2/profile/inject", get(handlers::get_injection))
+        .route(
+            "/v2/profile/induction/trigger",
+            post(handlers::trigger_induction),
+        )
+        .route(
+            "/v2/profile/induction/runs",
+            get(handlers::get_induction_runs),
+        )
+        .route("/v2/profile", get(handlers::get_full_profile))
+        .route("/v2/profile/versions", get(handlers::get_profile_versions))
+        .route("/v2/profile/changelog", get(handlers::get_changelog))
+        .route("/v2/profile/stats", get(handlers::get_profile_stats))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
