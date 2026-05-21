@@ -17,18 +17,33 @@ type RecallTimeMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 static LAST_RECALL_TIME: LazyLock<Arc<Mutex<RecallTimeMap>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"你是一个记忆召回助手。用户有一个个人知识库，保存了过往笔记、项目经验、技术方案、偏好设置等记忆。判断用户当前问题是否需要检索知识库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalStrength {
+    None,
+    Weak,
+    Medium,
+    Strong,
+}
 
-分类标准：
-A类（需要召回 → yes）：明确引用过去的决策、偏好、项目细节、密钥/配置、用"之前/上次/那个"等词引用历史
-B类（可能需要 → no）：涉及技术方案选择、架构讨论，但问题是首次提出的新话题
-C类（不需要 → no）：通用编程问题、简单功能实现、数学推导、与历史无关的闲聊
+const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"判断用户问题是否需要从知识库检索历史记忆。
 
-规则：
-- A类回答 yes
-- B类和C类回答 no
-- 不确定时答 no（后续有兜底搜索机制，不会遗漏高相关记忆）
-- 只回答 yes 或 no"#;
+知识库内容：过往笔记、项目经验、技术决策、偏好设置、配置信息等。
+
+回答 yes 的场景（满足任一即可）：
+- 引用过去的事件、决策、方案（"之前"、"上次"、"we decided"）
+- 询问个人偏好、习惯、工具选择
+- 讨论特定项目/模块的设计或实现（可能涉及历史决策）
+- 提到配置、环境、部署等（可能需要历史配置记录）
+- 遇到问题寻求解决（可能之前有类似经验）
+
+回答 no 的场景（仅在以下情况）：
+- 纯通用知识问答（"什么是REST"、"冒泡排序怎么写"）
+- 简单计算或数学推导
+- 与用户个人历史完全无关的新话题闲聊
+
+核心原则：宁可多召回。只要问题可能与用户的过往经验、项目上下文、个人偏好有关，就回答 yes。
+
+只回答 yes 或 no。"#;
 
 #[derive(Deserialize)]
 pub struct ShouldRecallRequest {
@@ -58,6 +73,8 @@ pub struct ShouldRecallRequest {
     pub refine_medium_chars: Option<usize>,
     #[serde(default)]
     pub project_path: Option<String>,
+    #[serde(default)]
+    pub skip_llm_gate: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -229,16 +246,22 @@ pub async fn should_recall(
         denoised_query
     );
 
-    let (llm_yes, _llm_reason) = match state.recall_llm.complete_text(system, &user).await {
-        Ok(llm_response) => {
-            let trimmed = llm_response.trim().to_lowercase();
-            let yes = trimmed.starts_with("yes");
-            tracing::info!(query = %body.query_text, llm_response = %trimmed, llm_yes = yes, "recall_llm_response");
-            (yes, if yes { "llm_yes" } else { "llm_no" })
-        }
-        Err(e) => {
-            tracing::warn!(query = %body.query_text, error = %e, "recall_llm_error_fallback");
-            (true, "llm_error_fallback")
+    let skip_llm = body.skip_llm_gate.unwrap_or(false);
+    let (llm_yes, _llm_reason) = if skip_llm {
+        tracing::info!(query = %body.query_text, reason = "skipped_llm_gate", "recall_llm_skipped");
+        (true, "skipped_llm_gate")
+    } else {
+        match state.recall_llm.complete_text(system, &user).await {
+            Ok(llm_response) => {
+                let trimmed = llm_response.trim().to_lowercase();
+                let yes = trimmed.starts_with("yes");
+                tracing::info!(query = %body.query_text, llm_response = %trimmed, llm_yes = yes, "recall_llm_response");
+                (yes, if yes { "llm_yes" } else { "llm_no" })
+            }
+            Err(e) => {
+                tracing::warn!(query = %body.query_text, error = %e, "recall_llm_error_fallback");
+                (true, "llm_error_fallback")
+            }
         }
     };
 
@@ -254,25 +277,43 @@ pub async fn should_recall(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
-    let mut min_score = body.similarity_threshold.unwrap_or(0.4);
-    if !(0.0..=1.0).contains(&min_score) {
-        min_score = 0.4;
-    }
-
     let mut max_results = body.max_results.unwrap_or(5);
     if max_results == 0 {
         max_results = 5;
     }
 
-    let (effective_min_score, quality_gate) = if llm_yes {
-        (min_score, 0.40)
-    } else if has_recall_signals(&denoised_query) {
-        tracing::info!(query = %body.query_text, original_min_score = min_score, strict_min_score = min_score.max(0.50), quality_gate = 0.45, "recall_llm_rejected_with_signals");
-        (min_score.max(0.50), 0.45)
+    let signal_level = has_recall_signals(&denoised_query);
+    let effective_min_score = body.similarity_threshold.unwrap_or_else(|| {
+        if llm_yes || signal_level == SignalStrength::Strong {
+            0.35
+        } else {
+            match signal_level {
+                SignalStrength::Medium => 0.40,
+                SignalStrength::Weak => 0.45,
+                SignalStrength::None => 0.50,
+                SignalStrength::Strong => unreachable!(),
+            }
+        }
+    });
+    let quality_gate = if llm_yes || signal_level == SignalStrength::Strong {
+        0.35
     } else {
-        tracing::info!(query = %body.query_text, strict_min_score = min_score.max(0.60), quality_gate = 0.55, "recall_llm_rejected_strict");
-        (min_score.max(0.60), 0.55)
+        match signal_level {
+            SignalStrength::Medium => 0.40,
+            SignalStrength::Weak => 0.42,
+            SignalStrength::None => 0.48,
+            SignalStrength::Strong => unreachable!(),
+        }
     };
+
+    tracing::info!(
+        query = %body.query_text,
+        signal_level = ?signal_level,
+        llm_yes,
+        effective_min_score,
+        quality_gate,
+        "should_recall_thresholds"
+    );
 
     let spaces = state
         .space_store
@@ -462,7 +503,7 @@ pub async fn should_recall(
     let max_score = memories.iter().map(|m| m.score).fold(0.0_f32, f32::max);
 
     // 质量门槛：用max_score而非平均score，避免"一条高分拉高平均"的问题
-    // quality_gate由LLM判断结果动态决定：yes=0.40, 信号词=0.50, 无信号=0.60
+    // quality_gate由LLM判断+SignalStrength四档动态决定：Strong/LLM=yes=0.35, Medium=0.40, Weak=0.42, None=0.48
     if memories.is_empty() || max_score <= quality_gate {
         let reason = if memories.is_empty() {
             "no_relevant_memories".to_string()
@@ -605,30 +646,91 @@ fn denoise_for_recall(text: &str) -> String {
     }
 }
 
-/// 检查query是否包含高信号关键词（低成本，无需embedding）
-/// 仅检测明确的"引用历史"信号，避免编程通用词(config/key/token)误触发
-/// 安全阀设计：只在LLM判断no但query明确引用历史时，给予一次严格搜索的机会
-fn has_recall_signals(query: &str) -> bool {
-    static SIGNAL_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+/// 检查query中的记忆召回信号强度（低成本，无需embedding）
+/// 四档：Strong（明确历史引用）> Medium（偏好/项目/配置）> Weak（编程求助隐含上下文）> None
+/// 重要：不包含编程通用词（config/key/data/function/variable）作为独立触发词
+fn has_recall_signals(query: &str) -> SignalStrength {
+    // STRONG：明确的历史引用信号
+    static STRONG_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
         let patterns = [
-            // 明确的历史/时间引用（中文）—— 最强信号，表明用户在回忆过去的交互
-            r"(?:之前|上次|以前|过去|曾经|记得|忘了|忘记|那个方案|之前的|上次说的|之前做的|上次的)",
-            // 密钥类（中文，编程通用词中极少自然出现）
-            r"(?:密码|密钥|口令)",
-            // 明确的历史引用（英文）
-            r"(?i)(?:remember|recall|previously|last\s+time|earlier|that\s+time|before\s+this|the\s+other\s+day)",
+            // 中文历史引用
+            r"(?:之前|上次|以前|过去|曾经|记得|忘了|忘记|回忆|想起|提到过|说过|讨论过|聊过)",
+            // 中文指代
+            r"(?:那个方案|之前的|上次说的|之前做的|上次的|那个问题|那个项目|那个决定|之前讨论|之前决定|之前选的|之前定的)",
+            // 中文密钥
+            r"(?:密码|密钥|口令|凭证)",
+            // 中文检索意图
+            r"(?:查一下|找一下|翻一下|看一下|搜一下|调出来).{0,4}(?:之前的|上次的|以前的|历史的|过去的|记录|笔记|文档|方案)",
+            // 英文历史
+            r"(?i)(?:remember|recall|previously|last\s+time|earlier|that\s+time|before\s+this|the\s+other\s+day|we\s+discussed|we\s+talked|we\s+decided|as\s+we\s+agreed|from\s+before)",
+            // 英文指代
+            r"(?i)(?:that\s+(?:project|decision|approach|solution|issue|feature|module|component)|the\s+one\s+we|what\s+did\s+we|how\s+did\s+we|what\s+was\s+the)",
+            // 英文密钥
+            r"(?i)\b(?:password|secret|credential|api\s*key|access\s*token|secret\s*key)\b",
         ];
         patterns.iter()
             .filter_map(|p| regex::Regex::new(p).ok())
             .collect()
     });
 
-    for pattern in SIGNAL_PATTERNS.iter() {
+    // MEDIUM：偏好/项目/配置
+    static MEDIUM_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+        let patterns = [
+            // 中文偏好
+            r"(?:我喜欢|我习惯|我的偏好|我通常|我一般|我喜欢用|我倾向于|我的风格|我的习惯|偏好)",
+            // 中文项目
+            r"(?:这个项目|这个模块|这个组件|这个功能|这个服务|这个系统|这个架构|团队|同事|协作|代码规范|技术栈|项目结构)",
+            // 中文配置
+            r"(?:环境变量|配置文件|部署|上线|服务器|数据库连接|端口号|域名|证书)",
+            // 中文决策
+            r"(?:方案选择|技术选型|为什么用|为什么选|选型|决策|规范|标准|约定)",
+            // 英文偏好
+            r"(?i)(?:i\s+(?:prefer|like|usually|typically|normally|always|tend\s+to)|my\s+(?:preference|style|habit|setup))",
+            // 英文项目
+            r"(?i)(?:in\s+this\s+(?:project|repo|codebase|team)|our\s+(?:project|team|codebase|architecture|stack|standard|convention)|how\s+(?:do\s+we|does\s+our))",
+            // 英文配置
+            r"(?i)(?:deploy|deployment|production|staging|environment\s+var|infrastructure|ci.?cd|pipeline)",
+        ];
+        patterns.iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect()
+    });
+
+    // WEAK：编程求助中的隐含上下文需求
+    static WEAK_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+        let patterns = [
+            // 中文求助+领域
+            r"(?:怎么实现|如何实现|怎么处理|如何处理|怎么解决|如何解决).{0,10}(?:功能|模块|接口|方案|架构|系统|组件|服务|认证|授权|缓存|队列)",
+            // 中文错误
+            r"(?:遇到了|报错了|出bug|崩溃|异常).{0,10}(?:问题|错误|bug|异常|崩溃)",
+            // 中文改造
+            r"(?:优化|重构|迁移|升级|改造|适配).{0,10}(?:方案|架构|系统|模块|组件|服务)",
+            // 英文求助
+            r"(?i)(?:how\s+(?:should|do|can|might|would)\s+we\s+(?:implement|handle|solve|approach|deal\s+with))",
+            // 英文改造
+            r"(?i)(?:refactor|migrat|upgrad|rewrit|redesign|port)\s+(?:this|the|our)",
+        ];
+        patterns.iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect()
+    });
+
+    for pattern in STRONG_PATTERNS.iter() {
         if pattern.is_match(query) {
-            return true;
+            return SignalStrength::Strong;
         }
     }
-    false
+    for pattern in MEDIUM_PATTERNS.iter() {
+        if pattern.is_match(query) {
+            return SignalStrength::Medium;
+        }
+    }
+    for pattern in WEAK_PATTERNS.iter() {
+        if pattern.is_match(query) {
+            return SignalStrength::Weak;
+        }
+    }
+    SignalStrength::None
 }
 
 #[derive(Deserialize)]
@@ -856,5 +958,168 @@ mod tests {
         }"#;
         let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
         assert!(req.project_path.is_none());
+    }
+
+    #[test]
+    fn test_should_recall_request_skip_llm_gate() {
+        let json = r#"{
+            "query_text": "test",
+            "session_id": "s1",
+            "skip_llm_gate": true
+        }"#;
+        let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.skip_llm_gate, Some(true));
+    }
+
+    #[test]
+    fn test_should_recall_request_skip_llm_gate_default() {
+        let json = r#"{
+            "query_text": "test",
+            "session_id": "s1"
+        }"#;
+        let req: ShouldRecallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.skip_llm_gate, None);
+    }
+
+    // --- SignalStrength tests ---
+
+    #[test]
+    fn test_signal_strong_chinese_history() {
+        assert_eq!(has_recall_signals("之前做的方案"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_chinese_reference() {
+        assert_eq!(has_recall_signals("上次说的那个问题"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_chinese_secret() {
+        assert_eq!(has_recall_signals("数据库密码是多少"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_chinese_retrieval_intent() {
+        assert_eq!(has_recall_signals("查一下之前的记录"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_english_history() {
+        assert_eq!(has_recall_signals("remember what we discussed"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_english_reference() {
+        assert_eq!(has_recall_signals("that project we worked on"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_strong_english_secret() {
+        assert_eq!(has_recall_signals("what is the api key"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_medium_chinese_preference() {
+        assert_eq!(has_recall_signals("我喜欢用Rust写后端"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_chinese_project() {
+        assert_eq!(has_recall_signals("这个项目的架构怎么样"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_chinese_config() {
+        assert_eq!(has_recall_signals("环境变量怎么配置"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_chinese_decision() {
+        assert_eq!(has_recall_signals("技术选型为什么用Go"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_english_preference() {
+        assert_eq!(has_recall_signals("I prefer dark mode"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_english_project() {
+        assert_eq!(has_recall_signals("in this project we use React"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_medium_english_config() {
+        assert_eq!(has_recall_signals("deployment pipeline setup"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_weak_chinese_help() {
+        assert_eq!(has_recall_signals("怎么实现用户认证功能"), SignalStrength::Weak);
+    }
+
+    #[test]
+    fn test_signal_weak_chinese_error() {
+        assert_eq!(has_recall_signals("遇到了一个bug问题"), SignalStrength::Weak);
+    }
+
+    #[test]
+    fn test_signal_weak_chinese_refactor() {
+        // "这个模块" matches Medium project pattern, Medium takes priority over Weak
+        assert_eq!(has_recall_signals("优化这个模块的架构"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_signal_weak_english_help() {
+        assert_eq!(has_recall_signals("how should we implement the auth module"), SignalStrength::Weak);
+    }
+
+    #[test]
+    fn test_signal_weak_english_refactor() {
+        assert_eq!(has_recall_signals("refactor this component"), SignalStrength::Weak);
+    }
+
+    #[test]
+    fn test_signal_none_generic_question() {
+        assert_eq!(has_recall_signals("今天天气怎么样"), SignalStrength::None);
+    }
+
+    #[test]
+    fn test_signal_none_sorting_algorithm() {
+        assert_eq!(has_recall_signals("冒泡排序怎么写"), SignalStrength::None);
+    }
+
+    #[test]
+    fn test_signal_none_rest_definition() {
+        assert_eq!(has_recall_signals("什么是REST"), SignalStrength::None);
+    }
+
+    #[test]
+    fn test_signal_none_general_coding_words() {
+        // Programming generic words should NOT trigger Weak or above
+        assert_eq!(has_recall_signals("config the data function with a variable"), SignalStrength::None);
+    }
+
+    #[test]
+    fn test_signal_none_key_value_pair() {
+        assert_eq!(has_recall_signals("create a key value store"), SignalStrength::None);
+    }
+
+    #[test]
+    fn test_signal_strong_takes_priority_over_medium() {
+        // "之前" is Strong, "这个项目" is Medium — Strong should win
+        assert_eq!(has_recall_signals("之前这个项目的方案"), SignalStrength::Strong);
+    }
+
+    #[test]
+    fn test_signal_medium_takes_priority_over_weak() {
+        // "这个模块" is Medium, but "怎么实现" + domain would be Weak — Medium wins
+        assert_eq!(has_recall_signals("这个模块怎么处理"), SignalStrength::Medium);
+    }
+
+    #[test]
+    fn test_config_should_recall_min_interval_default() {
+        let config = crate::config::OmemConfig::default();
+        assert_eq!(config.should_recall_min_interval_secs, 30);
     }
 }

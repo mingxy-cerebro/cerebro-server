@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, memoryInjectionHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, soulWhisperToolTracker, pendingToolCalls, buildWhisperText } from "./hooks.js";
+import { autoRecallHook, memoryInjectionHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, soulWhisperToolTracker, pendingToolCalls, buildWhisperText, recallCache, profileInjectedSessions, buildProfileBlock } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
@@ -178,6 +178,26 @@ const OmemPlugin: Plugin = async (input) => {
         mainSessionId = input.sessionID;
         mainSessionLocked = true;
         logInfo("mainSessionId locked", { sessionId: input.sessionID });
+      }
+      const sid = input.sessionID;
+      if (sid) {
+        const cached = recallCache.get(sid);
+        if (!cached || !cached.profileBlock) {
+          cerebroClient.getProfile().then(profile => {
+            if (profile) {
+              const built = buildProfileBlock(profile);
+              if (built) {
+                recallCache.set(sid, {
+                  profileBlock: built.block,
+                  recallResult: null as any,
+                  profileData: { countText: built.countText },
+                  timestamp: Date.now(),
+                });
+                profileInjectedSessions.set(sid, Date.now());
+              }
+            }
+          }).catch(() => {});
+        }
       }
       return systemTransformHook(input, output);
     },

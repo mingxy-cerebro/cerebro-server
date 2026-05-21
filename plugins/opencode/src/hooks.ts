@@ -171,12 +171,12 @@ const saveKeywordDetectedSessions = new Set<string>();
 const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
-const profileInjectedSessions = new Map<string, number>();
+export const profileInjectedSessions = new Map<string, number>();
 const injectedSessions = new Set<string>();
 const compactingSummaryCooldown = new Map<string, number>();
 
 // Per-session async cache for fire-and-forget recall results
-const recallCache = new Map<string, {
+export const recallCache = new Map<string, {
   profileBlock: string;
   recallResult: ShouldRecallResponse;
   profileData: { countText: string };
@@ -623,7 +623,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
   };
 }
 
-function buildProfileBlock(profile: any): { block: string; countText: string } | null {
+export function buildProfileBlock(profile: any): { block: string; countText: string } | null {
   const prefs = ((profile as any)?.static_facts ?? [])
     .filter((sf: any) => {
       const t: string[] = sf.tags ?? [];
@@ -716,7 +716,7 @@ export function memoryInjectionHook(
 
       const cached = recallCache.get(input.sessionID);
 
-      if (cached) {
+      if (cached && cached.recallResult) {
         isCacheHit = true;
         shouldRecallRes = cached.recallResult;
         if (cached.profileBlock) {
@@ -742,6 +742,7 @@ export function memoryInjectionHook(
               llm_max_eval: llmMaxEval,
               refine_strategy: refineStrategy,
               refine_medium_chars: refineMediumChars,
+              skip_llm_gate: true,
             },
             directory || process.env.OMEM_PROJECT_DIR,
           ),
