@@ -526,16 +526,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
       const newResults = results.filter((r) => !existingIds.has(r.memory.id));
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
-      if (newResults.length === 0) {
-        if (profileBlock) {
-          appendToSystem(output.system, profileBlock);
-          logDebug("autoRecallHook profile injected (dedup path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
-        }
-        if (profileInjected && !lastInjected) {
-          showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
-        }
-        return;
-      }
 
       // --- Token Budget Calculation ---
       const profileChars = profileInjected ? profileBlock.length : 0;
@@ -563,8 +553,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
       }
 
-      // Profile injected AFTER context so it appears at the end of system prompt
-      // where LLM attention is highest
       if (profileBlock) {
         appendToSystem(output.system, profileBlock);
         logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
