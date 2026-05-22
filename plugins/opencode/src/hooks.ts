@@ -168,11 +168,11 @@ function extractUserRequest(content: string): string {
 }
 
 const saveKeywordDetectedSessions = new Set<string>();
-const injectedMemoryIds = new Map<string, Set<string>>();
 const firstMessages = new Map<string, string>();
 const sessionMessages = new Map<string, Array<{ role: string; content: string }>>();
 export const profileInjectedSessions = new Map<string, number>();
 const lastProfileBlock = new Map<string, { content: string; count: number }>();
+const lastUserMsgCount = new Map<string, number>();
 const summarizedSessions = new Set<string>();
 
 function formatRelativeAge(isoDate: string): string {
@@ -368,13 +368,19 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       const messages = sessionMessages.get(input.sessionID) ?? [];
       const userMessages = messages.filter((m) => m.role === "user");
 
+      const prevCount = lastUserMsgCount.get(input.sessionID) ?? 0;
+      if (userMessages.length <= prevCount) {
+        logDebug("autoRecallHook skipped: no new user message", { sessionId: input.sessionID, prevCount, currentCount: userMessages.length });
+        return;
+      }
+      lastUserMsgCount.set(input.sessionID, userMessages.length);
+
       // --- Profile Fetch (V2 inject API with TTL gate + module-level cache) ---
       const profileTtlMs = config.profile?.ttlMs ?? 300000; // default 5 minutes
       const lastInjected = profileInjectedSessions.get(input.sessionID);
       const profileTtlExpired = !lastInjected || (Date.now() - lastInjected > profileTtlMs);
 
       let profileBlock = "";
-      let profileInjected = false;
       let profileCountText = "";
 
       if (profileTtlExpired) {
@@ -385,7 +391,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
             if (injection?.content) {
               profileBlock = injection.content;
               profileCountText = `${injection.preference_count} preferences`;
-              profileInjected = true;
               profileInjectedSessions.set(input.sessionID, Date.now());
               lastProfileBlock.set(input.sessionID, { content: profileBlock, count: injection.preference_count });
               logDebug("autoRecallHook profile fetched (V2 injection)", { preferenceCount: injection.preference_count, estimatedTokens: injection.estimated_tokens });
@@ -399,16 +404,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
               showToast(tui, "⚠️ Profile Inject Failed", "Preference injection skipped · will retry next turn", "error", toastDelayMs);
             }
           }
-        }
-      }
-
-      // TTL未过期时从module缓存恢复（compact后profileBlock局部变量丢失但缓存仍在）
-      if (!profileBlock) {
-        const cached = lastProfileBlock.get(input.sessionID);
-        if (cached?.content) {
-          profileBlock = cached.content;
-          profileCountText = `${cached.count} preferences (cached)`;
-          logDebug("autoRecallHook profile restored from cache", { sessionId: input.sessionID, count: cached.count });
         }
       }
 
@@ -514,29 +509,30 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       };
 
       if (!shouldRecallRes.should_recall) {
-        if (profileBlock) {
+        const didInjectProfile = profileTtlExpired && !!profileBlock;
+        if (didInjectProfile) {
           appendToSystem(output.system, profileBlock);
-          createEventAndReturn({
-            keptCount: 0,
-            discardedCount: 0,
-            actualProfileInjected: true,
-            actualProfileContent: profileBlock,
-            actualInjectedCount: 0,
-          });
           logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
         }
-        if (profileInjected && !lastInjected) {
-          showToast(tui, "👨 Profile Injected", `${profileCountText} · no memory recall needed`, "success", toastDelayMs);
+
+        createEventAndReturn({
+          keptCount: 0,
+          discardedCount: 0,
+          actualProfileInjected: didInjectProfile,
+          actualProfileContent: didInjectProfile ? profileBlock : undefined,
+          actualInjectedCount: 0,
+        });
+
+        if (didInjectProfile) {
+          showToast(tui, "👨 Profile Injected", `${profileCountText} · no recall needed`, "success", toastDelayMs);
+        } else {
+          showToast(tui, "🧠 Cerebro", "profile cached · no recall needed", "info", toastDelayMs);
         }
         return;
       }
 
       const results = shouldRecallRes.memories ?? [];
       const clustered = shouldRecallRes.clustered;
-
-      const existingIds = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
-      const newResults = results.filter((r) => !existingIds.has(r.memory.id));
-      logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
 
       // --- Token Budget Calculation ---
       const profileChars = profileBlock ? profileBlock.length : 0;
@@ -551,7 +547,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
 
       const block = clustered 
         ? buildClusteredContextBlock(clustered, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS)
-        : buildContextBlock(newResults, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS);
+        : buildContextBlock(results, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS);
       if (block) {
         appendToSystem(output.system, block);
         appendToSystem(output.system, FETCH_POLICY);
@@ -564,79 +560,37 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
       }
 
-      if (profileBlock) {
+      if (profileTtlExpired && profileBlock) {
         appendToSystem(output.system, profileBlock);
         logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
       }
 
-      const newIds = newResults.map((r) => r.memory.id);
-      injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
-      logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered, sessionId: input.sessionID });
+      logDebug("autoRecallHook injection complete", { clustered: !!clustered, sessionId: input.sessionID });
 
-      const allAlreadyInjected = results.length > 0 && newResults.length === 0;
-      const didInjectProfile = !!profileBlock;
+      const didInjectProfile = profileTtlExpired && !!profileBlock;
       const didInjectContext = !!block;
-      if (didInjectContext || didInjectProfile) {
-        const actualInjectedCount = clustered
+
+      createEventAndReturn({
+        keptCount: storedMemoryIds.length,
+        discardedCount: storedDiscardedIds.length,
+        injectedContent: didInjectContext ? block : undefined,
+        actualProfileInjected: profileTtlExpired && !!profileBlock,
+        actualProfileContent: profileTtlExpired ? profileBlock : undefined,
+        actualInjectedCount: clustered
           ? (clustered.cluster_summaries.reduce((s, cs) => s + cs.member_count, 0) + clustered.standalone_memories.length)
-          : newResults.length;
+          : results.length,
+      });
 
-        createEventAndReturn({
-          keptCount: storedMemoryIds.length,
-          discardedCount: storedDiscardedIds.length,
-          injectedContent: didInjectContext ? block : undefined,
-          actualProfileInjected: didInjectProfile,
-          actualProfileContent: didInjectProfile ? profileBlock : undefined,
-          actualInjectedCount,
-        });
-      }
-
-      // --- Toast ---
-      if (allAlreadyInjected && !didInjectContext) {
-        // dedup场景：无新context，可能注入了缓存的profile
-        if (didInjectProfile) {
-          showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
-        }
-        // dedup无profile → 静默
-        return;
-      }
-      if (!didInjectContext && !didInjectProfile) {
-        // 无任何注入 → 静默
-        return;
-      }
-
-      const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
-      const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;
-      const memOther = newResults.length - memDynamic - memStatic;
-
-      let memCountMsg = "";
-      if (memDynamic > 0) memCountMsg += `Dynamic(${memDynamic}) `;
-      if (memStatic > 0) memCountMsg += `Static(${memStatic}) `;
-      if (memOther > 0) memCountMsg += `Other(${memOther}) `;
-
-      const categories = categorize(newResults);
-      const catSummary = Array.from(categories.entries())
-        .map(([label, items]) => `${label}(${items.length})`)
-        .join(" · ");
-
-      let toastTitle: string;
-      let toastMessage: string;
-      
-      if (clustered) {
-        const clusterCount = clustered.cluster_summaries.length;
-        const standaloneCount = clustered.standalone_memories.length;
-        toastTitle = `🧠 Context Injected · ${clusterCount} clusters${standaloneCount > 0 ? ` · ${standaloneCount} extras` : ""}`;
-        toastMessage = didInjectProfile
-          ? `Profile: ${profileCountText} · Clustered recall`
-          : `Clustered recall`;
+      // --- Toast (every branch shows toast) ---
+      if (didInjectProfile && didInjectContext) {
+        showToast(tui, "🧠 Context + Profile Injected", `${profileCountText} · recall active`, "success", toastDelayMs);
+      } else if (didInjectProfile) {
+        showToast(tui, "👨 Profile Injected", `${profileCountText} · no recall needed`, "success", toastDelayMs);
+      } else if (didInjectContext) {
+        showToast(tui, "🧠 Context Injected", `Recall active · profile cached`, "success", toastDelayMs);
       } else {
-        toastTitle = `🧠 Context Injected · ${newResults.length} fragments`;
-        toastMessage = didInjectProfile
-          ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
-          : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
+        showToast(tui, "🧠 Cerebro", "profile cached · no recall needed", "info", toastDelayMs);
       }
-
-      showToast(tui, toastTitle, toastMessage, "success", toastDelayMs);
 
       if (saveKeywordDetectedSessions.has(input.sessionID)) {
         appendToSystem(output.system, KEYWORD_NUDGE);
@@ -780,13 +734,6 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       } else {
         output.context.push(FETCH_POLICY);
       }
-      // 将compacting搜索结果的ID写入injectedMemoryIds，避免后续autoRecall重复注入
-      if (input.sessionID && results.length > 0) {
-        const compactingIds = results.map((r) => r.memory.id);
-        const existing = injectedMemoryIds.get(input.sessionID) ?? new Set<string>();
-        injectedMemoryIds.set(input.sessionID, new Set([...existing, ...compactingIds]));
-        logDebug("compactingHook updated injectedMemoryIds", { sessionId: input.sessionID, addedCount: compactingIds.length, totalExisting: existing.size });
-      }
     } catch {
     }
 
@@ -806,6 +753,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (input.sessionID) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
+        lastUserMsgCount.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       }
       return;
@@ -837,6 +785,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (isAutoStoreEnabled && !isAutoStoreEnabled(input.sessionID)) {
         sessionMessages.delete(input.sessionID);
         profileInjectedSessions.delete(input.sessionID);
+        lastUserMsgCount.delete(input.sessionID);
         firstMessages.delete(input.sessionID);
       } else {
         const messages = sessionMessages.get(input.sessionID)!;
@@ -866,20 +815,17 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       // Cleanup tracked messages regardless of ingest result
       sessionMessages.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
+      lastUserMsgCount.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
-      injectedMemoryIds.delete(input.sessionID);
       if (input.sessionID) {
         logDebug("compactingHook cleared session state", { sessionID: input.sessionID });
-      }
-      // Evict stale injectedMemoryIds if over size cap (200 sessions)
-      if (injectedMemoryIds.size > 200) {
-        injectedMemoryIds.clear();
       }
     }
 
     // After compacting, clear profile TTL so next autoRecallHook re-injects profile
     if (input.sessionID) {
       profileInjectedSessions.delete(input.sessionID);
+      lastUserMsgCount.delete(input.sessionID);
       logDebug("compactingHook cleared profile TTL for re-injection", { sessionID: input.sessionID });
     }
   };
@@ -1123,8 +1069,8 @@ export function sessionIdleHook(
         summarizedSessions.delete(sid);
         sessionMessages.delete(sid);
         profileInjectedSessions.delete(sid);
+        lastUserMsgCount.delete(sid);
         firstMessages.delete(sid);
-        injectedMemoryIds.delete(sid);
         logDebug("sessionIdleHook: session.deleted cleanup", { sessionID: sid });
       }
       return;
