@@ -3,14 +3,11 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::json;
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 
 use crate::api::event_bus::{ServerEvent, SharedEventBus};
 use crate::api::scheduler_control::SharedSchedulerControl;
 use crate::api::server::SessionLockMap;
-use crate::cluster::background_clustering::BackgroundClusterer;
-use crate::cluster::cluster_store::ClusterStore;
-use crate::cluster::manager::ClusterManager;
 use crate::domain::memory::Memory;
 use crate::lifecycle::forgetting::AutoForgetter;
 use crate::lifecycle::tier::TierManager;
@@ -22,7 +19,6 @@ use crate::store::StoreManager;
 
 pub struct LifecycleScheduler {
     store_manager: Arc<StoreManager>,
-    cluster_store: Arc<ClusterStore>,
     embed: Option<Arc<dyn crate::embed::EmbedService>>,
     llm: Option<Arc<dyn crate::llm::LlmService>>,
     interval_secs: u64,
@@ -44,13 +40,11 @@ pub struct LifecycleScheduler {
 impl LifecycleScheduler {
     pub fn new(
         store_manager: Arc<StoreManager>,
-        cluster_store: Arc<ClusterStore>,
         interval: Duration,
         run_on_start: bool,
     ) -> Self {
         Self {
             store_manager,
-            cluster_store,
             embed: None,
             llm: None,
             interval_secs: interval.as_secs(),
@@ -236,22 +230,12 @@ impl LifecycleScheduler {
                     "memory_ids": removed.iter().map(|m| m.id.clone()).take(20).collect::<Vec<_>>()
                 }));
             }
-
-            self.emit("lifecycle.stage", "system", json!({"phase": "orphan_cleanup", "store_index": i}));
-            self.cleanup_orphan_clusters(store, &removed).await;
-
-            self.emit("lifecycle.stage", "system", json!({"phase": "incremental_clustering", "store_index": i}));
-            self.run_incremental_clustering(store).await;
         }
 
         for store in &stores {
             if let Err(e) = store.optimize().await {
                 warn!(error = %e, "scheduler_optimize_failed");
             }
-        }
-
-        if let Err(e) = self.cluster_store.optimize().await {
-            warn!(error = %e, "scheduler_cluster_optimize_failed");
         }
 
         let session_optimized = self.store_manager.optimize_session_stores().await;
@@ -316,37 +300,6 @@ impl LifecycleScheduler {
         removed
     }
 
-    async fn cleanup_orphan_clusters(
-        &self,
-        _store: &Arc<crate::store::LanceStore>,
-        removed_memories: &[Memory],
-    ) {
-        if removed_memories.is_empty() {
-            return;
-        }
-
-        let manager = ClusterManager::new(self.cluster_store.clone(), self.llm.clone());
-
-        for memory in removed_memories {
-            if let Err(e) = manager.on_memory_removed(memory).await {
-                warn!(memory_id = %memory.id, error = %e, "failed to maintain cluster on memory removal");
-            }
-        }
-
-        match self.cluster_store.list_empty_clusters().await {
-            Ok(empty) => {
-                for cluster in empty {
-                    if let Err(e) = self.cluster_store.delete_cluster(&cluster.id).await {
-                        warn!(cluster_id = %cluster.id, error = %e, "failed to delete empty cluster");
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to list empty clusters");
-            }
-        }
-    }
-
     async fn evaluate_tiers(
         &self,
         store: &Arc<crate::store::LanceStore>,
@@ -399,52 +352,6 @@ impl LifecycleScheduler {
 
         if demoted_count > 0 {
             info!(demoted = demoted_count, "scheduler_tier_evaluation_complete");
-        }
-    }
-
-    async fn run_incremental_clustering(&self, store: &Arc<crate::store::LanceStore>) {
-        let embed = match &self.embed {
-            Some(e) => e.clone(),
-            None => {
-                debug!("incremental_clustering: no embed service, skipping");
-                return;
-            }
-        };
-
-        let tenant_id = match store.list(1, 0).await {
-            Ok(memories) => memories.first().map(|m| m.tenant_id.clone()).unwrap_or_default(),
-            Err(_) => String::new(),
-        };
-        if tenant_id.is_empty() {
-            debug!("incremental_clustering: no memories in store, skipping");
-            return;
-        }
-
-        match BackgroundClusterer::run_incremental_clustering(
-            store.clone(),
-            self.cluster_store.clone(),
-            embed,
-            self.llm.clone(),
-            Some(50),
-            &tenant_id,
-            self.event_bus.clone(),
-            tenant_id.clone(),
-        ).await {
-            Ok(stats) => {
-                if stats.processed > 0 {
-                    info!(
-                        processed = stats.processed,
-                        assigned = stats.assigned_to_existing,
-                        created = stats.created_new_clusters,
-                        errors = stats.errors,
-                        tenant_id,
-                        "scheduler_incremental_clustering_done"
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, tenant_id, "scheduler_incremental_clustering_failed");
-            }
         }
     }
 

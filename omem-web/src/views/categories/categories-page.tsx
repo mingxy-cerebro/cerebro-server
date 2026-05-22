@@ -341,6 +341,7 @@ export function CategoriesPage() {
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value.toLowerCase() }))}
                   placeholder="e.g. preferences"
+                  maxLength={50}
                 />
               </div>
             )}
@@ -350,6 +351,7 @@ export function CategoriesPage() {
                 value={form.display_name}
                 onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
                 placeholder="e.g. 偏好设置"
+                maxLength={100}
               />
             </div>
             <div className="space-y-1.5">
@@ -358,6 +360,7 @@ export function CategoriesPage() {
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                 placeholder="分类描述"
+                maxLength={500}
               />
             </div>
             <div className="space-y-1.5">
@@ -366,6 +369,7 @@ export function CategoriesPage() {
                 value={form.decision_rule}
                 onChange={(e) => setForm((f) => ({ ...f, decision_rule: e.target.value }))}
                 placeholder="可选"
+                maxLength={200}
               />
             </div>
 
@@ -419,6 +423,7 @@ export function CategoriesPage() {
                 value={form.prompt_format}
                 onChange={(e) => setForm((f) => ({ ...f, prompt_format: e.target.value }))}
                 placeholder="可选"
+                maxLength={500}
               />
             </div>
 
@@ -507,6 +512,7 @@ export function CategoriesPage() {
                 value={newAlias}
                 onChange={(e) => setNewAlias(e.target.value)}
                 placeholder="e.g. likes"
+                maxLength={50}
               />
             </div>
             <div className="space-y-1.5">

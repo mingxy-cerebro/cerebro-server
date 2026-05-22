@@ -6,7 +6,6 @@ use tokio::sync::Semaphore;
 
 use crate::api::event_bus::SharedEventBus;
 use crate::api::scheduler_control::SharedSchedulerControl;
-use crate::cluster::cluster_store::ClusterStore;
 use crate::config::OmemConfig;
 use crate::embed::EmbedService;
 use crate::llm::LlmService;
@@ -27,8 +26,6 @@ pub struct AppState {
     pub embed: Arc<dyn EmbedService>,
     pub llm: Arc<dyn LlmService>,
     pub recall_llm: Arc<dyn LlmService>,
-    pub cluster_llm: Arc<dyn LlmService>,
-    pub cluster_store: Arc<ClusterStore>,
     pub config: OmemConfig,
     pub import_semaphore: Arc<Semaphore>,
     pub reconcile_semaphore: Arc<Semaphore>,

@@ -547,101 +547,6 @@ When extracting memories, apply these rules to maximize quality and future utili
 4. **Actionable Over Vague**: Prefer specific, actionable details over generic descriptions. "User deploys with Docker Compose on Ubuntu 22.04" > "User uses containers".
 "###;
 
-const CLUSTER_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to synthesize a comprehensive title and summary for a cluster of related memories.
-
-## ABSOLUTE RULES (Violating any of these is a FAILURE)
-
-### Rule 1: Language Preservation (MANDATORY)
-- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORIES.**
-- If the input memories are in Chinese, EVERY SINGLE FIELD must be in Chinese: title, summary, EVERYTHING.
-- If the input memories are in English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
-- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
-
-## Task
-Given a set of related memory entries, produce:
-1. A **title**: at most 8 characters (Chinese) or 5 words (English), highly condensed, capturing the core theme.
-2. A **summary**: 3-6 bullet points, each capturing a DISTINCT key topic from the members. Use Markdown formatting.
-
-## Summary Rules
-- Cover ALL major topics present in the member memories.
-- Each bullet point = one distinct topic (e.g., career, project, team, preferences).
-- Be specific: include key facts, names, numbers from the members.
-- Do NOT just repeat one member — synthesize across ALL members.
-
-## Output Format
-Return ONLY valid JSON:
-{"title": "...", "summary": "- point1\n- point2\n- point3"}
-"#;
-
-const CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT: &str = r#"You are a memory cluster summarization engine. Your task is to generate a concise title and summary for a new memory cluster based on its anchor memory.
-
-## ABSOLUTE RULES (Violating any of these is a FAILURE)
-
-### Rule 1: Language Preservation (MANDATORY)
-- **YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT MEMORY.**
-- If the input is Chinese, EVERY SINGLE FIELD must be in Chinese: title, summary, EVERYTHING.
-- If the input is in English, EVERY SINGLE FIELD must be in English.
-- **NEVER translate. NEVER mix languages. NEVER output English for Chinese input.**
-- **Before returning, verify: "Are ALL fields in the same language as the input?" If not, rewrite them.**
-
-## Task
-Given the content and abstract of a single anchor memory, produce:
-1. A **title**: at most 5 words, highly condensed, capturing the core theme.
-2. A **summary**: 1-2 sentences that概括 (summarize) the main topic of this memory.
-
-## Output Format
-Return ONLY valid JSON:
-{"title": "...", "summary": "..."}
-"#;
-
-/// Returns (system_prompt, user_prompt) for regenerating a cluster title and summary
-/// when the cluster gains new members.
-pub fn build_cluster_summary_prompt(
-    title: &str,
-    existing_summary: &str,
-    member_contents: &[String],
-) -> (String, String) {
-    let mut user = String::with_capacity(2048);
-    user.push_str("## Current Cluster Info\n");
-    user.push_str(&format!("Title: {}\n", title));
-    if !existing_summary.is_empty() {
-        user.push_str(&format!("Existing Summary: {}\n", existing_summary));
-    }
-    user.push_str("\n## Member Memories\n");
-    for (i, content) in member_contents.iter().enumerate() {
-        let truncated: String = content.chars().take(500).collect();
-        let display = if content.chars().count() > 500 {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        };
-        user.push_str(&format!("[{}] {}\n", i + 1, display));
-    }
-    user.push_str("\nReturn ONLY valid JSON with title and summary.");
-    (CLUSTER_SUMMARY_SYSTEM_PROMPT.to_string(), user)
-}
-
-/// Returns (system_prompt, user_prompt) for initial cluster title and summary generation
-/// when a cluster is first created from a single anchor memory.
-pub fn build_cluster_initial_summary_prompt(
-    memory_content: &str,
-    memory_abstract: &str,
-) -> (String, String) {
-    let mut user = String::with_capacity(1024);
-    user.push_str("## Anchor Memory\n");
-    user.push_str(&format!("Abstract: {}\n", memory_abstract));
-    let truncated: String = memory_content.chars().take(300).collect();
-    let display = if memory_content.chars().count() > 300 {
-        format!("{}...", truncated)
-    } else {
-        truncated
-    };
-    user.push_str(&format!("Content: {}\n", display));
-    user.push_str("\nReturn ONLY valid JSON with title and summary.");
-    (CLUSTER_INITIAL_SUMMARY_SYSTEM_PROMPT.to_string(), user)
-}
-
 /// Profile static_facts 过滤 prompt —— 从候选记忆中识别真正的用户画像信息
 pub const PROFILE_FILTER_SYSTEM_PROMPT: &str = r#"你是一个用户画像分析专家。你的任务是从给定的记忆条目中，筛选出**真正的用户个人画像信息**。
 
@@ -925,9 +830,9 @@ Return ONLY valid JSON array. Each element:
 }
 
 - "topic": Short title (1 sentence) → maps to l0_abstract.
-- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: structured 2-3 line summary with key conclusions. For EMOTIONAL: brief gist.
-- "detail": Structured narrative in ≤500 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
-- "summary": Full content → maps to content. WORK ≤800 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
+- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: MUST use arrow timeline format showing progression: `verb phrase→verb phrase→result`. Example: "diagnosed bug→fixed handler→verified→deployed". Each node = what happened, arrows = temporal/causal progression. For EMOTIONAL: brief gist.
+- "detail": Structured narrative in ≤300 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
+- "summary": Full content → maps to content. WORK ≤500 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
 - "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
 - "scope": "public" for WORK, "private" for EMOTIONAL.
 - "category": WORK → pick from 6 categories above. EMOTIONAL → pick best fit.

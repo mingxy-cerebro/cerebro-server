@@ -19,7 +19,7 @@ All plugins share the same configuration pattern: `OMEM_API_URL` + `OMEM_API_KEY
 
 | Name | Package | Files | Purpose | Dependencies | Key Features |
 |------|---------|-------|---------|--------------|--------------|
-| **opencode** | `@mingxy/cerebro` | 10 src files | OpenCode memory plugin | `@opencode-ai/plugin`, `@opentui/core`, `@opentui/solid`, `solid-js` | Auto-recall, auto-capture, 9 memory tools, clustering TUI |
+| **opencode** | `@mingxy/cerebro` | 10 src files | OpenCode memory plugin | `@opencode-ai/plugin`, `@opentui/core`, `@opentui/solid`, `solid-js` | Auto-recall, auto-capture, 9 memory tools |
 | **openclaw** | `@ourmem/ourmem` | 7 src files | OpenClaw memory plugin | (none listed) | ContextEngine, 7 lifecycle hooks, memory slot |
 | **mcp** | `@ourmem/mcp` | 3 src files | MCP server for any MCP client | `@modelcontextprotocol/sdk`, `zod` | 9 tools, stdio transport, schema validation |
 | **claude-code** | (bundled) | 5 hooks + 2 skills + manifest | Claude Code integration | `bash` 4+, `curl`, `python3` | SessionStart/Stop/PreCompact hooks, MCP tools, 2 skills |

@@ -6,7 +6,6 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::api::server::AppState;
-use crate::cluster::manager::ClusterManager;
 use crate::domain::error::OmemError;
 use crate::lifecycle::decay::DecayConfig;
 use crate::lifecycle::forgetting::AutoForgetter;
@@ -52,18 +51,13 @@ async fn run_lifecycle_cycle(state: Arc<AppState>) {
 
     for store in &stores {
         evaluate_tiers(store, &tier_manager).await;
-        let removed = run_forgetting(store, &state, decay_config.clone()).await;
-        cleanup_orphan_clusters(&state, &removed).await;
+        let _removed = run_forgetting(store, &state, decay_config.clone()).await;
     }
 
     for store in &stores {
         if let Err(e) = store.optimize().await {
             warn!(error = %e, "lifecycle_optimize_failed");
         }
-    }
-
-    if let Err(e) = state.cluster_store.optimize().await {
-        warn!(error = %e, "lifecycle_cluster_optimize_failed");
     }
 }
 
@@ -112,40 +106,6 @@ async fn run_forgetting(store: &Arc<crate::store::LanceStore>, state: &Arc<AppSt
     }
 
     removed
-}
-
-async fn cleanup_orphan_clusters(
-    state: &Arc<AppState>,
-    removed_memories: &[crate::domain::memory::Memory],
-) {
-    if removed_memories.is_empty() {
-        return;
-    }
-
-    let manager = ClusterManager::new(state.cluster_store.clone(), Some(state.llm.clone()));
-
-    for memory in removed_memories {
-        if let Err(e) = manager.on_memory_removed(memory).await {
-            warn!(
-                memory_id = %memory.id,
-                error = %e,
-                "failed_to_maintain_cluster_on_memory_removal"
-            );
-        }
-    }
-
-    match state.cluster_store.list_empty_clusters().await {
-        Ok(empty) => {
-            for cluster in empty {
-                if let Err(e) = state.cluster_store.delete_cluster(&cluster.id).await {
-                    warn!(cluster_id = %cluster.id, error = %e, "failed_to_delete_empty_cluster");
-                }
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "failed_to_list_empty_clusters");
-        }
-    }
 }
 
 async fn evaluate_tiers(

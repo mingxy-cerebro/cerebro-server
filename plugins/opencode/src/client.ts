@@ -42,19 +42,6 @@ export interface ListResponse {
   offset: number;
 }
 
-export interface ClusterSummary {
-  cluster_id: string;
-  title: string;
-  summary: string;
-  member_count: number;
-  relevance_score: number;
-  key_memories: MemoryDto[];
-}
-
-export interface ClusteredRecallResult {
-  cluster_summaries: ClusterSummary[];
-  standalone_memories: MemoryDto[];
-}
 
 export interface DiscardedItem {
   memory_id: string;
@@ -72,7 +59,6 @@ export interface ShouldRecallResponse {
   confidence?: number;
   memories?: SearchResult[];
   discarded?: DiscardedItem[];
-  clustered?: ClusteredRecallResult;
 }
 
 export interface PreferenceDto {

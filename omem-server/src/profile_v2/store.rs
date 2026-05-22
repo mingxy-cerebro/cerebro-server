@@ -39,6 +39,21 @@ impl ProfileStore {
         }
     }
 
+    /// Invalidate all cached preference lists for a tenant.
+    /// Must be called after any write operation (upsert, delete, update).
+    pub fn invalidate_cache(&self, tenant_id: &str) {
+        let prefix = format!("{}:", tenant_id);
+        let keys_to_remove: Vec<String> = self
+            .cache
+            .iter()
+            .filter(|entry| entry.key().starts_with(&prefix) || entry.key() == tenant_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys_to_remove {
+            self.cache.remove(&key);
+        }
+    }
+
     pub fn init(&self) -> Result<(), OmemError> {
         let conn = self.sqlite.conn().lock().map_err(|_| {
             OmemError::Storage("sqlite lock poisoned".to_string())
@@ -395,10 +410,6 @@ impl ProfileStore {
             versions.push(row.map_err(|e| OmemError::Storage(format!("row parse: {e}")))?);
         }
         Ok(versions)
-    }
-
-    pub fn invalidate_cache(&self, tenant_id: &str) {
-        self.cache.retain(|k, _| !k.starts_with(&format!("{tenant_id}:")));
     }
 
     fn row_to_preference(row: &rusqlite::Row) -> rusqlite::Result<Preference> {

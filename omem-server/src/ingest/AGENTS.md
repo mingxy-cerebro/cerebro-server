@@ -2,7 +2,7 @@
 
 ## Overview
 
-The ingest module implements Cerebro's 11-stage memory ingestion pipeline — transforming raw conversation messages into structured, deduplicated, clustered memories. This is the "write path" of the memory system.
+The ingest module implements Cerebro's 11-stage memory ingestion pipeline — transforming raw conversation messages into structured, deduplicated memories. This is the "write path" of the memory system.
 
 - **12 source files**, ~5,882 lines of Rust
 - **2 modes**: `Smart` (LLM extraction + full pipeline) and `Raw` (session storage only)
@@ -88,14 +88,8 @@ The ingest module implements Cerebro's 11-stage memory ingestion pipeline — tr
   ┌───────────────────▼─────────────────────────────────────────────────────┐
   │  STAGE 9: RECONCILIATION                                                │
   │  Reconciler::reconcile() — 7 decisions against existing memories        │
-  │  Exact match dedup → batch self-dedup → fuzzy pairs → LLM decisions     │
-  └───────────────────┬─────────────────────────────────────────────────────┘
-                      │
-  ┌───────────────────▼─────────────────────────────────────────────────────┐
-  │  STAGE 10: CLUSTER ASSIGNMENT                                           │
-  │  ClusterAssigner::assign() → ClusterManager create or assign            │
-  │  Embeds memory content for new cluster creation                         │
-  └─────────────────────────────────────────────────────────────────────────┘
+   │  Exact match dedup → batch self-dedup → fuzzy pairs → LLM decisions     │
+   └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -194,14 +188,6 @@ The ingest module implements Cerebro's 11-stage memory ingestion pipeline — tr
   - **CONTEXTUALIZE** — situational nuance (creates related memory)
   - **CONTRADICT** — direct contradiction
 - **Category Rules**: profile always MERGE; events/cases only CREATE/SKIP; preferences/entities/patterns support all 7
-
-### Stage 10: Cluster Assignment
-- **File**: `pipeline.rs` (calls into `cluster/`)
-- **Purpose**: Assign new memories to existing or new clusters
-- **Key Functions**: `ClusterAssigner::assign()`, `ClusterManager::create_cluster()`
-- **LLM**: No (uses embeddings)
-- **Input**: `Memory`
-- **Output**: Cluster link or new cluster creation
 
 ---
 

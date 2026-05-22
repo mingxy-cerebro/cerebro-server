@@ -242,6 +242,7 @@ pub async fn create_preference(
 
     let store = state.profile_v2_service.store();
     let created = store.upsert_preference(&pref)?;
+    store.invalidate_cache(&auth.tenant_id);
 
     // Record changelog
     store.record_changelog(&ProfileChangelog {
@@ -317,6 +318,7 @@ pub async fn update_preference(
 
     pref.updated_at = Utc::now();
     let updated = store.upsert_preference(&pref)?;
+    store.invalidate_cache(&auth.tenant_id);
 
     // Record changelog
     store.record_changelog(&ProfileChangelog {
@@ -356,6 +358,7 @@ pub async fn delete_preference(
     if !deleted {
         return Err(OmemError::NotFound(format!("preference {id}")));
     }
+    store.invalidate_cache(&auth.tenant_id);
 
     // Record changelog
     store.record_changelog(&ProfileChangelog {

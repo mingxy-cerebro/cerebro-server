@@ -290,76 +290,6 @@ function buildContextBlock(
   };
 }
 
-function buildClusteredContextBlock(
-  clustered: import("./client.js").ClusteredRecallResult,
-  budget: number,
-  maxContentLength: number = 500,
-  minItemChars: number = MIN_ITEM_CONTENT_CHARS,
-): ContextBlockResult {
-  const sections: string[] = [];
-  const injectedIds: string[] = [];
-
-  if (clustered.cluster_summaries.length > 0) {
-    const totalClusterScore = clustered.cluster_summaries.reduce((sum, cs) => sum + cs.relevance_score, 0);
-
-    sections.push("## 📋 主题簇（聚合记忆）");
-    for (const cs of clustered.cluster_summaries) {
-      const scoreIndicator = cs.relevance_score >= 0.8 ? "★★★" : cs.relevance_score >= 0.6 ? "★★" : "★";
-      const clusterMaxLen = totalClusterScore > 0
-        ? Math.min(maxContentLength, Math.max(minItemChars, Math.floor((cs.relevance_score / totalClusterScore) * budget)))
-        : Math.min(maxContentLength, Math.max(minItemChars, Math.floor(budget / clustered.cluster_summaries.length)));
-      sections.push(`\n### ${cs.title} (整合自${cs.member_count}条记忆) ${scoreIndicator}`);
-      sections.push(`> ${cs.summary}`);
-      if (cs.key_memories.length > 0) {
-        sections.push("**核心要点：**");
-        for (const mem of cs.key_memories) {
-          const idTag = mem.id ? ` [id:${mem.id}]` : "";
-          const relTag = mem.relations && mem.relations.length > 0
-            ? ` [rel:${mem.relations.map((rel) => rel.target_id).join(",")}]`
-            : "";
-          const importanceBar = mem.importance >= 0.7 ? "●" : mem.importance >= 0.4 ? "◐" : "○";
-          const content = truncate(mem.content, clusterMaxLen);
-          sections.push(`- ${importanceBar}${idTag}${relTag} ${content}`);
-          if (mem.id) injectedIds.push(mem.id);
-        }
-      }
-    }
-  }
-
-  if (clustered.standalone_memories.length > 0) {
-    const standaloneBudget = clustered.cluster_summaries.length === 0
-      ? budget
-      : Math.floor(budget * 0.3);
-    const standaloneMaxLen = Math.min(maxContentLength, Math.max(minItemChars, Math.floor(standaloneBudget / clustered.standalone_memories.length)));
-
-    sections.push("\n## 📌 补充信息");
-    for (const mem of clustered.standalone_memories) {
-      const idTag = mem.id ? ` [id:${mem.id}]` : "";
-      const relTag = mem.relations && mem.relations.length > 0
-        ? ` [rel:${mem.relations.map((rel) => rel.target_id).join(",")}]`
-        : "";
-      const content = truncate(mem.content, standaloneMaxLen);
-      sections.push(`-${idTag}${relTag} ${content}`);
-      if (mem.id) injectedIds.push(mem.id);
-    }
-  }
-
-  const totalInjected = clustered.cluster_summaries.reduce((s, cs) => s + cs.member_count, 0) + clustered.standalone_memories.length;
-
-  return {
-    text: sections.length > 0
-      ? [
-          "<cerebro-context>",
-          "",
-          ...sections,
-          "</cerebro-context>",
-        ].join("\n")
-      : "",
-    injectedMemoryIds: injectedIds,
-    injectedCount: totalInjected,
-  };
-}
-
 export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string, directory?: string) {
   const similarityThreshold = config.recall?.similarityThreshold ?? 0.4;
   const maxRecallResults = config.recall?.maxRecallResults ?? 10;
@@ -474,7 +404,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         showToast(tui, "🧠 Cerebro Service Unavailable", "Unable to reach memory API · check connection", "error", toastDelayMs);
         return;
       }
-      logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, discardedCount: shouldRecallRes.discarded?.length ?? 0, clustered: !!shouldRecallRes.clustered });
+      logDebug("autoRecallHook shouldRecall result", { shouldRecall: shouldRecallRes.should_recall, confidence: shouldRecallRes.confidence, memCount: shouldRecallRes.memories?.length ?? 0, discardedCount: shouldRecallRes.discarded?.length ?? 0 });
 
       const storedMemoryIds = shouldRecallRes.memories?.map((r) => r.memory.id) ?? [];
       const storedDiscardedIds = shouldRecallRes.discarded?.map((d) => d.memory_id) ?? [];
@@ -494,38 +424,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         },
       ): Promise<string | undefined> => {
         try {
-          const memoryLookup = new Map<string, SearchResult>();
-          if (shouldRecallRes.memories) {
-            for (const r of shouldRecallRes.memories) {
-              memoryLookup.set(r.memory.id, r);
-            }
-          }
-          const items = clustered
-            ? [
-                ...clustered.cluster_summaries.flatMap((cs) =>
-                  cs.key_memories.map((mem) => {
-                    const sr = memoryLookup.get(mem.id ?? "");
-                    return {
-                      memory_id: mem.id ?? "",
-                      score: cs.relevance_score,
-                      refine_relevance: sr?.refine_relevance,
-                      refine_reasoning: sr?.refine_reasoning,
-                      is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
-                    };
-                  })
-                ),
-                ...clustered.standalone_memories.map((mem) => {
-                  const sr = memoryLookup.get(mem.id ?? "");
-                  return {
-                    memory_id: mem.id ?? "",
-                    score: sr?.score ?? 0,
-                    refine_relevance: sr?.refine_relevance,
-                    refine_reasoning: sr?.refine_reasoning,
-                    is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
-                  };
-                }),
-              ]
-            : [
+          const items = [
                 ...(shouldRecallRes.memories?.map((r) => ({
                   memory_id: r.memory.id,
                   score: r.score,
@@ -583,7 +482,6 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       }
 
       const results = shouldRecallRes.memories ?? [];
-      const clustered = shouldRecallRes.clustered;
 
       // --- Token Budget Calculation ---
       const profileChars = profileBlock ? profileBlock.length : 0;
@@ -596,9 +494,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         configuredMax: maxContentLength,
       });
 
-      const ctxResult = clustered 
-        ? buildClusteredContextBlock(clustered, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS)
-        : buildContextBlock(results, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS);
+      const ctxResult = buildContextBlock(results, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS);
       if (ctxResult.text) {
         appendToSystem(output.system, ctxResult.text);
         appendToSystem(output.system, FETCH_POLICY);
@@ -616,7 +512,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
       }
 
-      logDebug("autoRecallHook injection complete", { clustered: !!clustered, sessionId: input.sessionID });
+      logDebug("autoRecallHook injection complete", { sessionId: input.sessionID });
 
       const didInjectProfile = !!profileBlock;
       const didInjectContext = !!ctxResult.text;

@@ -1,6 +1,6 @@
 # omem-server/src/ — Rust Core Source
 
-Cerebro server core: axum HTTP layer, 11-stage ingestion, hybrid retrieval, lifecycle management, memory clustering, and vector storage.
+Cerebro server core: axum HTTP layer, 11-stage ingestion, hybrid retrieval, lifecycle management, and vector storage.
 
 ## Overview
 
@@ -8,9 +8,9 @@ This directory contains the entire Rust backend for Cerebro — a shared persist
 
 | Metric | Value |
 |--------|-------|
-| Source files | 92 |
-| Lines of code | ~28,927 |
-| Top-level modules | 13 |
+| Source files | 85 |
+| Lines of code | ~23,500 |
+| Top-level modules | 12 |
 | Inline tests | 373 across 49 files |
 | Crate | `omem-server` |
 | Framework | axum 0.8, tokio, tower-http |
@@ -21,7 +21,7 @@ This directory contains the entire Rust backend for Cerebro — a shared persist
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                              main.rs                                 │
-│  rustls → Config → Tracing → Stores → Embed → LLMs → ClusterStore   │
+│  rustls → Config → Tracing → Stores → Embed → LLMs                   │
 │                              ↓                                       │
 │                         AppState (15 fields)                         │
 │                              ↓                                       │
@@ -46,11 +46,11 @@ This directory contains the entire Rust backend for Cerebro — a shared persist
 │              │ (12 files)    │                                      │
 │              └───────┬───────┘                                      │
 │                      │                                              │
-│      ┌───────────────┼───────────────┬───────────────┐              │
+│      ┌───────────────────┼───────────────┬───────────────┐              │
 │      ▼               ▼               ▼               ▼              │
 │ ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐           │
-│ │ ingest/ │   │ retrieve/│   │lifecycle/│   │ cluster/ │           │
-│ │Pipeline │   │ Pipeline │   │Scheduler │   │ Manager  │           │
+│ │ ingest/ │   │ retrieve/│   │lifecycle/│   │ profile/  │           │
+│ │Pipeline │   │ Pipeline │   │Scheduler │   │ Service   │           │
 │ └────┬────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘           │
 │      │             │              │              │                  │
 │      ▼             ▼              ▼              ▼                  │
@@ -72,7 +72,6 @@ This directory contains the entire Rust backend for Cerebro — a shared persist
 | Module | Files | Key Types / Traits | Purpose |
 |--------|-------|-------------------|---------|
 | `api/` | 25 | `AppState`, `build_router`, `OmemError` impl | HTTP layer: routing, middleware, handlers, event bus |
-| `cluster/` | 7 | `ClusterManager`, `ClusterStore`, `ClusterAssigner` | Memory clustering: k-means, auto-assignment, aggregation |
 | `config/` | 1 | `OmemConfig` | Environment-based configuration (OMEM_* prefix) |
 | `connectors/` | 2 | `GitHubConnector` | External integrations: GitHub webhooks |
 | `domain/` | 10 | `Memory`, `Space`, `Tenant`, `OmemError` | Core domain models and error enum |
@@ -100,8 +99,7 @@ This directory contains the entire Rust backend for Cerebro — a shared persist
 | `session_recalls.rs` | Session-based recall tracking |
 | `vault.rs` | Vault password management |
 | `github.rs` | GitHub connector webhook handler |
-| `clusters.rs` | Cluster CRUD, trigger clustering, jobs, stats |
-| `scheduler.rs` | Scheduler status, pause/resume lifecycle & clustering |
+| `scheduler.rs` | Scheduler status, pause/resume lifecycle |
 | `lifecycle.rs` | Manual lifecycle trigger |
 | `events.rs` | SSE event stream |
 | `mod.rs` + `merge.rs` | Handler exports, memory merge helper |
@@ -120,8 +118,6 @@ pub struct AppState {
     pub embed: Arc<dyn EmbedService>,          // Embedding provider
     pub llm: Arc<dyn LlmService>,              // Primary LLM
     pub recall_llm: Arc<dyn LlmService>,       // Optional separate recall LLM
-    pub cluster_llm: Arc<dyn LlmService>,      // Optional cheaper cluster/profile LLM
-    pub cluster_store: Arc<ClusterStore>,      // Cluster metadata persistence
     pub config: OmemConfig,                    // Runtime configuration
     pub import_semaphore: Arc<Semaphore>,      // Concurrency limit: 3 imports
     pub reconcile_semaphore: Arc<Semaphore>,   // Concurrency limit: 1 reconcile
@@ -180,10 +176,6 @@ Persists tenant records (id, name, api_key, created_at) in a system-wide LanceDB
 
 Persists space metadata and member roles. Handles space creation, member add/remove, role updates.
 
-### `ClusterStore` (`cluster/cluster_store.rs`)
-
-Persists cluster metadata (centroids, labels, member counts) in LanceDB. Used by `ClusterManager` and `ClusterAssigner`.
-
 ## Startup Sequence
 
 Exact order from `main.rs`:
@@ -197,15 +189,13 @@ Exact order from `main.rs`:
 7. **`create_embed_service(&config)`** — embedding provider (noop/openai/bedrock)
 8. **`create_llm_service(&config)`** — primary LLM for extraction/reconciliation
 9. **`create_recall_llm_service(&config)`** — separate recall LLM (falls back to primary if unconfigured)
-10. **`create_cluster_llm_service(&config)`** — cheaper cluster/profile LLM (falls back to primary)
-11. **`ClusterStore::new(...)`** — cluster metadata persistence
-12. **`AppState { ... }`** — assemble all services into shared state
-13. **`build_router(state.clone())`** — construct axum router with all routes and middleware
-14. **`optimize_all_on_disk()`** — background LanceDB cleanup (spawned task)
-15. **`LifecycleScheduler::new(...)`** + **`with_event_bus`** + **`with_scheduler_control`**
-16. **`tokio::spawn(lifecycle_scheduler.run())`** — start periodic decay/forgetting/clustering
-17. **`TcpListener::bind(&addr)`** — bind to configured port
-18. **`axum::serve(listener, app).with_graceful_shutdown(shutdown_signal())`** — serve with Ctrl-C / SIGTERM graceful shutdown
+10. **`AppState { ... }`** — assemble all services into shared state
+11. **`build_router(state.clone())`** — construct axum router with all routes and middleware
+12. **`optimize_all_on_disk()`** — background LanceDB cleanup (spawned task)
+13. **`LifecycleScheduler::new(...)`** + **`with_event_bus`** + **`with_scheduler_control`**
+14. **`tokio::spawn(lifecycle_scheduler.run())`** — start periodic decay/forgetting cycles
+15. **`TcpListener::bind(&addr)`** — bind to configured port
+16. **`axum::serve(listener, app).with_graceful_shutdown(shutdown_signal())`** — serve with Ctrl-C / SIGTERM graceful shutdown
 
 Concurrency limits:
 - Import semaphore: 3 concurrent imports
@@ -341,8 +331,6 @@ RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
 3. **`AppState` God Object**: 15 fields. Consider grouping related fields into sub-structs (e.g., `StoreServices`, `LlmServices`, `ConcurrencyLimits`) to reduce handler dependencies and improve testability.
 
 4. **No clippy/rustfmt config**: No `.clippy.toml` or `rustfmt.toml` present. Consider adding project-specific lint rules and formatting standards.
-
-5. **`cluster/` module is undocumented in root AGENTS.md**: This is a new module (not in the top-level project overview). It adds memory clustering with k-means, LLM-based cluster assignment, and background clustering tasks. Any agent working on clustering should read `cluster/mod.rs` and the cluster-specific files first.
 
 ## Hierarchical AGENTS.md
 

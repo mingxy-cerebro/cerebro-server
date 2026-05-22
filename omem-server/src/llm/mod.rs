@@ -40,26 +40,6 @@ pub async fn create_recall_llm_service(config: &OmemConfig) -> Result<Box<dyn Ll
     }
 }
 
-pub async fn create_cluster_llm_service(config: &OmemConfig) -> Result<Box<dyn LlmService>, OmemError> {
-    match config.cluster_llm_provider.as_str() {
-        "openai-compatible" => Ok(Box::new(OpenAICompatLlm::new_cluster(config)?)),
-        #[cfg(feature = "bedrock")]
-        "bedrock" => {
-            let model = if config.cluster_llm_model.is_empty() || config.cluster_llm_model == "gpt-4o-mini" {
-                None
-            } else {
-                Some(config.cluster_llm_model.as_str())
-            };
-            Ok(Box::new(BedrockLlm::new(model).await))
-        }
-        #[cfg(not(feature = "bedrock"))]
-        "bedrock" => Err(OmemError::Llm(
-            "bedrock feature not enabled (musl build)".to_string(),
-        )),
-        _ => Ok(Box::new(NoopLlm)),
-    }
-}
-
 pub async fn create_profile_llm_service(config: &OmemConfig) -> Result<Box<dyn LlmService>, OmemError> {
     if !config.profile_enabled || config.profile_llm_api_key.is_empty() {
         return Ok(Box::new(NoopLlm));

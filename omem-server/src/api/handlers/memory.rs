@@ -12,6 +12,7 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::{sanitize_project_path, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
+use crate::ingest::refine_service::{collect_chain_memories, refine_and_replace};
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
 use crate::ingest::IngestPipeline;
 
@@ -228,7 +229,6 @@ pub async fn create_memory(
                 session_store,
                 state.embed.clone(),
                 state.llm.clone(),
-                state.cluster_store.clone(),
                 &state.config.admission_preset,
                 state.config.admission_reject_threshold,
                 state.config.admission_admit_threshold,
@@ -1480,8 +1480,6 @@ pub async fn session_ingest(
             entry.value().0.clone()
         };
         let _session_guard = lock_arc.lock().await;
-        let cluster_store = state.cluster_store.clone();
-        let llm_for_cluster = Some(state.llm.clone());
         let store = match state
             .store_manager
             .get_store(&personal_space_id(&tenant_id))
@@ -1493,13 +1491,6 @@ pub async fn session_ingest(
                 return;
             }
         };
-
-        let cluster_assigner = crate::cluster::assigner::ClusterAssigner::new(
-            cluster_store.clone(),
-            state.embed.clone(),
-        )
-        .with_llm(state.llm.clone())
-        .with_lance_store(Some(store.clone()));
 
         // 获取同session的EMOTIONAL记忆摘要（避免重复提取 + 用于追加）
         let emotional_summary = fetch_session_emotional_memory(
@@ -1592,6 +1583,7 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
+        let mut refined_texts: Vec<String> = Vec::new();
         let mut work_original_parent_id: Option<String> = None;
         let mut emotional_original_parent_id: Option<String> = None;
 
@@ -1721,6 +1713,168 @@ pub async fn session_ingest(
                 }
             };
 
+            /// Find the best split point in content so that the first half ≤ max_chars.
+            /// Prefers splitting at `## ` heading boundaries; falls back to char-based split.
+            /// Returns (first_half, second_half) where second_half contains at least one full section.
+            fn find_split_point(content: &str, max_chars: usize) -> (String, String) {
+                let mut heading_positions: Vec<usize> = Vec::new();
+                let mut byte_offset = 0;
+                for line in content.lines() {
+                    if line.starts_with("## ") {
+                        heading_positions.push(byte_offset);
+                    }
+                    byte_offset += line.len();
+                    if byte_offset < content.len() {
+                        byte_offset += 1;
+                    }
+                }
+
+                let mut best_split_byte: Option<usize> = None;
+                for &pos in &heading_positions {
+                    let first_half = &content[..pos];
+                    let char_count = first_half.trim_end().chars().count();
+                    if char_count <= max_chars {
+                        best_split_byte = Some(pos);
+                    } else {
+                        break;
+                    }
+                }
+
+                let (first, second) = if let Some(split_byte) = best_split_byte {
+                    let first_part = content[..split_byte].trim_end().to_string();
+                    let second_part = content[split_byte..].trim_start().to_string();
+                    (first_part, second_part)
+                } else {
+                    let char_idx = content.char_indices().take_while(|(idx, _)| *idx < max_chars).last();
+                    let split_byte = char_idx.map(|(idx, c)| idx + c.len_utf8()).unwrap_or(content.len().min(max_chars));
+                    let first_part = content[..split_byte].trim_end().to_string();
+                    let second_part = content[split_byte..].trim_start().to_string();
+                    (first_part, second_part)
+                };
+
+                (first, second)
+            }
+
+            /// Split an over-sized memory: truncate original, create continuation memory.
+            /// Returns the new continuation memory ID on success.
+            async fn split_memory(
+                original: &mut crate::domain::memory::Memory,
+                new_content: &str,
+                chain_head_id: &str,
+                state: &crate::api::server::AppState,
+                store: &crate::store::lancedb::LanceStore,
+            ) -> Option<String> {
+                let (first_half, second_half) = find_split_point(new_content, 3000);
+
+                if second_half.is_empty() {
+                    tracing::warn!(
+                        memory_id = %original.id,
+                        "session_ingest: split resulted in empty second half, skipping split"
+                    );
+                    return None;
+                }
+
+                original.content = first_half.clone();
+                if first_half.chars().count() <= 150 {
+                    original.l1_overview = first_half.clone();
+                } else {
+                    original.l1_overview = format!("{}...", first_half.chars().take(147).collect::<String>());
+                }
+                if first_half.chars().count() <= 500 {
+                    original.l2_content = first_half.clone();
+                } else {
+                    original.l2_content = format!("{}...", first_half.chars().take(497).collect::<String>());
+                }
+
+                let original_vec = match state.embed.embed(&[first_half.clone()]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to re-embed truncated WORK memory");
+                        None
+                    }
+                };
+                if let Err(e) = store.update(original, original_vec.as_deref()).await {
+                    tracing::warn!(error = %e, memory_id = %original.id, "session_ingest: failed to update truncated WORK memory");
+                    return None;
+                }
+                tracing::info!(
+                    memory_id = %original.id,
+                    first_chars = first_half.chars().count(),
+                    "session_ingest: truncated WORK memory for split"
+                );
+
+                let now = chrono::Utc::now().to_rfc3339();
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let new_mem = crate::domain::memory::Memory {
+                    id: new_id.clone(),
+                    content: second_half.clone(),
+                    l0_abstract: original.l0_abstract.clone(),
+                    l1_overview: if second_half.chars().count() <= 150 {
+                        second_half.clone()
+                    } else {
+                        format!("{}...", second_half.chars().take(147).collect::<String>())
+                    },
+                    l2_content: if second_half.chars().count() <= 500 {
+                        second_half.clone()
+                    } else {
+                        format!("{}...", second_half.chars().take(497).collect::<String>())
+                    },
+                    category: original.category.clone(),
+                    memory_type: original.memory_type.clone(),
+                    state: original.state.clone(),
+                    tier: original.tier.clone(),
+                    importance: original.importance,
+                    confidence: original.confidence,
+                    access_count: 0,
+                    tags: original.tags.clone(),
+                    scope: original.scope.clone(),
+                    agent_id: original.agent_id.clone(),
+                    session_id: original.session_id.clone(),
+                    tenant_id: original.tenant_id.clone(),
+                    source: Some("auto-split".to_string()),
+                    relations: vec![crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::Continues,
+                        target_id: chain_head_id.to_string(),
+                        context_label: Some("auto-split on overflow".to_string()),
+                    }],
+                    superseded_by: None,
+                    invalidated_at: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    last_accessed_at: None,
+                    space_id: original.space_id.clone(),
+                    visibility: original.visibility.clone(),
+                    owner_agent_id: original.owner_agent_id.clone(),
+                    provenance: original.provenance.clone(),
+                    version: original.version,
+                    tier_history: original.tier_history.clone(),
+                    cluster_id: original.cluster_id.clone(),
+                    is_cluster_anchor: false,
+                    metadata: original.metadata.clone(),
+                    project_path: original.project_path.clone(),
+                };
+
+                let new_vec = match state.embed.embed(&[second_half]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to embed split continuation WORK memory");
+                        None
+                    }
+                };
+
+                if let Err(e) = store.create(&new_mem, new_vec.as_deref()).await {
+                    tracing::warn!(error = %e, "session_ingest: failed to create split continuation WORK memory");
+                    return None;
+                }
+                tracing::info!(
+                    new_memory_id = %new_id,
+                    second_chars = new_mem.content.chars().count(),
+                    "session_ingest: created WORK continuation memory from split"
+                );
+
+                Some(new_id)
+            }
+
             if memory_type == "EMOTIONAL" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
@@ -1754,6 +1908,7 @@ pub async fn session_ingest(
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
                             } else {
                                 tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing emotional memory (same topic)");
+                                refined_texts.push(new_content.clone());
                                 existing_emotional = Some(existing);
                                 appended = true;
                             }
@@ -1789,6 +1944,7 @@ pub async fn session_ingest(
                                     continue;
                                 }
                                 tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback emotional memory (same topic, shortest fit)");
+                                refined_texts.push(new_content.clone());
                                 existing_emotional = Some(mem);
                                 appended = true;
                                 break;
@@ -1809,6 +1965,68 @@ pub async fn session_ingest(
             }
 
             if memory_type == "WORK" {
+                // ── 精炼路径：非private → 尝试LLM精炼 ──
+                if topic.scope != "private" {
+                    // B1: If no existing_work_memory tracked, search for similar WORK memory in same session
+                    if existing_work_memory.is_none() {
+                        let sid = session_id.as_deref().unwrap_or("default");
+                        let tid = &tenant_id;
+                        match crate::ingest::refine_service::find_similar_work_memory(
+                            &store, &state.embed, &topic.topic, sid, tid,
+                        ).await {
+                            Ok(Some(similar)) => {
+                                tracing::info!(
+                                    similar_id = %similar.id,
+                                    score_topic = %topic.topic,
+                                    "session_ingest: found similar WORK memory via embedding search"
+                                );
+                                existing_work_memory = Some(similar);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "session_ingest: embedding search failed, skipping refine");
+                            }
+                        }
+                    }
+
+                    if let Some(ref existing) = existing_work_memory {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            async {
+                                let chain = collect_chain_memories(&store, existing).await?;
+                                refine_and_replace(&store, &state.llm, &state.embed, existing, &chain, &summary, &topic.topic).await
+                            }
+                        ).await {
+                            Ok(Ok(refined)) => {
+                                tracing::info!(
+                                    memory_id = %refined.id,
+                                    new_len = refined.content.chars().count(),
+                                    "session_ingest: WORK refined successfully"
+                                );
+                                // B2: content ≤ 500 after refine_service truncation (P3),
+                                // so 3000-char split never triggers on refine path.
+                                // Defensive check: warn if unexpectedly exceeds 3000 chars.
+                                if refined.content.chars().count() > 3000 {
+                                    tracing::warn!(
+                                        len = refined.content.chars().count(),
+                                        "session_ingest: BUG - refined content exceeds 3000 chars despite ≤500 truncation"
+                                    );
+                                }
+                                refined_texts.push(refined.content.clone());
+                                existing_work_memory = Some(refined);
+                                continue;
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(error = %e, "session_ingest: refine failed, falling back to append");
+                            }
+                            Err(_) => {
+                                tracing::warn!("session_ingest: refine timed out (30s), falling back to append");
+                            }
+                        }
+                    }
+                }
+
+                // ── 原有追加逻辑（fallback + 首次创建路径）──
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let section_header = format!("## {} {}", today, topic.topic);
                 let section_body = summary.clone();
@@ -1867,6 +2085,18 @@ pub async fn session_ingest(
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
                             } else {
                                 tracing::info!(memory_id = %existing.id, "session_ingest: updated WORK memory (same topic)");
+                                refined_texts.push(new_content.clone());
+                                existing_work_memory = Some(existing);
+                                appended = true;
+                            }
+                        } else {
+                            let head_id = work_original_parent_id.as_deref().unwrap_or(&existing.id).to_string();
+                            if let Some(child_id) = split_memory(&mut existing, &new_content, &head_id, &state, &store).await {
+                                if work_original_parent_id.is_none() {
+                                    work_original_parent_id = Some(existing.id.clone());
+                                }
+                                add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                refined_texts.push(new_content.clone());
                                 existing_work_memory = Some(existing);
                                 appended = true;
                             }
@@ -1903,9 +2133,22 @@ pub async fn session_ingest(
                                     continue;
                                 }
                                 tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback WORK memory (same topic, shortest fit)");
+                                refined_texts.push(new_content.clone());
                                 existing_work_memory = Some(mem);
                                 appended = true;
                                 break;
+                            } else {
+                                let head_id = work_original_parent_id.as_deref().unwrap_or(&mem.id).to_string();
+                                if let Some(child_id) = split_memory(&mut mem, &new_content, &head_id, &state, &store).await {
+                                    if work_original_parent_id.is_none() {
+                                        work_original_parent_id = Some(mem.id.clone());
+                                    }
+                                    add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                    refined_texts.push(new_content.clone());
+                                    existing_work_memory = Some(mem);
+                                    appended = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -2021,86 +2264,10 @@ pub async fn session_ingest(
             created_memories.push((memory.clone(), vector.clone()));
         }
 
-        // ── Cluster语义归簇：逐条匹配已有cluster ──
-        if !created_memories.is_empty() {
-            let cluster_manager = crate::cluster::manager::ClusterManager::new(
-                cluster_store.clone(),
-                llm_for_cluster.clone(),
-            );
-
-            for (mem, vector) in &created_memories {
-                match cluster_assigner.assign(mem).await {
-                    Ok(result) => {
-                        match result.action {
-                            crate::cluster::assigner::AssignAction::AutoAssign => {
-                                if let Some(ref cid) = result.cluster_id {
-                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
-                                        Ok(_) => {
-                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: assigned to existing cluster");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to assign to cluster");
-                                        }
-                                    }
-                                }
-                            }
-                            crate::cluster::assigner::AssignAction::CreateNew => {
-                                // 用已有的vector创建cluster（避免重复embed）
-                                if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
-                                        Ok(cluster) => {
-                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
-                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to new cluster");
-                                            } else {
-                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: created new cluster");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to create cluster");
-                                        }
-                                    }
-                                } else {
-                                    tracing::warn!(memory_id = %mem.id, "session_ingest: no vector available for cluster creation");
-                                }
-                            }
-                            crate::cluster::assigner::AssignAction::LlmJudge => {
-                                // LLM裁决：有cluster_id则归入，无则创建新cluster
-                                if let Some(ref cid) = result.cluster_id {
-                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
-                                        Ok(_) => {
-                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: LLM-judged assignment to existing cluster");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed LLM-judged assignment");
-                                        }
-                                    }
-                                } else if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
-                                        Ok(cluster) => {
-                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
-                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to LLM-judged new cluster");
-                                            } else {
-                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: LLM-judged new cluster created");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: LLM-judged cluster creation failed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: cluster assignment failed");
-                    }
-                }
-            }
-        }
-
         // --- Profile V2 Induction Trigger ---
         let engine = state.induction_engine.clone();
-        let ind_texts: Vec<String> = created_memories.iter().map(|(m, _)| m.content.clone()).collect();
+        let mut ind_texts: Vec<String> = created_memories.iter().map(|(m, _)| m.content.clone()).collect();
+        ind_texts.extend(refined_texts);
         let ind_tenant = tenant_id.clone();
         if !ind_texts.is_empty() {
             tracing::debug!(texts_count = ind_texts.len(), "triggering profile induction from session_ingest");

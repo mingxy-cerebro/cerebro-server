@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import ForceGraph2D from "react-force-graph-2d"
 
 function formatMarkdownContent(text: string): string {
   if (!text || text.includes("\n")) return text
@@ -67,7 +68,14 @@ import {
   ArrowDownRight,
   Trash2,
   Edit3,
+  Link2,
 } from "lucide-react"
+
+interface MemoryRelation {
+  relation_type: string
+  target_id: string
+  context_label?: string
+}
 
 interface MemoryDetail {
   id: string
@@ -91,6 +99,8 @@ interface MemoryDetail {
   visibility?: string
   created_at: string
   updated_at: string
+  project_path?: string
+  relations?: MemoryRelation[]
 }
 
 function formatDate(dateString: string) {
@@ -263,6 +273,263 @@ function MetaItem({ label, value }: { label: string; value: React.ReactNode }) {
       <span className="text-xs text-muted-foreground">{label}</span>
       <div className="text-sm font-medium">{value}</div>
     </div>
+  )
+}
+
+const RELATION_COLORS: Record<string, string> = {
+  supersedes: '#ef4444',
+  contextualizes: '#3b82f6',
+  supports: '#10b981',
+  contradicts: '#a855f7',
+  continues: '#06b6d4',
+  continued_by: '#06b6d4',
+}
+
+function RelationGraph({ memoryId, relations }: { memoryId: string; relations: MemoryRelation[] }) {
+  const graphRef = useRef<HTMLDivElement>(null)
+  const fgRef = useRef<any>(null)
+  const navigate = useNavigate()
+
+  const graphData = useMemo(() => {
+    const uniqueTargets = new Map<string, { id: string; name: string; isCenter: boolean }>()
+    relations.forEach((r) => {
+      if (!uniqueTargets.has(r.target_id)) {
+        uniqueTargets.set(r.target_id, {
+          id: r.target_id,
+          name: r.target_id.slice(0, 8),
+          isCenter: false,
+        })
+      }
+    })
+
+    const nodes = [
+      { id: memoryId, name: memoryId.slice(0, 8), isCenter: true },
+      ...Array.from(uniqueTargets.values()),
+    ]
+
+    const links = relations.map((r) => ({
+      source: memoryId,
+      target: r.target_id,
+      color: RELATION_COLORS[r.relation_type] || '#6b7280',
+      relationType: r.relation_type,
+      contextLabel: r.context_label,
+    }))
+
+    return { nodes, links }
+  }, [memoryId, relations])
+
+  return (
+    <div ref={graphRef} className="h-[300px] w-full">
+      <ForceGraph2D
+        ref={fgRef}
+        graphData={graphData}
+        nodeCanvasObject={(node, ctx, globalScale) => {
+          const x = node.x ?? 0
+          const y = node.y ?? 0
+          if (!isFinite(x) || !isFinite(y)) return
+          const isCenter = (node as Record<string, unknown>).isCenter as boolean
+          const radius = isCenter ? 8 : 5
+
+          // Glow for center node
+          if (isCenter) {
+            const glow = ctx.createRadialGradient(x, y, radius * 0.5, x, y, radius * 2.5)
+            glow.addColorStop(0, 'rgba(245,158,11,0.25)')
+            glow.addColorStop(1, 'rgba(245,158,11,0)')
+            ctx.fillStyle = glow
+            ctx.beginPath()
+            ctx.arc(x, y, radius * 2.5, 0, Math.PI * 2)
+            ctx.fill()
+          }
+
+          // Node body
+          if (isCenter) {
+            const grad = ctx.createRadialGradient(x - radius * 0.3, y - radius * 0.3, 0, x, y, radius)
+            grad.addColorStop(0, '#fbbf24')
+            grad.addColorStop(1, '#f97316')
+            ctx.fillStyle = grad
+            ctx.strokeStyle = '#f59e0b'
+            ctx.lineWidth = 2
+          } else {
+            ctx.fillStyle = '#3b82f6'
+            ctx.strokeStyle = '#60a5fa'
+            ctx.lineWidth = 1.5
+          }
+
+          ctx.beginPath()
+          ctx.arc(x, y, radius, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.stroke()
+
+          // Label
+          const name = (node as Record<string, unknown>).name as string
+          const fontSize = Math.max(8 / globalScale, 6)
+          ctx.font = `${fontSize}px sans-serif`
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'bottom'
+          ctx.fillStyle = isCenter ? '#fbbf24' : '#94a3b8'
+          ctx.fillText(name, x, y - radius - 4 / globalScale)
+        }}
+        nodePointerAreaPaint={(node, color, ctx) => {
+          const x = node.x ?? 0
+          const y = node.y ?? 0
+          if (!isFinite(x) || !isFinite(y)) return
+          const isCenter = (node as Record<string, unknown>).isCenter as boolean
+          const r = isCenter ? 12 : 10
+          ctx.fillStyle = color
+          ctx.beginPath()
+          ctx.arc(x, y, r, 0, Math.PI * 2)
+          ctx.fill()
+        }}
+        nodeLabel={(node) => {
+          const n = node as Record<string, unknown>
+          if (n.isCenter) return `当前记忆: ${n.name as string}`
+          const link = graphData.links.find((l) => {
+            const targetId = typeof l.target === 'string' ? l.target : (l.target as Record<string, unknown>).id
+            return targetId === n.id
+          })
+          if (!link) return n.name as string
+          const parts = [`ID: ${n.name as string}`]
+          if (link.relationType) parts.push(`关系: ${link.relationType}`)
+          if (link.contextLabel) parts.push(link.contextLabel)
+          return parts.join(' | ')
+        }}
+        linkDirectionalArrowLength={4}
+        linkDirectionalArrowRelPos={1}
+        linkCurvature={0.15}
+        linkColor={(link) => (link as Record<string, unknown>).color as string}
+        linkWidth={1.5}
+        backgroundColor="transparent"
+        enableNodeDrag={false}
+        enableZoomInteraction={true}
+        enablePanInteraction={true}
+        nodeRelSize={0}
+        cooldownTime={2000}
+        onEngineStop={() => {
+          if (fgRef.current) {
+            fgRef.current.zoomToFit(0, 30)
+            fgRef.current.zoom(fgRef.current.zoom() * 0.65, 0)
+          }
+        }}
+        onNodeClick={(node) => {
+          const n = node as Record<string, unknown>
+          if (!n.isCenter && n.id) {
+            navigate(`/memories/${n.id as string}`)
+          }
+        }}
+      />
+    </div>
+  )
+}
+
+function TierHistoryTimeline({ memory }: { memory: MemoryDetail }) {
+  const tierOrder: Record<string, number> = { peripheral: 0, working: 1, core: 2 }
+  const reasonMap: Record<string, string> = {
+    access_via_get: "访问触发",
+    access_via_search: "搜索触发",
+    access_via_recall: "召回触发",
+    access_via_cross_space_search: "跨空间搜索触发",
+    scheduled_evaluation: "定时评估",
+  }
+
+  let events: Array<{
+    from: string
+    to: string
+    reason: string
+    at: string
+    access_count: number
+  }> = []
+
+  if (memory.tier_history) {
+    try {
+      events = JSON.parse(memory.tier_history)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (events.length === 0) return null
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-1.5 text-base">
+          <Clock className="size-4 text-muted-foreground" />
+          等级变更历史
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <div className="flex items-start min-w-max">
+            {events.map((e, i) => {
+              const promoted =
+                (tierOrder[e.from] ?? 0) < (tierOrder[e.to] ?? 0)
+              return (
+                <div
+                  key={e.at + e.from + e.to}
+                  className="flex flex-col items-center"
+                  style={{ minWidth: '140px' }}
+                >
+                  <div className="text-[11px] text-muted-foreground mb-3 whitespace-nowrap text-center">
+                    {new Date(e.at).toLocaleDateString('zh-CN', {
+                      month: '2-digit',
+                      day: '2-digit',
+                    })}
+                    <span className="text-[10px] ml-1 opacity-70">
+                      {new Date(e.at).toLocaleTimeString('zh-CN', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center w-full">
+                    {i > 0 && (
+                      <div className="flex-1 h-px bg-border" />
+                    )}
+                    <div
+                      className={`size-3 rounded-full border-2 shrink-0 z-10 ring-2 ring-background ${
+                        promoted
+                          ? 'bg-emerald-500/20 border-emerald-500'
+                          : 'bg-red-500/20 border-red-500'
+                      }`}
+                    />
+                    {i < events.length - 1 && (
+                      <div className="flex-1 h-px bg-border" />
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex flex-col items-center gap-1.5">
+                    <div className="flex items-center gap-1">
+                      {promoted ? (
+                        <ArrowUpRight className="size-3.5 text-emerald-500 shrink-0" />
+                      ) : (
+                        <ArrowDownRight className="size-3.5 text-red-500 shrink-0" />
+                      )}
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] px-1.5 py-0 ${getTierBadgeClass(e.from)}`}
+                      >
+                        {getTierLabel(e.from)}
+                      </Badge>
+                      <span className="text-muted-foreground text-[10px]">→</span>
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] px-1.5 py-0 ${getTierBadgeClass(e.to)}`}
+                      >
+                        {getTierLabel(e.to)}
+                      </Badge>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground text-center">
+                      {reasonMap[e.reason] || e.reason} · #{e.access_count}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -450,6 +717,7 @@ export function MemoryDetailPage() {
       {showContent ? (
         <div className="flex gap-6">
           <div className="flex-1 min-w-0 space-y-6">
+          <TierHistoryTimeline memory={memory} />
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-1.5 text-base">
@@ -550,6 +818,9 @@ export function MemoryDetailPage() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <MetaItem label="来源" value={memory.source || "—"} />
+                {memory.project_path && (
+                  <MetaItem label="项目路径" value={memory.project_path} />
+                )}
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground">范围</span>
@@ -591,75 +862,25 @@ export function MemoryDetailPage() {
            </div>
           </div>
 
-          <div className="w-72 shrink-0">
+          {memory.relations && memory.relations.length > 0 && (
+            <div className="w-80 shrink-0">
               <Card className="h-full">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-1.5 text-base">
-                    <Clock className="size-4 text-muted-foreground" />
-                    等级变更历史
+                    <Link2 className="size-4 text-muted-foreground" />
+                    关联图谱
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="overflow-y-auto flex-1">
-                  {(() => {
-                    const tierOrder = { peripheral: 0, working: 1, core: 2 }
-                    const reasonMap: Record<string, string> = {
-                      access_via_get: "访问触发",
-                      access_via_search: "搜索触发",
-                      access_via_recall: "召回触发",
-                      access_via_cross_space_search: "跨空间搜索触发",
-                      scheduled_evaluation: "定时评估",
-                    }
-                    let events: Array<{
-                      from: string; to: string; reason: string; at: string; access_count: number
-                    }> = []
-                    if (memory.tier_history) {
-                      try {
-                        events = JSON.parse(memory.tier_history)
-                      } catch { /* ignore parse errors */ }
-                    }
-                    if (events.length === 0) {
-                      return <p className="text-sm text-muted-foreground py-8 text-center">暂无变更记录</p>
-                    }
-                    return (
-                      <div className="relative pl-6">
-                        <div className="absolute left-2 top-0 bottom-0 w-px bg-border" />
-                        {events.reverse().map((e) => {
-                          const promoted = (tierOrder[e.from as keyof typeof tierOrder] ?? 0) < (tierOrder[e.to as keyof typeof tierOrder] ?? 0)
-                          return (
-                            <div key={e.at + e.from + e.to} className="relative pb-4 last:pb-0">
-                              <div className={`absolute -left-4 top-1 size-3 rounded-full border-2 ${promoted ? 'border-emerald-500 bg-emerald-500/20' : 'border-red-500 bg-red-500/20'}`} />
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                  <span>{new Date(e.at).toLocaleDateString("zh-CN")}</span>
-                                  <span className="text-[10px]">{new Date(e.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
-                                </div>
-                                <div className="flex items-center gap-1">
-                                  {promoted ? (
-                                    <ArrowUpRight className="size-3.5 text-emerald-500 shrink-0" />
-                                  ) : (
-                                    <ArrowDownRight className="size-3.5 text-red-500 shrink-0" />
-                                  )}
-                                  <Badge variant="outline" className={`text-[10px] px-1 py-0 ${getTierBadgeClass(e.from)}`}>
-                                    {getTierLabel(e.from)}
-                                  </Badge>
-                                  <span className="text-muted-foreground text-xs">→</span>
-                                  <Badge variant="outline" className={`text-[10px] px-1 py-0 ${getTierBadgeClass(e.to)}`}>
-                                    {getTierLabel(e.to)}
-                                  </Badge>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground">
-                                  {reasonMap[e.reason] || e.reason} · #{e.access_count}
-                                </p>
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )
-                  })()}
+                <CardContent className="p-2">
+                  <RelationGraph
+                    key={memory.id + memory.relations.length}
+                    memoryId={memory.id}
+                    relations={memory.relations}
+                  />
                 </CardContent>
               </Card>
-          </div>
+            </div>
+          )}
         </div>
       ) : (
         <VaultUnlock />

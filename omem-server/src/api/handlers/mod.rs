@@ -1,5 +1,4 @@
 pub mod categories;
-pub mod clusters;
 pub mod events;
 pub mod files;
 pub mod github;
@@ -56,14 +55,9 @@ pub use categories::{
     create_alias, create_category, delete_alias, delete_category, get_category, list_aliases,
     list_categories, update_category,
 };
-pub use clusters::{
-    batch_delete_clusters, delete_all_clusters, delete_cluster, delete_clustering_job,
-    get_clustering_job, get_clustering_stats, get_cluster, list_clustering_jobs, list_clusters,
-    recalculate_cluster_counts, trigger_clustering,
-};
 pub use events::sse_events;
 pub use scheduler::{
-    get_scheduler_status, pause_clustering, pause_lifecycle, resume_clustering, resume_lifecycle,
+    get_scheduler_status, pause_lifecycle, resume_lifecycle,
 };
 pub use profile_v2::{
     get_changelog, get_full_profile, get_induction_runs, get_injection, get_preference,
