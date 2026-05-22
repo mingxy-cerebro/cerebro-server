@@ -27,7 +27,7 @@ api/
 ├── server.rs                 (52 lines) — AppState struct + helpers
 ├── error.rs                  (79 lines) — IntoResponse impl for OmemError
 ├── event_bus.rs              (45 lines) — broadcast-based event bus
-├── scheduler_control.rs      (59 lines) — lifecycle/clustering pause flags
+├── scheduler_control.rs      (59 lines) — lifecycle pause flags
 ├── middleware/
 │   ├── mod.rs                (5 lines)
 │   ├── auth.rs               (72 lines) — X-API-Key validation
@@ -39,7 +39,6 @@ api/
     ├── stats.rs              (1,230 lines) — analytics, tags, decay, relations
     ├── session_recalls.rs    (530 lines) — recall decisions + session state
     ├── imports.rs            (448 lines) — file import, intelligence, rollback
-    ├── clusters.rs           (404 lines) — cluster CRUD, jobs, triggers
     ├── spaces.rs             (343 lines) — space CRUD + membership
     ├── merge.rs              (169 lines) — memory merge
     ├── lifecycle.rs           (173 lines) — manual lifecycle trigger
@@ -66,8 +65,6 @@ Defined in `server.rs`. Passed as `State<Arc<AppState>>` to every handler.
 | `embed` | `Arc<dyn EmbedService>` | Primary embedding service |
 | `llm` | `Arc<dyn LlmService>` | Primary LLM (extraction, completion) |
 | `recall_llm` | `Arc<dyn LlmService>` | Separate LLM for recall decisions |
-| `cluster_llm` | `Arc<dyn LlmService>` | LLM for cluster summarization |
-| `cluster_store` | `Arc<ClusterStore>` | Cluster metadata persistence |
 | `config` | `OmemConfig` | Runtime configuration (env vars) |
 | `import_semaphore` | `Arc<Semaphore>(3)` | Concurrency limit for imports |
 | `reconcile_semaphore` | `Arc<Semaphore>(1)` | Serializes reconciliation |
@@ -197,28 +194,12 @@ Grouped by handler file. Public routes (no auth) are marked with **(public)**.
 | GET    | `/v1/session-recalls/{id}` | `get_session_recall` |
 | DELETE | `/v1/session-recalls/{id}` | `delete_session_recall` |
 
-### clusters.rs
-| Method | Path | Handler |
-|--------|------|---------|
-| GET    | `/v1/clusters` | `list_clusters` |
-| POST   | `/v1/clusters/batch-delete` | `batch_delete_clusters` |
-| DELETE | `/v1/clusters/all` | `delete_all_clusters` |
-| POST   | `/v1/clusters/trigger` | `trigger_clustering` |
-| GET    | `/v1/clusters/jobs` | `list_clustering_jobs` |
-| GET    | `/v1/clusters/jobs/{id}` | `get_clustering_job` |
-| DELETE | `/v1/clusters/jobs/{id}` | `delete_clustering_job` |
-| GET    | `/v1/clusters/stats` | `get_clustering_stats` |
-| GET    | `/v1/clusters/{id}` | `get_cluster` |
-| DELETE | `/v1/clusters/{id}` | `delete_cluster` |
-
 ### scheduler.rs
 | Method | Path | Handler |
 |--------|------|---------|
 | GET    | `/v1/scheduler/status` | `get_scheduler_status` |
 | POST   | `/v1/scheduler/lifecycle/pause` | `pause_lifecycle` |
 | POST   | `/v1/scheduler/lifecycle/resume` | `resume_lifecycle` |
-| POST   | `/v1/scheduler/clustering/pause` | `pause_clustering` |
-| POST   | `/v1/scheduler/clustering/resume` | `resume_clustering` |
 
 ### events.rs
 | Method | Path | Handler |
@@ -336,7 +317,6 @@ Each handler file defines its own `Deserialize` request DTOs and `Serialize` res
 | `stats.rs` | 1,230 | Aggregated statistics, tag distribution, decay curve computation, relation graph, space/sharing/agent stats. |
 | `session_recalls.rs` | 530 | `should_recall` LLM-based gate, session recall CRUD, per-session memory caching. |
 | `imports.rs` | 448 | Multipart file import, SHA256 dedup, post-process trigger, rollback, cross-reconcile. |
-| `clusters.rs` | 404 | Cluster CRUD, background job management, trigger clustering, stats. |
 | `spaces.rs` | 343 | Space CRUD (personal/team/org), member add/remove/role update. |
 | `merge.rs` | 169 | Merge two memories into one. |
 | `lifecycle.rs` | 173 | Manual lifecycle trigger endpoint. |
@@ -345,7 +325,7 @@ Each handler file defines its own `Deserialize` request DTOs and `Serialize` res
 | `github.rs` | 94 | GitHub connector OAuth initiation and webhook receiver. |
 | `tenant.rs` | 97 | Tenant creation (public) and lookup (public). Auto-creates personal space. |
 | `profile.rs` | 52 | Returns auto-generated user profile (static facts + dynamic context). |
-| `scheduler.rs` | 49 | Scheduler status, pause/resume for lifecycle and clustering. |
+| `scheduler.rs` | 49 | Scheduler status, pause/resume for lifecycle. |
 | `events.rs` | 35 | SSE event stream (`/v1/events`) using `EventBus` broadcast channel. |
 
 ---
@@ -379,7 +359,7 @@ Each handler file defines its own `Deserialize` request DTOs and `Serialize` res
 Integration tests live in `api/mod.rs` (35 tests, ~1,500 lines). They use a shared `setup_app()` helper that:
 
 1. Creates a `tempfile::TempDir` for LanceDB storage
-2. Initializes `TenantStore`, `SpaceStore`, and `ClusterStore`
+2. Initializes `TenantStore`, `SpaceStore`
 3. Wires noop `TestEmbedder` (1024-dim, fixed vector) and `TestLlm` (returns `{"memories":[]}`)
 4. Builds the full axum router with real `AppState`
 5. Uses `tower::ServiceExt::oneshot` to send requests and assert status codes + JSON bodies

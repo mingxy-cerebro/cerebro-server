@@ -19,7 +19,6 @@ omem-server-source/
       retrieve/         # Hybrid retrieval with reranking
       multimodal/       # Code/PDF/image/video processing
       lifecycle/        # Weibull decay, auto-forgetting, tier management
-      cluster/          # Memory clustering (k-means, auto-grouping)
       profile/          # User profile auto-generation
       connectors/       # GitHub integration
   omem-web/             # Web frontend (React 19 + Vite 8 + shadcn/ui)
@@ -113,20 +112,11 @@ Concurrency limits: import semaphore (3), reconcile semaphore (1)
 ### connectors/ — External Integrations
 - `github.rs` — GitHub API integration
 
-### cluster/ — Memory Clustering
-- `mod.rs` — Module exports
-- `manager.rs` — ClusterManager: orchestrates clustering operations
-- `background_clustering.rs` — Background clustering task runner
-- `cluster_store.rs` — ClusterStore: cluster metadata persistence (LanceDB)
-- `kmeans.rs` — K-means clustering algorithm
-- `assigner.rs` — Memory-to-cluster assignment logic
-- `aggregator.rs` — Cluster summary and aggregation
-
 ## Stats
 
-- **92 Rust source files**, ~28,927 lines of production code
+- **85 Rust source files**, ~23,500 lines of production code
 - **373 inline tests** across 49 files
-- **13 top-level modules** in omem-server/src/
+- **12 top-level modules** in omem-server/src/
 - **4 TypeScript plugins** in plugins/
 
 ## Plugins (TypeScript)
