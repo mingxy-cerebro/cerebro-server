@@ -156,7 +156,7 @@ function serveFile(
 
     // Config injection: replace placeholder in index.html
     if (ext === ".html" && data.includes("__OMEM_API_URL__")) {
-      body = data.toString("utf-8").replace(/__OMEM_API_URL__/g, () => apiUrl);
+      body = data.toString("utf-8").replace(/window\.__OMEM_API_URL__\s*=\s*["']__OMEM_API_URL__["']/, `window.__OMEM_API_URL__ = "${apiUrl}"`);
     }
 
     res.writeHead(200, {
