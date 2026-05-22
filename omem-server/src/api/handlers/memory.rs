@@ -1722,6 +1722,168 @@ pub async fn session_ingest(
                 }
             };
 
+            /// Find the best split point in content so that the first half ≤ max_chars.
+            /// Prefers splitting at `## ` heading boundaries; falls back to char-based split.
+            /// Returns (first_half, second_half) where second_half contains at least one full section.
+            fn find_split_point(content: &str, max_chars: usize) -> (String, String) {
+                let mut heading_positions: Vec<usize> = Vec::new();
+                let mut byte_offset = 0;
+                for line in content.lines() {
+                    if line.starts_with("## ") {
+                        heading_positions.push(byte_offset);
+                    }
+                    byte_offset += line.len();
+                    if byte_offset < content.len() {
+                        byte_offset += 1;
+                    }
+                }
+
+                let mut best_split_byte: Option<usize> = None;
+                for &pos in &heading_positions {
+                    let first_half = &content[..pos];
+                    let char_count = first_half.trim_end().chars().count();
+                    if char_count <= max_chars {
+                        best_split_byte = Some(pos);
+                    } else {
+                        break;
+                    }
+                }
+
+                let (first, second) = if let Some(split_byte) = best_split_byte {
+                    let first_part = content[..split_byte].trim_end().to_string();
+                    let second_part = content[split_byte..].trim_start().to_string();
+                    (first_part, second_part)
+                } else {
+                    let char_idx = content.char_indices().take_while(|(idx, _)| *idx < max_chars).last();
+                    let split_byte = char_idx.map(|(idx, c)| idx + c.len_utf8()).unwrap_or(content.len().min(max_chars));
+                    let first_part = content[..split_byte].trim_end().to_string();
+                    let second_part = content[split_byte..].trim_start().to_string();
+                    (first_part, second_part)
+                };
+
+                (first, second)
+            }
+
+            /// Split an over-sized memory: truncate original, create continuation memory.
+            /// Returns the new continuation memory ID on success.
+            async fn split_memory(
+                original: &mut crate::domain::memory::Memory,
+                new_content: &str,
+                chain_head_id: &str,
+                state: &crate::api::server::AppState,
+                store: &crate::store::lancedb::LanceStore,
+            ) -> Option<String> {
+                let (first_half, second_half) = find_split_point(new_content, 3000);
+
+                if second_half.is_empty() {
+                    tracing::warn!(
+                        memory_id = %original.id,
+                        "session_ingest: split resulted in empty second half, skipping split"
+                    );
+                    return None;
+                }
+
+                original.content = first_half.clone();
+                if first_half.chars().count() <= 150 {
+                    original.l1_overview = first_half.clone();
+                } else {
+                    original.l1_overview = format!("{}...", first_half.chars().take(147).collect::<String>());
+                }
+                if first_half.chars().count() <= 500 {
+                    original.l2_content = first_half.clone();
+                } else {
+                    original.l2_content = format!("{}...", first_half.chars().take(497).collect::<String>());
+                }
+
+                let original_vec = match state.embed.embed(&[first_half.clone()]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to re-embed truncated WORK memory");
+                        None
+                    }
+                };
+                if let Err(e) = store.update(original, original_vec.as_deref()).await {
+                    tracing::warn!(error = %e, memory_id = %original.id, "session_ingest: failed to update truncated WORK memory");
+                    return None;
+                }
+                tracing::info!(
+                    memory_id = %original.id,
+                    first_chars = first_half.chars().count(),
+                    "session_ingest: truncated WORK memory for split"
+                );
+
+                let now = chrono::Utc::now().to_rfc3339();
+                let new_id = uuid::Uuid::new_v4().to_string();
+                let new_mem = crate::domain::memory::Memory {
+                    id: new_id.clone(),
+                    content: second_half.clone(),
+                    l0_abstract: original.l0_abstract.clone(),
+                    l1_overview: if second_half.chars().count() <= 150 {
+                        second_half.clone()
+                    } else {
+                        format!("{}...", second_half.chars().take(147).collect::<String>())
+                    },
+                    l2_content: if second_half.chars().count() <= 500 {
+                        second_half.clone()
+                    } else {
+                        format!("{}...", second_half.chars().take(497).collect::<String>())
+                    },
+                    category: original.category.clone(),
+                    memory_type: original.memory_type.clone(),
+                    state: original.state.clone(),
+                    tier: original.tier.clone(),
+                    importance: original.importance,
+                    confidence: original.confidence,
+                    access_count: 0,
+                    tags: original.tags.clone(),
+                    scope: original.scope.clone(),
+                    agent_id: original.agent_id.clone(),
+                    session_id: original.session_id.clone(),
+                    tenant_id: original.tenant_id.clone(),
+                    source: Some("auto-split".to_string()),
+                    relations: vec![crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::Continues,
+                        target_id: chain_head_id.to_string(),
+                        context_label: Some("auto-split on overflow".to_string()),
+                    }],
+                    superseded_by: None,
+                    invalidated_at: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    last_accessed_at: None,
+                    space_id: original.space_id.clone(),
+                    visibility: original.visibility.clone(),
+                    owner_agent_id: original.owner_agent_id.clone(),
+                    provenance: original.provenance.clone(),
+                    version: original.version,
+                    tier_history: original.tier_history.clone(),
+                    cluster_id: original.cluster_id.clone(),
+                    is_cluster_anchor: false,
+                    metadata: original.metadata.clone(),
+                    project_path: original.project_path.clone(),
+                };
+
+                let new_vec = match state.embed.embed(&[second_half]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to embed split continuation WORK memory");
+                        None
+                    }
+                };
+
+                if let Err(e) = store.create(&new_mem, new_vec.as_deref()).await {
+                    tracing::warn!(error = %e, "session_ingest: failed to create split continuation WORK memory");
+                    return None;
+                }
+                tracing::info!(
+                    new_memory_id = %new_id,
+                    second_chars = new_mem.content.chars().count(),
+                    "session_ingest: created WORK continuation memory from split"
+                );
+
+                Some(new_id)
+            }
+
             if memory_type == "EMOTIONAL" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
@@ -1932,6 +2094,16 @@ pub async fn session_ingest(
                                 existing_work_memory = Some(existing);
                                 appended = true;
                             }
+                        } else {
+                            let head_id = work_original_parent_id.as_deref().unwrap_or(&existing.id).to_string();
+                            if let Some(child_id) = split_memory(&mut existing, &new_content, &head_id, &state, &store).await {
+                                if work_original_parent_id.is_none() {
+                                    work_original_parent_id = Some(existing.id.clone());
+                                }
+                                add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                existing_work_memory = Some(existing);
+                                appended = true;
+                            }
                         }
                     }
                 }
@@ -1968,6 +2140,17 @@ pub async fn session_ingest(
                                 existing_work_memory = Some(mem);
                                 appended = true;
                                 break;
+                            } else {
+                                let head_id = work_original_parent_id.as_deref().unwrap_or(&mem.id).to_string();
+                                if let Some(child_id) = split_memory(&mut mem, &new_content, &head_id, &state, &store).await {
+                                    if work_original_parent_id.is_none() {
+                                        work_original_parent_id = Some(mem.id.clone());
+                                    }
+                                    add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                    existing_work_memory = Some(mem);
+                                    appended = true;
+                                    break;
+                                }
                             }
                         }
                     }

@@ -48,6 +48,7 @@ import {
   Zap,
   Lock,
   ChevronDown,
+  ChevronLeft,
   ChevronUp,
   ChevronRight,
   Clock,
@@ -198,6 +199,25 @@ function ExpandableMarkdown({ content }: { content: string }) {
   )
 }
 
+// ── Built-in preference slots ──────────────────────────────────────
+
+const BUILTIN_SLOTS = [
+  { name: "communication_style", display: "沟通风格" },
+  { name: "tone", display: "语气偏好" },
+  { name: "code_style", display: "代码风格" },
+  { name: "error_handling", display: "错误处理" },
+  { name: "naming_convention", display: "命名规范" },
+  { name: "testing_strategy", display: "测试策略" },
+  { name: "workflow_preference", display: "工作流偏好" },
+  { name: "commit_style", display: "提交风格" },
+  { name: "emoji_preference", display: "Emoji偏好" },
+  { name: "self_reference", display: "自称方式" },
+  { name: "address_style", display: "称呼方式" },
+  { name: "language", display: "语言" },
+  { name: "framework_preference", display: "框架偏好" },
+  { name: "preferred_tools", display: "工具偏好" },
+] as const
+
 // ── Slot display names ─────────────────────────────────────────────
 
 const SLOT_LABELS: Record<string, string> = {
@@ -268,6 +288,8 @@ export function ProfilePage() {
 
   const [searchQuery, setSearchQuery] = useState("")
   const [scopeFilter, setScopeFilter] = useState<string>("all")
+  const [slotPage, setSlotPage] = useState(1)
+  const SLOTS_PER_PAGE = 5
 
   useEffect(() => {
     async function loadAll() {
@@ -363,6 +385,15 @@ export function ProfilePage() {
     }
     return map
   }, [preferences, searchQuery, scopeFilter])
+
+  const allSlotEntries = useMemo(() => Array.from(preferencesBySlot.entries()), [preferencesBySlot])
+
+  const totalSlotPages = Math.max(1, Math.ceil(allSlotEntries.length / SLOTS_PER_PAGE))
+
+  const paginatedSlotEntries = useMemo(() => {
+    const start = (slotPage - 1) * SLOTS_PER_PAGE
+    return allSlotEntries.slice(start, start + SLOTS_PER_PAGE)
+  }, [allSlotEntries, slotPage])
 
   const refreshPreferences = async () => {
     const pp = projectPath || undefined
@@ -526,7 +557,7 @@ export function ProfilePage() {
                 <Input
                   placeholder="搜索偏好..."
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => { setSearchQuery(e.target.value); setSlotPage(1) }}
                   className="pl-9 h-9 bg-muted/40"
                 />
               </div>
@@ -549,7 +580,7 @@ export function ProfilePage() {
                   </Select>
                 )}
 
-                <Select value={scopeFilter} onValueChange={(v) => v != null && setScopeFilter(v)}>
+                <Select value={scopeFilter} onValueChange={(v) => { if (v != null) { setScopeFilter(v); setSlotPage(1) } }}>
                   <SelectTrigger className="h-9 w-[100px] text-xs">
                     <SelectValue placeholder="范围" />
                   </SelectTrigger>
@@ -593,8 +624,9 @@ export function ProfilePage() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="space-y-4">
-                {Array.from(preferencesBySlot.entries()).map(([slot, prefs]) => (
+              <>
+              <div id="pref-slot-list" className="space-y-4">
+                {paginatedSlotEntries.map(([slot, prefs]) => (
                   <SlotGroup
                     key={slot}
                     slot={slot}
@@ -604,6 +636,54 @@ export function ProfilePage() {
                   />
                 ))}
               </div>
+              {totalSlotPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                  <p className="text-xs text-muted-foreground">
+                    第 {slotPage} / {totalSlotPages} 页 · 共 {allSlotEntries.length} 个分组
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-8"
+                      disabled={slotPage <= 1}
+                      onClick={() => {
+                        setSlotPage(p => Math.max(1, p - 1))
+                        document.getElementById('pref-slot-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                      }}
+                    >
+                      <ChevronLeft className="size-4" />
+                    </Button>
+                    {Array.from({ length: totalSlotPages }, (_, i) => i + 1).map(page => (
+                      <Button
+                        key={page}
+                        variant={page === slotPage ? "default" : "outline"}
+                        size="icon"
+                        className={cn("size-8 text-xs", page === slotPage && "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-0")}
+                        onClick={() => {
+                          setSlotPage(page)
+                          document.getElementById('pref-slot-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                        }}
+                      >
+                        {page}
+                      </Button>
+                    ))}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-8"
+                      disabled={slotPage >= totalSlotPages}
+                      onClick={() => {
+                        setSlotPage(p => Math.min(totalSlotPages, p + 1))
+                        document.getElementById('pref-slot-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                      }}
+                    >
+                      <ChevronRight className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+              </>
             )}
           </TabsContent>
 
@@ -693,7 +773,7 @@ export function ProfilePage() {
                     <Separator />
                     <div className="flex items-center gap-2">
                       <Activity className="size-5 text-blue-500" />
-                      <h2 className="text-lg font-semibold">动态上下文</h2>
+                      <h2 className="text-lg font-semibold">静态偏好</h2>
                       <Badge variant="secondary" className="text-[10px]">{dynamicContext.length} 条</Badge>
                     </div>
                     <div className="relative pl-6 space-y-3">
@@ -764,7 +844,7 @@ export function ProfilePage() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="relative pl-6 space-y-3">
+              <div className="relative pl-6 space-y-3 overflow-hidden">
                 <div className="absolute left-[11px] top-2 bottom-2 w-px bg-gradient-to-b from-violet-300 via-sky-300 to-transparent dark:from-violet-500/40 dark:via-sky-500/40 dark:to-transparent" />
                 {changelog.map((entry) => {
                   const isCreated = entry.action === "created"
@@ -914,14 +994,17 @@ function SlotGroup({
   onDelete: (pref: PreferenceResponse) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
+  const [visibleCount, setVisibleCount] = useState(4)
   const SlotIcon = getSlotIcon(slot)
+  const visiblePrefs = preferences.slice(0, visibleCount)
+  const hasMore = visibleCount < preferences.length
 
   return (
     <div className="space-y-2">
       <button
         type="button"
         className="flex items-center gap-2.5 w-full group cursor-pointer text-left border-none bg-transparent p-0"
-        onClick={() => setCollapsed(!collapsed)}
+        onClick={() => { setCollapsed(!collapsed); setVisibleCount(4) }}
       >
         <div className="flex items-center justify-center size-7 rounded-lg bg-gradient-to-br from-amber-100 to-orange-100 dark:from-amber-500/15 dark:to-orange-500/15 border border-amber-200/60 dark:border-amber-500/20">
           <SlotIcon className="size-3.5 text-amber-600 dark:text-amber-400" />
@@ -936,10 +1019,22 @@ function SlotGroup({
       </button>
 
       {!collapsed && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pl-9">
-          {preferences.map((pref) => (
-            <PreferenceCard key={pref.id} pref={pref} onEdit={onEdit} onDelete={onDelete} />
-          ))}
+        <div className="space-y-2.5 pl-9">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {visiblePrefs.map((pref) => (
+              <PreferenceCard key={pref.id} pref={pref} onEdit={onEdit} onDelete={onDelete} />
+            ))}
+          </div>
+          {hasMore && (
+            <button
+              type="button"
+              className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-lg hover:bg-muted/50 cursor-pointer"
+              onClick={() => setVisibleCount(c => Math.min(c + 4, preferences.length))}
+            >
+              <ChevronDown className="size-3.5" />
+              加载更多（剩余 {preferences.length - visibleCount} 条）
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1022,6 +1117,7 @@ function PreferenceFormDialog({
   const isEdit = !!pref
 
   const [slot, setSlot] = useState(pref?.slot || "")
+  const [customSlotName, setCustomSlotName] = useState("")
   const [value, setValue] = useState(pref?.value || "")
   const [confidence, setConfidence] = useState(String(pref?.confidence ?? 0.8))
   const [scope, setScope] = useState(pref?.scope || "global")
@@ -1029,7 +1125,9 @@ function PreferenceFormDialog({
 
   useEffect(() => {
     if (open) {
-      setSlot(pref?.slot || "")
+      const initSlot = pref?.slot || ""
+      setSlot(initSlot)
+      setCustomSlotName(initSlot.startsWith("custom:") ? initSlot.slice(7) : "")
       setValue(pref?.value || "")
       setConfidence(String(pref?.confidence ?? 0.8))
       setScope(pref?.scope || "global")
@@ -1037,9 +1135,16 @@ function PreferenceFormDialog({
     }
   }, [open, pref])
 
+  const isCustomSlot = slot === "__custom__"
+
   const handleSubmit = () => {
-    if (!slot.trim() || !value.trim()) {
+    const actualSlot = isCustomSlot ? `custom:${customSlotName.trim()}` : slot.trim()
+    if (!actualSlot || !value.trim()) {
       toast.error("请填写 Slot 和内容")
+      return
+    }
+    if (isCustomSlot && !customSlotName.trim()) {
+      toast.error("请填写自定义 Slot 名")
       return
     }
 
@@ -1052,7 +1157,7 @@ function PreferenceFormDialog({
       onSubmit(data)
     } else {
       onSubmit({
-        slot: slot.trim(),
+        slot: actualSlot,
         value: value.trim(),
         confidence: parseFloat(confidence) || 0.8,
         scope,
@@ -1081,12 +1186,31 @@ function PreferenceFormDialog({
               {isEdit ? (
                 <Input value={slot} disabled className="h-9 bg-muted/60" />
               ) : (
-                <Input
-                  placeholder="例: coding_preferences"
-                  value={slot}
-                  onChange={(e) => setSlot(e.target.value)}
-                  className="h-9"
-                />
+                <>
+                  <Select value={slot || undefined} onValueChange={(v) => v != null && setSlot(v)}>
+                    <SelectTrigger className="h-9 w-full">
+                      <SelectValue placeholder="选择类别..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BUILTIN_SLOTS.map((s) => (
+                        <SelectItem key={s.name} value={s.name}>{s.display}</SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">自定义 (custom:...)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {isCustomSlot && (
+                    <Input
+                      placeholder="自定义 slot 名 (小写字母+数字+下划线)"
+                      value={customSlotName}
+                      onChange={(e) => {
+                        const v = e.target.value.replace(/[^a-z0-9_]/g, "")
+                        setCustomSlotName(v)
+                      }}
+                      className="h-9"
+                      maxLength={50}
+                    />
+                  )}
+                </>
               )}
             </div>
             <div className="space-y-1.5">
@@ -1112,6 +1236,7 @@ function PreferenceFormDialog({
               onChange={(e) => setValue(e.target.value)}
               rows={3}
               className="resize-none"
+              maxLength={500}
             />
           </div>
 
@@ -1135,6 +1260,7 @@ function PreferenceFormDialog({
                 value={projectPath}
                 onChange={(e) => setProjectPath(e.target.value)}
                 className="h-9"
+                maxLength={200}
               />
             </div>
           </div>
@@ -1146,7 +1272,7 @@ function PreferenceFormDialog({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={saving || !slot.trim() || !value.trim()}
+            disabled={saving || !value.trim() || (!isCustomSlot ? !slot.trim() : !customSlotName.trim())}
             className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white"
           >
             {saving ? (isEdit ? "保存中..." : "创建中...") : isEdit ? "保存" : "创建"}
