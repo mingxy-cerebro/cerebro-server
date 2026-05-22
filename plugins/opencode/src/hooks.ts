@@ -248,13 +248,20 @@ const FETCH_POLICY = [
  * Score-weighted budget allocation: high-score memories get more chars.
  * Falls back to uniform distribution when totalScore === 0 or all scores equal.
  */
+interface ContextBlockResult {
+  text: string;
+  injectedMemoryIds: string[];
+  injectedCount: number;
+}
+
 function buildContextBlock(
   results: SearchResult[],
   budget: number,
   maxContentLength: number = 500,
   minItemChars: number = MIN_ITEM_CONTENT_CHARS,
-): string {
-  if (results.length === 0) return "";
+): ContextBlockResult {
+  const empty: ContextBlockResult = { text: "", injectedMemoryIds: [], injectedCount: 0 };
+  if (results.length === 0) return empty;
 
   const totalScore = results.reduce((sum, r) => sum + r.score, 0);
 
@@ -271,12 +278,16 @@ function buildContextBlock(
     sections.push(`[${label}]\n${lines.join("\n")}`);
   }
 
-  return [
-    "<cerebro-context>",
-    "",
-    ...sections,
-    "</cerebro-context>",
-  ].join("\n");
+  return {
+    text: [
+      "<cerebro-context>",
+      "",
+      ...sections,
+      "</cerebro-context>",
+    ].join("\n"),
+    injectedMemoryIds: results.map((r) => r.memory.id),
+    injectedCount: results.length,
+  };
 }
 
 function buildClusteredContextBlock(
@@ -284,8 +295,9 @@ function buildClusteredContextBlock(
   budget: number,
   maxContentLength: number = 500,
   minItemChars: number = MIN_ITEM_CONTENT_CHARS,
-): string {
+): ContextBlockResult {
   const sections: string[] = [];
+  const injectedIds: string[] = [];
 
   if (clustered.cluster_summaries.length > 0) {
     const totalClusterScore = clustered.cluster_summaries.reduce((sum, cs) => sum + cs.relevance_score, 0);
@@ -308,6 +320,7 @@ function buildClusteredContextBlock(
           const importanceBar = mem.importance >= 0.7 ? "●" : mem.importance >= 0.4 ? "◐" : "○";
           const content = truncate(mem.content, clusterMaxLen);
           sections.push(`- ${importanceBar}${idTag}${relTag} ${content}`);
+          if (mem.id) injectedIds.push(mem.id);
         }
       }
     }
@@ -327,15 +340,24 @@ function buildClusteredContextBlock(
         : "";
       const content = truncate(mem.content, standaloneMaxLen);
       sections.push(`-${idTag}${relTag} ${content}`);
+      if (mem.id) injectedIds.push(mem.id);
     }
   }
 
-  return [
-    "<cerebro-context>",
-    "",
-    ...sections,
-    "</cerebro-context>",
-  ].join("\n");
+  const totalInjected = clustered.cluster_summaries.reduce((s, cs) => s + cs.member_count, 0) + clustered.standalone_memories.length;
+
+  return {
+    text: sections.length > 0
+      ? [
+          "<cerebro-context>",
+          "",
+          ...sections,
+          "</cerebro-context>",
+        ].join("\n")
+      : "",
+    injectedMemoryIds: injectedIds,
+    injectedCount: totalInjected,
+  };
 }
 
 export function autoRecallHook(client: CerebroClient, containerTags: string[], tui: any, config: Partial<OmemPluginConfig> = {}, getAgentName?: () => string, directory?: string) {
@@ -462,31 +484,51 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
 
       const createEventAndReturn = async (
         opts: {
-          keptCount: number;
-          discardedCount: number;
           injectedContent?: string;
           actualProfileInjected: boolean;
           actualProfileContent?: string;
           actualInjectedCount: number;
+          injectedMemoryIds: string[];
+          keptCount: number;
+          discardedCount: number;
         },
       ): Promise<string | undefined> => {
         try {
-          const items = [
-            ...(shouldRecallRes.memories?.map((r) => ({
-              memory_id: r.memory.id,
-              score: r.score,
-              refine_relevance: r.refine_relevance,
-              refine_reasoning: r.refine_reasoning,
-              is_kept: true,
-            })) ?? []),
-            ...(shouldRecallRes.discarded?.map((d) => ({
-              memory_id: d.memory_id,
-              score: d.score,
-              refine_relevance: d.refine_relevance,
-              refine_reasoning: d.refine_reasoning,
-              is_kept: false,
-            })) ?? []),
-          ];
+          const items = clustered
+            ? [
+                ...clustered.cluster_summaries.flatMap((cs) =>
+                  cs.key_memories.map((mem) => ({
+                    memory_id: mem.id ?? "",
+                    score: cs.relevance_score,
+                    refine_relevance: undefined,
+                    refine_reasoning: undefined,
+                    is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
+                  }))
+                ),
+                ...clustered.standalone_memories.map((mem) => ({
+                  memory_id: mem.id ?? "",
+                  score: 0,
+                  refine_relevance: undefined,
+                  refine_reasoning: undefined,
+                  is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
+                })),
+              ]
+            : [
+                ...(shouldRecallRes.memories?.map((r) => ({
+                  memory_id: r.memory.id,
+                  score: r.score,
+                  refine_relevance: r.refine_relevance,
+                  refine_reasoning: r.refine_reasoning,
+                  is_kept: opts.injectedMemoryIds.includes(r.memory.id),
+                })) ?? []),
+                ...(shouldRecallRes.discarded?.map((d) => ({
+                  memory_id: d.memory_id,
+                  score: d.score,
+                  refine_relevance: d.refine_relevance,
+                  refine_reasoning: d.refine_reasoning,
+                  is_kept: false,
+                })) ?? []),
+              ];
           const result = await client.createRecallEvent({
             session_id: input.sessionID!,
             recall_type: "auto",
@@ -520,6 +562,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
             actualProfileInjected: true,
             actualProfileContent: profileBlock,
             actualInjectedCount: 0,
+            injectedMemoryIds: [],
           });
 
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no recall needed`, "success", toastDelayMs);
@@ -541,40 +584,39 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         configuredMax: maxContentLength,
       });
 
-      const block = clustered 
+      const ctxResult = clustered 
         ? buildClusteredContextBlock(clustered, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS)
         : buildContextBlock(results, budgetRemaining, maxContentLength, MIN_ITEM_CONTENT_CHARS);
-      if (block) {
-        appendToSystem(output.system, block);
+      if (ctxResult.text) {
+        appendToSystem(output.system, ctxResult.text);
         appendToSystem(output.system, FETCH_POLICY);
         logDebug("autoRecallHook block injected to output.system", {
           sessionId: input.sessionID,
-          blockPreview: block.slice(0, 200),
+          blockPreview: ctxResult.text.slice(0, 200),
           outputSystemLength: output.system.length,
         });
       } else {
         logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
       }
 
-      if (profileTtlExpired && profileBlock) {
+      if (profileBlock) {
         appendToSystem(output.system, profileBlock);
         logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
       }
 
       logDebug("autoRecallHook injection complete", { clustered: !!clustered, sessionId: input.sessionID });
 
-      const didInjectProfile = profileTtlExpired && !!profileBlock;
-      const didInjectContext = !!block;
+      const didInjectProfile = !!profileBlock;
+      const didInjectContext = !!ctxResult.text;
 
       createEventAndReturn({
-        keptCount: storedMemoryIds.length,
+        keptCount: ctxResult.injectedCount,
         discardedCount: storedDiscardedIds.length,
-        injectedContent: didInjectContext ? block : undefined,
-        actualProfileInjected: profileTtlExpired && !!profileBlock,
-        actualProfileContent: profileTtlExpired ? profileBlock : undefined,
-        actualInjectedCount: clustered
-          ? (clustered.cluster_summaries.reduce((s, cs) => s + cs.member_count, 0) + clustered.standalone_memories.length)
-          : results.length,
+        injectedContent: didInjectContext ? ctxResult.text : undefined,
+        actualProfileInjected: didInjectProfile,
+        actualProfileContent: profileBlock || undefined,
+        actualInjectedCount: ctxResult.injectedCount,
+        injectedMemoryIds: ctxResult.injectedMemoryIds,
       });
 
       // --- Toast (every branch shows toast) ---
