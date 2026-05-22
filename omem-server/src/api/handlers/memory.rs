@@ -12,6 +12,7 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::{sanitize_project_path, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
+use crate::ingest::refine_service::{collect_chain_memories, refine_and_replace};
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
 use crate::ingest::IngestPipeline;
 
@@ -1809,6 +1810,67 @@ pub async fn session_ingest(
             }
 
             if memory_type == "WORK" {
+                // ── 精炼路径：非private → 尝试LLM精炼 ──
+                if topic.scope != "private" {
+                    // B1: If no existing_work_memory tracked, search for similar WORK memory in same session
+                    if existing_work_memory.is_none() {
+                        let sid = session_id.as_deref().unwrap_or("default");
+                        let tid = &tenant_id;
+                        match crate::ingest::refine_service::find_similar_work_memory(
+                            &store, &state.embed, &topic.topic, sid, tid,
+                        ).await {
+                            Ok(Some(similar)) => {
+                                tracing::info!(
+                                    similar_id = %similar.id,
+                                    score_topic = %topic.topic,
+                                    "session_ingest: found similar WORK memory via embedding search"
+                                );
+                                existing_work_memory = Some(similar);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "session_ingest: embedding search failed, skipping refine");
+                            }
+                        }
+                    }
+
+                    if let Some(ref existing) = existing_work_memory {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            async {
+                                let chain = collect_chain_memories(&store, existing).await?;
+                                refine_and_replace(&store, &state.llm, &state.embed, existing, &chain, &summary, &topic.topic).await
+                            }
+                        ).await {
+                            Ok(Ok(refined)) => {
+                                tracing::info!(
+                                    memory_id = %refined.id,
+                                    new_len = refined.content.chars().count(),
+                                    "session_ingest: WORK refined successfully"
+                                );
+                                // B2: content ≤ 500 after refine_service truncation (P3),
+                                // so 3000-char split never triggers on refine path.
+                                // Defensive check: warn if unexpectedly exceeds 3000 chars.
+                                if refined.content.chars().count() > 3000 {
+                                    tracing::warn!(
+                                        len = refined.content.chars().count(),
+                                        "session_ingest: BUG - refined content exceeds 3000 chars despite ≤500 truncation"
+                                    );
+                                }
+                                existing_work_memory = Some(refined);
+                                continue;
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(error = %e, "session_ingest: refine failed, falling back to append");
+                            }
+                            Err(_) => {
+                                tracing::warn!("session_ingest: refine timed out (30s), falling back to append");
+                            }
+                        }
+                    }
+                }
+
+                // ── 原有追加逻辑（fallback + 首次创建路径）──
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let section_header = format!("## {} {}", today, topic.topic);
                 let section_body = summary.clone();

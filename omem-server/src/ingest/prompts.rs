@@ -925,9 +925,9 @@ Return ONLY valid JSON array. Each element:
 }
 
 - "topic": Short title (1 sentence) → maps to l0_abstract.
-- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: structured 2-3 line summary with key conclusions. For EMOTIONAL: brief gist.
-- "detail": Structured narrative in ≤500 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
-- "summary": Full content → maps to content. WORK ≤800 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
+- "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: MUST use arrow timeline format showing progression: `verb phrase→verb phrase→result`. Example: "diagnosed bug→fixed handler→verified→deployed". Each node = what happened, arrows = temporal/causal progression. For EMOTIONAL: brief gist.
+- "detail": Structured narrative in ≤300 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
+- "summary": Full content → maps to content. WORK ≤500 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
 - "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
 - "scope": "public" for WORK, "private" for EMOTIONAL.
 - "category": WORK → pick from 6 categories above. EMOTIONAL → pick best fit.

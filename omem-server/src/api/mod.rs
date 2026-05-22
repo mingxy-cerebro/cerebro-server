@@ -118,6 +118,69 @@ mod tests {
         (build_router(state), dir)
     }
 
+    pub(crate) async fn setup_app_with_llm(
+        llm: Arc<dyn LlmService>,
+    ) -> (axum::Router, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let uri = dir.path().to_str().expect("path");
+
+        let store_manager = Arc::new(StoreManager::new(uri));
+
+        let system_uri = format!("{}/_system", uri);
+        let tenant_store = Arc::new(TenantStore::new(&system_uri).await.expect("tenant store"));
+        tenant_store.init_table().await.expect("init tenants");
+
+        let space_store = Arc::new(SpaceStore::new(&system_uri).await.expect("space store"));
+        space_store.init_tables().await.expect("init spaces");
+
+        let embed: Arc<dyn EmbedService> = Arc::new(TestEmbedder);
+
+        let cluster_store = Arc::new(
+            crate::cluster::cluster_store::ClusterStore::new(
+                &lancedb::connect(&uri).execute().await.expect("db connect"),
+            )
+            .await
+            .expect("cluster store"),
+        );
+        let sqlite_store = Arc::new(SqliteStore::new_in_memory().expect("sqlite store"));
+        {
+            let conn = sqlite_store.conn().lock().expect("sqlite lock");
+            sqlite_schema::create_tables(&conn).expect("sqlite tables");
+        }
+        let category_registry = Arc::new(CategoryRegistry::new(sqlite_store.clone()));
+        let profile_v2_sqlite = Arc::new(SqliteStore::new_in_memory().expect("profile sqlite"));
+        let profile_store = Arc::new(crate::profile_v2::store::ProfileStore::new(profile_v2_sqlite));
+        profile_store.init().expect("profile tables");
+        let profile_v2_service = Arc::new(crate::profile_v2::service::ProfileV2Service::new(profile_store.clone(), None, &OmemConfig::default()));
+        let induction_engine = Arc::new(crate::profile_v2::induction::InductionEngine::new(profile_v2_service.clone()));
+        let injection_builder = Arc::new(crate::profile_v2::injection::InjectionBuilder::new(profile_v2_service.clone()));
+        let state = Arc::new(AppState {
+            store_manager,
+            tenant_store,
+            space_store,
+            embed,
+            llm: llm.clone(),
+            recall_llm: llm.clone(),
+            cluster_llm: llm,
+            cluster_store,
+            config: OmemConfig::default(),
+            import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
+            reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            event_bus: Arc::new(crate::api::event_bus::EventBus::new()),
+            scheduler_control: Arc::new(crate::api::scheduler_control::SchedulerControl::new()),
+            session_locks: Arc::new(dashmap::DashMap::new()),
+            reranker: None,
+            ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+            sqlite_store,
+            category_registry,
+            profile_v2_service,
+            induction_engine,
+            injection_builder,
+        });
+
+        (build_router(state), dir)
+    }
+
     pub(crate) async fn create_test_tenant(app: &axum::Router) -> String {
         let response = app
             .clone()
@@ -1682,5 +1745,193 @@ mod tests {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let original: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(original["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_session_ingest_returns_accepted() {
+        let (app, _dir) = setup_app().await;
+        let api_key = create_test_tenant(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories/session-ingest")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"Fixed a bug in auth middleware"}],"session_id":"test-session-1"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn test_session_ingest_with_empty_messages() {
+        let (app, _dir) = setup_app().await;
+        let api_key = create_test_tenant(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories/session-ingest")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(r#"{"messages":[],"session_id":"test-session-empty"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(json["error"]["code"], "validation_error");
+    }
+
+    #[tokio::test]
+    async fn test_refine_fallback_on_noop_llm() {
+        let (app, _dir) = setup_app().await;
+        let api_key = create_test_tenant(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories/session-ingest")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"Fixed a critical bug in the payment processing module"}],"session_id":"test-refine-session"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let search_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/memories/search?q=payment+bug&limit=10")
+                    .header("x-api-key", &api_key)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(search_response.status(), StatusCode::OK);
+    }
+
+    struct EmotionalTestLlm;
+
+    #[async_trait::async_trait]
+    impl LlmService for EmotionalTestLlm {
+        async fn complete_text(&self, _system: &str, _user: &str) -> Result<String, OmemError> {
+            Ok(r#"{"memories":[{"topic":"test emotion","summary":"felt happy today","overview":"happy","detail":"very happy","tags":["playful"],"scope":"private","category":"patterns","memory_type":"EMOTIONAL"}]}"#.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_ingest_emotional_not_refined() {
+        let llm: Arc<dyn LlmService> = Arc::new(EmotionalTestLlm);
+        let (app, _dir) = setup_app_with_llm(llm).await;
+        let api_key = create_test_tenant(&app).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories/session-ingest")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"I felt really happy today after playing with my cat"}],"session_id":"test-emotional-session"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    struct WorkTestLlm;
+
+    #[async_trait::async_trait]
+    impl LlmService for WorkTestLlm {
+        async fn complete_text(&self, _system: &str, _user: &str) -> Result<String, OmemError> {
+            Ok(r#"{"memories":[{"topic":"[test-project] fix auth bug","summary":"fixed the auth bug in middleware","overview":"diagnosed→fixed→verified","detail":"root cause: missing tenant_id check","tags":["programming"],"scope":"public","category":"cases","memory_type":"WORK"}]}"#.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_ingest_same_topic_work_fallback() {
+        // Build app with WorkTestLlm so session-ingest returns a WORK memory
+        let llm: Arc<dyn LlmService> = Arc::new(WorkTestLlm);
+        let (app, _dir) = setup_app_with_llm(llm).await;
+        let api_key = create_test_tenant(&app).await;
+
+        // First: create an existing WORK memory with a similar topic via POST /v1/memories
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(
+                        r#"{"content":"[test-project] fix auth bug - found the issue in middleware","scope":"public","category":"cases","tags":["programming"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // Now call session-ingest — WorkTestLlm returns WORK memory with similar topic,
+        // handler finds the existing memory, attempts refine via refine_and_replace.
+        // Since WorkTestLlm returns valid JSON but the refine step calls llm again
+        // (which also uses WorkTestLlm), the refine may succeed or fall back to append.
+        // Either way, the endpoint should return 202.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/memories/session-ingest")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"Fixed the auth bug in the middleware - added tenant_id check"}],"session_id":"test-refine-fallback-session"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 }

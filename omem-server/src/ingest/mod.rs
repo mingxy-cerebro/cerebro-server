@@ -5,6 +5,8 @@ pub mod noise;
 pub mod pipeline;
 pub mod privacy;
 pub mod prompts;
+pub mod refine_prompt;
+pub mod refine_service;
 pub mod reconciler;
 pub mod session;
 pub mod types;
