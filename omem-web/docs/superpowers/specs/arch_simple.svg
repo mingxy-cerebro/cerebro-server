@@ -1,0 +1,35 @@
+<svg width="1200" height="800" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景 -->
+  <rect width="1200" height="800" fill="#F8F9FA"/>
+  
+  <!-- 第一层：浏览器 -->
+  <rect x="150" y="80" width="900" height="180" fill="#E8EAF6" stroke="#B0BEC5" stroke-width="2"/>
+  <text x="180" y="120" font-family="sans-serif" font-size="32" font-weight="bold" fill="#263238">用户浏览器</text>
+  <text x="180" y="155" font-family="sans-serif" font-size="20" fill="#263238">Vue 3 + Vite</text>
+  <text x="180" y="185" font-family="sans-serif" font-size="20" fill="#263238">Ant Design Vue + Pinia</text>
+  <text x="180" y="215" font-family="sans-serif" font-size="20" fill="#263238">Axios (X-API-Key Header)</text>
+  
+  <!-- 箭头1 -->
+  <line x1="600" y1="260" x2="600" y2="380" stroke="#546E7A" stroke-width="3"/>
+  <polygon points="600,380 590,365 610,365" fill="#546E7A"/>
+  <text x="620" y="315" font-family="sans-serif" font-size="18" fill="#546E7A">HTTPS</text>
+  <text x="620" y="335" font-family="sans-serif" font-size="16" fill="#546E7A">/v1/*</text>
+  
+  <!-- 第二层：Nginx -->
+  <rect x="150" y="380" width="900" height="180" fill="#FFF3E0" stroke="#B0BEC5" stroke-width="2"/>
+  <text x="180" y="420" font-family="sans-serif" font-size="32" font-weight="bold" fill="#263238">Nginx 服务器</text>
+  <text x="180" y="455" font-family="sans-serif" font-size="20" fill="#263238">www.mengxy.cc</text>
+  <text x="180" y="485" font-family="sans-serif" font-size="20" fill="#263238">静态文件服务 + API反向代理</text>
+  <text x="180" y="515" font-family="sans-serif" font-size="20" fill="#263238">/v1/* → localhost:8080/v1/*</text>
+  
+  <!-- 箭头2 -->
+  <line x1="600" y1="560" x2="600" y2="680" stroke="#546E7A" stroke-width="3"/>
+  <polygon points="600,680 590,665 610,665" fill="#546E7A"/>
+  <text x="620" y="615" font-family="sans-serif" font-size="18" fill="#546E7A">HTTP</text>
+  <text x="620" y="635" font-family="sans-serif" font-size="16" fill="#546E7A">localhost:8080</text>
+  
+  <!-- 第三层：Server -->
+  <rect x="150" y="680" width="900" height="120" fill="#E0F2F1" stroke="#B0BEC5" stroke-width="2"/>
+  <text x="180" y="720" font-family="sans-serif" font-size="32" font-weight="bold" fill="#263238">omem-server</text>
+  <text x="180" y="755" font-family="sans-serif" font-size="20" fill="#263238">Rust + Axum · localhost:8080 · REST API (48+ endpoints)</text>
+</svg>

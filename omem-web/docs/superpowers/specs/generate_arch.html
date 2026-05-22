@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Architecture Diagram</title>
+</head>
+<body>
+    <canvas id="canvas" width="1200" height="800"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // 背景
+        ctx.fillStyle = '#F8F9FA';
+        ctx.fillRect(0, 0, 1200, 800);
+        
+        // 定义颜色
+        const colors = {
+            browser: '#E8EAF6',
+            nginx: '#FFF3E0',
+            server: '#E0F2F1',
+            text: '#263238',
+            arrow: '#546E7A',
+            border: '#B0BEC5'
+        };
+        
+        // 绘制层
+        function drawLayer(x, y, w, h, fillColor) {
+            ctx.fillStyle = fillColor;
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = colors.border;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, w, h);
+        }
+        
+        // 绘制箭头
+        function drawArrow(x, y1, y2) {
+            ctx.strokeStyle = colors.arrow;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(x, y1);
+            ctx.lineTo(x, y2);
+            ctx.stroke();
+            
+            ctx.fillStyle = colors.arrow;
+            ctx.beginPath();
+            ctx.moveTo(x, y2);
+            ctx.lineTo(x - 10, y2 - 15);
+            ctx.lineTo(x + 10, y2 - 15);
+            ctx.closePath();
+            ctx.fill();
+        }
+        
+        // 绘制文字
+        function drawText(text, x, y, size, bold = false) {
+            ctx.fillStyle = colors.text;
+            ctx.font = `${bold ? 'bold ' : ''}${size}px sans-serif`;
+            ctx.fillText(text, x, y);
+        }
+        
+        // 绘制三层
+        const layerW = 900, layerH = 180, startX = 150;
+        const y1 = 80, y2 = 380, y3 = 680;
+        
+        drawLayer(startX, y1, layerW, layerH, colors.browser);
+        drawLayer(startX, y2, layerW, layerH, colors.nginx);
+        drawLayer(startX, y3, layerW, layerH, colors.server);
+        
+        // 绘制箭头
+        const arrowX = startX + layerW / 2;
+        drawArrow(arrowX, y1 + layerH, y2);
+        drawArrow(arrowX, y2 + layerH, y3);
+        
+        // 第一层文字
+        drawText('用户浏览器', startX + 30, y1 + 50, 32, true);
+        drawText('Vue 3 + Vite', startX + 30, y1 + 90, 20);
+        drawText('Ant Design Vue + Pinia', startX + 30, y1 + 120, 20);
+        drawText('Axios (X-API-Key Header)', startX + 30, y1 + 150, 20);
+        
+        // 第二层文字
+        drawText('Nginx 服务器', startX + 30, y2 + 50, 32, true);
+        drawText('www.mengxy.cc', startX + 30, y2 + 90, 20);
+        drawText('静态文件服务 + API反向代理', startX + 30, y2 + 120, 20);
+        drawText('/v1/* → localhost:8080/v1/*', startX + 30, y2 + 150, 20);
+        
+        // 第三层文字
+        drawText('omem-server', startX + 30, y3 + 50, 32, true);
+        drawText('Rust + Axum', startX + 30, y3 + 90, 20);
+        drawText('localhost:8080', startX + 30, y3 + 120, 20);
+        drawText('REST API (48+ endpoints)', startX + 30, y3 + 150, 20);
+        
+        // 箭头标签
+        ctx.fillStyle = colors.arrow;
+        ctx.font = '18px sans-serif';
+        ctx.fillText('HTTPS', arrowX + 20, (y1 + layerH + y2) / 2);
+        ctx.font = '16px sans-serif';
+        ctx.fillText('/v1/*', arrowX + 20, (y1 + layerH + y2) / 2 + 25);
+        
+        ctx.font = '18px sans-serif';
+        ctx.fillText('HTTP', arrowX + 20, (y2 + layerH + y3) / 2);
+        ctx.font = '16px sans-serif';
+        ctx.fillText('localhost:8080', arrowX + 20, (y2 + layerH + y3) / 2 + 25);
+        
+        // 导出为PNG
+        canvas.toBlob(function(blob) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'architecture.png';
+            a.click();
+        });
+    </script>
+</body>
+</html>

@@ -22,6 +22,7 @@ omem-server-source/
       cluster/          # Memory clustering (k-means, auto-grouping)
       profile/          # User profile auto-generation
       connectors/       # GitHub integration
+  omem-web/             # Web frontend (React 19 + Vite 8 + shadcn/ui)
   plugins/
     opencode/           # OpenCode memory plugin (TypeScript)
     openclaw/           # OpenClaw plugin (TypeScript)

@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-WEB_SRC="$ROOT_DIR/web"
+WEB_SRC="$ROOT_DIR/omem-web"
 
 echo "Building omem-web..."
 cd "$WEB_SRC" && npm run build && cd "$ROOT_DIR"

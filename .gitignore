@@ -17,14 +17,14 @@ bun.lock
 package-lock.json
 
 # === Web frontend ===
-web/playwright-report/
-web/test-results/
-web/e2e-screenshots/
-web/*.png
-web/screenshot*
-web/handoff.md
-web/AGENTS.md
-web/README.md
+omem-web/playwright-report/
+omem-web/test-results/
+omem-web/e2e-screenshots/
+omem-web/*.png
+omem-web/screenshot*
+omem-web/handoff.md
+omem-web/AGENTS.md
+omem-web/README.md
 
 # === Plugin web output (built by scripts/build-plugin-web.sh) ===
 plugins/opencode/web/
