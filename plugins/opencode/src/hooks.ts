@@ -513,20 +513,16 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         if (didInjectProfile) {
           appendToSystem(output.system, profileBlock);
           logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
-        }
 
-        createEventAndReturn({
-          keptCount: 0,
-          discardedCount: 0,
-          actualProfileInjected: didInjectProfile,
-          actualProfileContent: didInjectProfile ? profileBlock : undefined,
-          actualInjectedCount: 0,
-        });
+          createEventAndReturn({
+            keptCount: 0,
+            discardedCount: 0,
+            actualProfileInjected: true,
+            actualProfileContent: profileBlock,
+            actualInjectedCount: 0,
+          });
 
-        if (didInjectProfile) {
           showToast(tui, "👨 Profile Injected", `${profileCountText} · no recall needed`, "success", toastDelayMs);
-        } else {
-          showToast(tui, "🧠 Cerebro", "profile cached · no recall needed", "info", toastDelayMs);
         }
         return;
       }
