@@ -44,7 +44,9 @@ function getMimeType(ext: string): string {
 // ── Safe path resolver (prevent traversal) ───────────────────────────────
 
 function resolveSafe(baseDir: string, pathname: string): string | null {
-  const resolved = path.resolve(baseDir, pathname);
+  // Strip leading slash so path.resolve treats it as relative
+  const relative = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+  const resolved = path.resolve(baseDir, relative || ".");
   if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
     return null;
   }
