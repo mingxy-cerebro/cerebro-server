@@ -494,24 +494,36 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         },
       ): Promise<string | undefined> => {
         try {
+          const memoryLookup = new Map<string, SearchResult>();
+          if (shouldRecallRes.memories) {
+            for (const r of shouldRecallRes.memories) {
+              memoryLookup.set(r.memory.id, r);
+            }
+          }
           const items = clustered
             ? [
                 ...clustered.cluster_summaries.flatMap((cs) =>
-                  cs.key_memories.map((mem) => ({
-                    memory_id: mem.id ?? "",
-                    score: cs.relevance_score,
-                    refine_relevance: undefined,
-                    refine_reasoning: undefined,
-                    is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
-                  }))
+                  cs.key_memories.map((mem) => {
+                    const sr = memoryLookup.get(mem.id ?? "");
+                    return {
+                      memory_id: mem.id ?? "",
+                      score: cs.relevance_score,
+                      refine_relevance: sr?.refine_relevance,
+                      refine_reasoning: sr?.refine_reasoning,
+                      is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
+                    };
+                  })
                 ),
-                ...clustered.standalone_memories.map((mem) => ({
-                  memory_id: mem.id ?? "",
-                  score: 0,
-                  refine_relevance: undefined,
-                  refine_reasoning: undefined,
-                  is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
-                })),
+                ...clustered.standalone_memories.map((mem) => {
+                  const sr = memoryLookup.get(mem.id ?? "");
+                  return {
+                    memory_id: mem.id ?? "",
+                    score: sr?.score ?? 0,
+                    refine_relevance: sr?.refine_relevance,
+                    refine_reasoning: sr?.refine_reasoning,
+                    is_kept: opts.injectedMemoryIds.includes(mem.id ?? ""),
+                  };
+                }),
               ]
             : [
                 ...(shouldRecallRes.memories?.map((r) => ({
