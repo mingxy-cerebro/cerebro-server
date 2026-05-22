@@ -38,6 +38,10 @@ export interface OmemPluginConfig {
   ui: {
     toastDelayMs: number;
   };
+  web?: {
+    enabled?: boolean;
+    port?: number;
+  };
   profile?: {
     ttlMs?: number;
   };
@@ -80,6 +84,9 @@ const DEFAULTS: OmemPluginConfig = {
   },
   ui: {
     toastDelayMs: 7000,
+  },
+  web: {
+    enabled: true,
   },
   profile: {
     ttlMs: 300000,
@@ -164,6 +171,7 @@ function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>)
     logging: { ...base.logging, ...overrides.logging },
     ui: { ...base.ui, ...overrides.ui },
   };
+  result.web = { ...base.web!, ...overrides.web };
   result.profile = { ...base.profile!, ...overrides.profile };
   if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
   if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
@@ -227,7 +235,12 @@ export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPlu
     configLog("config.json load failed, using defaults", { error: String(e) });
   }
 
-  // Apply environment variable overrides (flat OMEM_* → nested paths)
+  // Apply explicit overrides (from opencode.json)
+  if (overrides) {
+    config = deepMerge(config, overrides);
+  }
+
+  // Apply environment variable overrides last — env vars have highest priority
   if (process.env.OMEM_API_URL) config.connection.apiUrl = process.env.OMEM_API_URL;
   if (process.env.OMEM_API_KEY) config.connection.apiKey = process.env.OMEM_API_KEY;
   if (process.env.OMEM_REQUEST_TIMEOUT_MS) {
@@ -246,9 +259,11 @@ export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPlu
     config.recall.maxRecallResults = parseInt(process.env.OMEM_MAX_RECALL_RESULTS, 10) || DEFAULTS.recall.maxRecallResults;
   }
 
-  // Apply explicit overrides (from opencode.json)
-  if (overrides) {
-    config = deepMerge(config, overrides);
+  if (process.env.OMEM_WEB_ENABLED === "false" || process.env.OMEM_WEB_ENABLED === "0") {
+    config.web = { ...config.web!, enabled: false };
+  }
+  if (process.env.OMEM_LOCAL_PORT) {
+    config.web = { ...config.web!, port: parseInt(process.env.OMEM_LOCAL_PORT, 10) || DEFAULTS.web!.port };
   }
 
   // Expand ~ to home directory in logDir

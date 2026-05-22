@@ -17,6 +17,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/memories/batch-delete", post(handlers::batch_delete))
         .route("/v1/memories/batch-get", post(handlers::batch_get_memories))
         .route("/v1/memories/backfill-project-path", post(handlers::backfill_project_path))
+        .route("/v1/memories/project-paths", get(handlers::list_project_paths))
         .route("/v1/memories/merge", post(handlers::merge_memories))
         .route("/v1/memories/batch-visibility", post(handlers::batch_update_visibility))
         .route("/v1/memories/all", delete(handlers::delete_all_memories))

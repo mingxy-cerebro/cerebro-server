@@ -219,6 +219,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "web": {
+      "type": "object",
+      "description": "Built-in web UI server configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable the built-in web UI server (env: OMEM_WEB_ENABLED)",
+          "default": true
+        },
+        "port": {
+          "type": "number",
+          "description": "Port for the web UI server (env: OMEM_LOCAL_PORT takes priority)",
+          "default": 5212,
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -36,6 +36,7 @@ pub struct ListFilter {
     pub memory_type: Option<String>,
     pub state: Option<String>,
     pub visibility: Option<String>,
+    pub project_path: Option<String>,
     pub sort: String,
     pub order: String,
 }
@@ -50,6 +51,7 @@ impl Default for ListFilter {
             memory_type: None,
             state: None,
             visibility: None,
+            project_path: None,
             sort: "created_at".to_string(),
             order: "desc".to_string(),
         }
@@ -2337,6 +2339,42 @@ impl LanceStore {
         }
     }
 
+    /// List all distinct non-empty project_path values in the store.
+    pub async fn list_project_paths(&self) -> Result<Vec<String>, OmemError> {
+        let table = self.table.clone();
+
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .select(Select::columns(&["project_path"]))
+            .only_if("project_path IS NOT NULL AND project_path != ''")
+            .limit(10000)
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("list_project_paths query failed: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
+
+        let mut paths: Vec<String> = batches
+            .iter()
+            .filter_map(|batch| {
+                let col = batch.column_by_name("project_path")?;
+                let arr = col.as_any().downcast_ref::<StringArray>()?;
+                Some(
+                    arr.iter()
+                        .filter_map(|v| v.map(|s| s.to_string()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect();
+
+        paths.sort();
+        paths.dedup();
+        paths.truncate(50);
+        Ok(paths)
+    }
+
     /// Find memories whose provenance.shared_from_memory matches the given original memory ID.
     /// Used by the unshare handler to locate shared copies in a target space.
     pub async fn find_by_provenance_source(
@@ -2491,6 +2529,9 @@ impl LanceStore {
         }
         if let Some(ref v) = filter.visibility {
             conditions.push(format!("visibility = '{}'", escape_sql(v)));
+        }
+        if let Some(ref pp) = filter.project_path {
+            conditions.push(format!("project_path = '{}'", escape_sql(pp)));
         }
 
         if conditions.is_empty() {

@@ -16,6 +16,19 @@ bun.lockb
 bun.lock
 package-lock.json
 
+# === Web frontend ===
+web/playwright-report/
+web/test-results/
+web/e2e-screenshots/
+web/*.png
+web/screenshot*
+web/handoff.md
+web/AGENTS.md
+web/README.md
+
+# === Plugin web output (built by scripts/build-plugin-web.sh) ===
+plugins/opencode/web/
+
 # === 系统 ===
 .DS_Store
 *.swp

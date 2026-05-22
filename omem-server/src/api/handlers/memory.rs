@@ -92,6 +92,7 @@ pub struct ListQuery {
     pub tier: Option<String>,
     pub tags: Option<String>,
     pub visibility: Option<String>,
+    pub project_path: Option<String>,
     #[serde(default = "default_sort")]
     pub sort: String,
     #[serde(default = "default_order")]
@@ -807,6 +808,7 @@ pub async fn list_memories(
         memory_type: params.memory_type,
         state: params.state,
         visibility: params.visibility,
+        project_path: params.project_path,
         sort: params.sort,
         order: params.order,
     };
@@ -840,6 +842,22 @@ pub async fn list_memories(
         limit: params.limit,
         offset: params.offset,
     }))
+}
+
+pub async fn list_project_paths(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<Vec<String>>, OmemError> {
+    let space_id = personal_space_id(&auth.tenant_id);
+    let store = state
+        .store_manager
+        .get_store(&space_id)
+        .await?;
+    let paths = store
+        .list_project_paths()
+        .await
+        .map_err(|e| OmemError::Internal(format!("failed to list project paths: {e}")))?;
+    Ok(Json(paths))
 }
 
 // ── Batch Get ────────────────────────────────────────────────────────
@@ -1165,6 +1183,7 @@ pub async fn get_tier_changes(
         memory_type: None,
         state: Some("active".to_string()),
         visibility: None,
+        project_path: None,
         sort: String::new(),
         order: String::new(),
     };

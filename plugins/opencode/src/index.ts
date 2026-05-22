@@ -3,12 +3,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import type { Server } from "node:http";
 import { CerebroClient } from "./client.js";
 import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, showToast as hooksShowToast } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
 import { loadPluginConfig } from "./config.js";
+import { startWebServer, stopWebServer } from "./web-server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -102,6 +104,34 @@ const OmemPlugin: Plugin = async (input) => {
   let cachedAgentName: string | undefined;
 
   const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
+
+  let webServer: Server | null = null;
+  const webEnabled = config.web?.enabled !== false;
+  if (webEnabled) {
+    try {
+      webServer = await startWebServer({
+        apiUrl: config.connection.apiUrl,
+        port: config.web?.port,
+      });
+      if (webServer) {
+        const addr = webServer.address();
+        const actualPort = typeof addr === "object" && addr ? addr.port : config.web?.port || 5212;
+        hooksShowToast(tui, "🌐 Cerebro Web", `http://localhost:${actualPort}`, "info", 8000);
+        logInfo(`Web UI available at http://localhost:${actualPort}`);
+      }
+    } catch (err) {
+      logError(`Web server start failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const shutdown = async () => {
+    if (webServer) {
+      await stopWebServer(webServer);
+      webServer = null;
+    }
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 
   return {
     config: async (cfg: any) => {

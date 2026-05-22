@@ -18,6 +18,10 @@
     "server",
     "tui"
   ],
+  "scripts": {
+    "build:web": "bash ../../scripts/build-plugin-web.sh",
+    "prepublishOnly": "npm run build:web && npx tsc --noEmit"
+  },
   "keywords": [
     "opencode",
     "memory",
@@ -28,6 +32,7 @@
     "project-isolation"
   ],
   "author": "mingxy-cerebro",
+  "files": ["src/", "web/"],
   "license": "Apache-2.0",
   "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
   "repository": {
