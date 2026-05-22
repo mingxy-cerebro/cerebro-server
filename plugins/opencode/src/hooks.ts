@@ -466,10 +466,14 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         : 0;
 
       const createEventAndReturn = async (
-        injectedCount: number,
-        keptCount: number,
-        discardedCount: number,
-        injectedContent?: string,
+        opts: {
+          keptCount: number;
+          discardedCount: number;
+          injectedContent?: string;
+          actualProfileInjected: boolean;
+          actualProfileContent?: string;
+          actualInjectedCount: number;
+        },
       ): Promise<string | undefined> => {
         try {
           const items = [
@@ -494,12 +498,12 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
             query_text,
             max_score: maxScore,
             llm_confidence: shouldRecallRes.confidence ?? 0,
-            profile_injected: profileInjected,
-            kept_count: keptCount,
-            discarded_count: discardedCount,
-            injected_count: injectedCount,
-            profile_content: profileInjected && profileBlock ? profileBlock : undefined,
-            injected_content: injectedContent,
+            profile_injected: opts.actualProfileInjected,
+            kept_count: opts.keptCount,
+            discarded_count: opts.discardedCount,
+            injected_count: opts.actualInjectedCount,
+            profile_content: opts.actualProfileContent,
+            injected_content: opts.injectedContent,
             items: items.length > 0 ? items : undefined,
           });
           return result?.event_id;
@@ -512,6 +516,13 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       if (!shouldRecallRes.should_recall) {
         if (profileBlock) {
           appendToSystem(output.system, profileBlock);
+          createEventAndReturn({
+            keptCount: 0,
+            discardedCount: 0,
+            actualProfileInjected: true,
+            actualProfileContent: profileBlock,
+            actualInjectedCount: 0,
+          });
           logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
         }
         if (profileInjected && !lastInjected) {
@@ -528,7 +539,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       logDebug("autoRecallHook dedup", { totalResults: results.length, existingCount: existingIds.size, newCount: newResults.length });
 
       // --- Token Budget Calculation ---
-      const profileChars = profileInjected ? profileBlock.length : 0;
+      const profileChars = profileBlock ? profileBlock.length : 0;
       const budgetRemaining = maxContentChars - profileChars;
       if (budgetRemaining < 0) {
         logDebug("autoRecallHook budget overflow", { profileChars, maxContentChars, deficit: -budgetRemaining });
@@ -562,7 +573,37 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       injectedMemoryIds.set(input.sessionID, new Set([...existingIds, ...newIds]));
       logDebug("autoRecallHook injection complete", { newIds: newIds.length, clustered: !!clustered, sessionId: input.sessionID });
 
-      await createEventAndReturn(newResults.length, storedMemoryIds.length, storedDiscardedIds.length, block || undefined);
+      const allAlreadyInjected = results.length > 0 && newResults.length === 0;
+      const didInjectProfile = !!profileBlock;
+      const didInjectContext = !!block;
+      if (didInjectContext || didInjectProfile) {
+        const actualInjectedCount = clustered
+          ? (clustered.cluster_summaries.reduce((s, cs) => s + cs.member_count, 0) + clustered.standalone_memories.length)
+          : newResults.length;
+
+        createEventAndReturn({
+          keptCount: storedMemoryIds.length,
+          discardedCount: storedDiscardedIds.length,
+          injectedContent: didInjectContext ? block : undefined,
+          actualProfileInjected: didInjectProfile,
+          actualProfileContent: didInjectProfile ? profileBlock : undefined,
+          actualInjectedCount,
+        });
+      }
+
+      // --- Toast ---
+      if (allAlreadyInjected && !didInjectContext) {
+        // dedup场景：无新context，可能注入了缓存的profile
+        if (didInjectProfile) {
+          showToast(tui, "👨 Profile Injected", `${profileCountText} · all memories already injected`, "success", toastDelayMs);
+        }
+        // dedup无profile → 静默
+        return;
+      }
+      if (!didInjectContext && !didInjectProfile) {
+        // 无任何注入 → 静默
+        return;
+      }
 
       const memDynamic = newResults.filter((r) => r.memory.memory_type === "fact" || r.memory.memory_type === "event").length;
       const memStatic = newResults.filter((r) => r.memory.memory_type === "pinned" || r.memory.memory_type === "preference").length;
@@ -584,13 +625,13 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       if (clustered) {
         const clusterCount = clustered.cluster_summaries.length;
         const standaloneCount = clustered.standalone_memories.length;
-        toastTitle = `🧠 Context Injected · ${clusterCount} 主题簇${standaloneCount > 0 ? ` · ${standaloneCount} 补充` : ""}`;
-        toastMessage = profileInjected 
-          ? `Profile: ${profileCountText} · 聚合记忆展示`
-          : `聚合记忆展示`;
+        toastTitle = `🧠 Context Injected · ${clusterCount} clusters${standaloneCount > 0 ? ` · ${standaloneCount} extras` : ""}`;
+        toastMessage = didInjectProfile
+          ? `Profile: ${profileCountText} · Clustered recall`
+          : `Clustered recall`;
       } else {
         toastTitle = `🧠 Context Injected · ${newResults.length} fragments`;
-        toastMessage = profileInjected 
+        toastMessage = didInjectProfile
           ? `Profile: ${profileCountText} · Memories: ${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`
           : `${memCountMsg.trim()}${catSummary ? ` · ${catSummary}` : ""}`;
       }
@@ -826,6 +867,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       sessionMessages.delete(input.sessionID);
       profileInjectedSessions.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
+      injectedMemoryIds.delete(input.sessionID);
       if (input.sessionID) {
         logDebug("compactingHook cleared session state", { sessionID: input.sessionID });
       }
@@ -1082,6 +1124,7 @@ export function sessionIdleHook(
         sessionMessages.delete(sid);
         profileInjectedSessions.delete(sid);
         firstMessages.delete(sid);
+        injectedMemoryIds.delete(sid);
         logDebug("sessionIdleHook: session.deleted cleanup", { sessionID: sid });
       }
       return;
