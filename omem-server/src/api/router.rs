@@ -117,17 +117,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 .route("/v1/recall-events", get(handlers::list_recall_events).post(handlers::create_recall_event))
 .route("/v1/recall-events/{id}/items", get(handlers::list_recall_event_items))
 .route("/v1/recall-events/{id}/profile-injected", patch(handlers::update_recall_event_profile))
-        .route("/v1/clusters", get(handlers::list_clusters))
-        .route("/v1/clusters/batch-delete", post(handlers::batch_delete_clusters))
-        .route("/v1/clusters/all", delete(handlers::delete_all_clusters))
-        .route("/v1/clusters/trigger", post(handlers::trigger_clustering))
-        .route("/v1/clusters/jobs", get(handlers::list_clustering_jobs))
-        .route("/v1/clusters/jobs/{id}", get(handlers::get_clustering_job).delete(handlers::delete_clustering_job))
-        .route("/v1/clusters/stats", get(handlers::get_clustering_stats))
-        .route("/v1/clusters/recalculate", post(handlers::recalculate_cluster_counts))
         .route("/v1/memories/re-embed", post(handlers::reembed_memories))
         .route("/v1/memories/optimize", post(handlers::optimize_memories))
-        .route("/v1/clusters/{id}", get(handlers::get_cluster).delete(handlers::delete_cluster))
         .route("/v1/categories/aliases", get(handlers::list_aliases).post(handlers::create_alias))
         .route("/v1/categories/aliases/{alias}", delete(handlers::delete_alias))
         .route("/v1/categories", get(handlers::list_categories).post(handlers::create_category))
@@ -139,8 +130,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/scheduler/status", get(handlers::get_scheduler_status))
         .route("/v1/scheduler/lifecycle/pause", post(handlers::pause_lifecycle))
         .route("/v1/scheduler/lifecycle/resume", post(handlers::resume_lifecycle))
-        .route("/v1/scheduler/clustering/pause", post(handlers::pause_clustering))
-        .route("/v1/scheduler/clustering/resume", post(handlers::resume_clustering))
         // Profile V2 endpoints
         .route(
             "/v2/profile/preferences",

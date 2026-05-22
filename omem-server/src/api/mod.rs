@@ -72,13 +72,6 @@ mod tests {
         let embed: Arc<dyn EmbedService> = Arc::new(TestEmbedder);
         let llm: Arc<dyn LlmService> = Arc::new(TestLlm);
 
-        let cluster_store = Arc::new(
-            crate::cluster::cluster_store::ClusterStore::new(
-                &lancedb::connect(&uri).execute().await.expect("db connect"),
-            )
-            .await
-            .expect("cluster store"),
-        );
         let sqlite_store = Arc::new(SqliteStore::new_in_memory().expect("sqlite store"));
         {
             let conn = sqlite_store.conn().lock().expect("sqlite lock");
@@ -97,9 +90,7 @@ mod tests {
             space_store,
             embed,
             llm: llm.clone(),
-            recall_llm: llm.clone(),
-            cluster_llm: llm,
-            cluster_store,
+            recall_llm: llm,
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -135,13 +126,6 @@ mod tests {
 
         let embed: Arc<dyn EmbedService> = Arc::new(TestEmbedder);
 
-        let cluster_store = Arc::new(
-            crate::cluster::cluster_store::ClusterStore::new(
-                &lancedb::connect(&uri).execute().await.expect("db connect"),
-            )
-            .await
-            .expect("cluster store"),
-        );
         let sqlite_store = Arc::new(SqliteStore::new_in_memory().expect("sqlite store"));
         {
             let conn = sqlite_store.conn().lock().expect("sqlite lock");
@@ -160,9 +144,7 @@ mod tests {
             space_store,
             embed,
             llm: llm.clone(),
-            recall_llm: llm.clone(),
-            cluster_llm: llm,
-            cluster_store,
+            recall_llm: llm,
             config: OmemConfig::default(),
             import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
             reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),

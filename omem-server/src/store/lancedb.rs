@@ -1803,101 +1803,6 @@ impl LanceStore {
         Ok(())
     }
 
-    pub async fn update_memory_cluster_id(
-        &self,
-        memory_id: &str,
-        cluster_id: Option<&str>,
-        is_anchor: bool,
-    ) -> Result<(), OmemError> {
-        let table = self.table.clone();
-        let safe_id = escape_sql(memory_id);
-        let cluster_value = match cluster_id {
-            Some(cid) => format!("'{}'", escape_sql(cid)),
-            None => "null".to_string(),
-        };
-        table
-            .update()
-            .only_if(format!("id = '{safe_id}'"))
-            .column("cluster_id", cluster_value)
-            .column("is_cluster_anchor", if is_anchor { "true" } else { "false" })
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("update cluster_id failed: {e}")))?;
-        self.after_mutation();
-        Ok(())
-    }
-
-    pub async fn batch_update_cluster_ids(
-        &self,
-        assignments: &[(String, Option<String>, bool)],
-    ) -> Result<(), OmemError> {
-        if assignments.is_empty() {
-            return Ok(());
-        }
-
-        // Step 1: Group by cluster_id, set cluster_id for all members
-        let mut groups: std::collections::HashMap<Option<String>, Vec<String>> = std::collections::HashMap::new();
-        let mut anchors_to_set: Vec<(String, String)> = Vec::new(); // (memory_id, cluster_id)
-        for (memory_id, cluster_id, is_anchor) in assignments {
-            groups.entry(cluster_id.clone()).or_default().push(memory_id.clone());
-            if *is_anchor {
-                if let Some(cid) = cluster_id {
-                    anchors_to_set.push((memory_id.clone(), cid.clone()));
-                }
-            }
-        }
-
-        for (cluster_id, member_ids) in groups {
-            let id_list: Vec<String> = member_ids.iter()
-                .map(|id| format!("'{}'", escape_sql(id)))
-                .collect();
-            let filter = format!("id IN ({})", id_list.join(","));
-
-            let cluster_value = match &cluster_id {
-                Some(cid) => format!("'{}'", escape_sql(cid)),
-                None => "null".to_string(),
-            };
-
-            self.table.clone()
-                .update()
-                .only_if(filter)
-                .column("cluster_id", cluster_value)
-                .column("is_cluster_anchor", "false")
-                .execute()
-                .await
-                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids set cluster_id failed: {e}")))?;
-        }
-
-        // Step 2: Set is_cluster_anchor=true for anchors individually
-        // LanceDB does not support CASE WHEN expressions
-        for (anchor_id, _cluster_id) in anchors_to_set {
-            self.table.clone()
-                .update()
-                .only_if(format!("id = '{}'", escape_sql(&anchor_id)))
-                .column("is_cluster_anchor", "true")
-                .execute()
-                .await
-                .map_err(|e| OmemError::Storage(format!("batch_update_cluster_ids set anchor failed: {e}")))?;
-        }
-
-        self.after_mutation();
-        Ok(())
-    }
-
-    pub async fn clear_all_cluster_ids(&self) -> Result<u64, OmemError> {
-        let table = self.table.clone();
-        let result = table
-            .update()
-            .only_if("cluster_id IS NOT NULL")
-            .column("cluster_id", "null")
-            .column("is_cluster_anchor", "false")
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("batch clear cluster_id failed: {e}")))?;
-        self.after_mutation();
-        Ok(result.rows_updated)
-    }
-
     /// Batch increment access_count for multiple memories in a single LanceDB version.
     /// Uses SQL IN clause to update all matching IDs at once (1 version instead of N).
     pub async fn batch_bump_access_count(&self, ids: &[String]) -> Result<(), OmemError> {
@@ -1963,28 +1868,6 @@ impl LanceStore {
             Self::batch_to_memories(&batches)
         }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
         Ok(all.into_iter().skip(offset).take(limit).collect())
-    }
-
-    pub async fn list_by_cluster_id(
-        &self,
-        cluster_id: &str,
-    ) -> Result<Vec<Memory>, OmemError> {
-        let table = self.table.clone();
-        let safe_cid = cluster_id.replace("'", "''");
-        let batches: Vec<RecordBatch> = table
-            .query()
-            .only_if(format!("cluster_id = '{}'", safe_cid))
-            .execute()
-            .await
-            .map_err(|e| OmemError::Storage(format!("list_by_cluster_id query failed: {e}")))?
-            .try_collect()
-            .await
-            .map_err(|e| OmemError::Storage(format!("collect failed: {e}")))?;
-
-        let memories = tokio::task::spawn_blocking(move || {
-            Self::batch_to_memories(&batches)
-        }).await.map_err(|e| OmemError::Internal(format!("spawn_blocking: {e}")))??;
-        Ok(memories)
     }
 
     pub async fn vector_search(

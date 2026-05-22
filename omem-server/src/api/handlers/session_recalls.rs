@@ -109,8 +109,6 @@ pub struct ShouldRecallResponse {
     pub confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_score: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clustered: Option<crate::cluster::aggregator::ClusteredResult>,
 }
 
 fn default_limit() -> usize {
@@ -171,7 +169,6 @@ pub async fn should_recall(
             discarded: None,
             confidence: None,
             similarity_score: None,
-            clustered: None,
         }));
     }
 
@@ -196,7 +193,6 @@ pub async fn should_recall(
                     discarded: None,
                     confidence: None,
                     similarity_score: None,
-                    clustered: None,
                 }));
             }
         }
@@ -222,7 +218,6 @@ pub async fn should_recall(
                         discarded: None,
                         confidence: None,
                         similarity_score: Some(sim),
-                        clustered: None,
                     }));
                 }
                 Some(sim)
@@ -514,27 +509,8 @@ pub async fn should_recall(
             discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
             confidence: Some(confidence),
             similarity_score,
-            clustered: None,
         }));
     }
-
-    let clustered = {
-        let aggregator = crate::cluster::aggregator::ClusterAggregator::new(state.cluster_store.clone());
-        match aggregator.aggregate(memories.iter().map(|m| m.memory.clone()).collect()).await {
-            Ok(clustered) => {
-                tracing::info!(
-                    cluster_count = clustered.cluster_summaries.len(),
-                    standalone_count = clustered.standalone_memories.len(),
-                    "session_recall_aggregated"
-                );
-                Some(clustered)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "session_recall_aggregation_failed");
-                None
-            }
-        }
-    };
 
     let recalled_ids: Vec<String> = memories.iter().map(|r| r.memory.id.clone()).collect();
     if !recalled_ids.is_empty() {
@@ -550,7 +526,6 @@ pub async fn should_recall(
         discarded: if discarded_items.is_empty() { None } else { Some(discarded_items) },
         confidence: Some(confidence),
         similarity_score,
-        clustered,
     }))
 }
 

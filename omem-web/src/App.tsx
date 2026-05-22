@@ -12,9 +12,6 @@ import { SessionDetailPage } from '@/views/sessions/session-detail'
 import { SpacesPage } from '@/views/spaces/spaces'
 import { AnalyticsPage } from '@/views/analytics/analytics'
 import { TierHistoryPage } from '@/views/tier-history/tier-history'
-import { ClusterManagementPage } from '@/views/clusters/cluster-management'
-import { ClusterListPage } from '@/views/clusters/cluster-list'
-import { ClusterDetailPage } from '@/views/clusters/cluster-detail'
 import { LifecyclePage } from '@/views/lifecycle/lifecycle-page'
 import { ImportPage } from '@/views/import/import-page'
 import { SettingsPage } from '@/views/settings/settings-page'
@@ -56,9 +53,6 @@ function App() {
           <Route path="sessions/:id" element={<SessionDetailPage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
           <Route path="tier-history" element={<TierHistoryPage />} />
-          <Route path="clusters" element={<ClusterManagementPage />} />
-          <Route path="clusters/list" element={<ClusterListPage />} />
-          <Route path="clusters/:id" element={<ClusterDetailPage />} />
           <Route path="lifecycle" element={<LifecyclePage />} />
           <Route path="import" element={<ImportPage />} />
           <Route path="profile" element={<ProfilePage />} />

@@ -5,9 +5,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use omem_server::api::{build_router, AppState};
 use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
-use omem_server::cluster::cluster_store::ClusterStore;
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
-use omem_server::llm::{create_llm_service, create_cluster_llm_service, create_profile_llm_service, create_recall_llm_service, LlmService};
+use omem_server::llm::{create_llm_service, create_profile_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
 use omem_server::domain::category::CategoryRegistry;
 use omem_server::profile_v2::store::ProfileStore;
@@ -136,25 +135,6 @@ async fn main() {
             .expect("failed to create recall LLM service"),
     );
 
-    let cluster_llm: Arc<dyn LlmService> = if !config.cluster_llm_provider.is_empty() {
-        match create_cluster_llm_service(&config).await {
-            Ok(svc) => Arc::from(svc),
-            Err(e) => {
-                tracing::warn!("Failed to create cluster_llm: {e}, falling back to primary llm");
-                llm.clone()
-            }
-        }
-    } else {
-        llm.clone()
-    };
-
-    let cluster_store = Arc::new(
-        ClusterStore::new(&lancedb::connect(&base_uri).execute().await.expect("db connect")
-        )
-        .await
-        .expect("failed to create cluster store")
-    );
-
     let state = Arc::new(AppState {
         store_manager,
         tenant_store,
@@ -162,8 +142,6 @@ async fn main() {
         embed,
         llm,
         recall_llm,
-        cluster_llm,
-        cluster_store,
         config: config.clone(),
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -196,7 +174,6 @@ async fn main() {
         let lifecycle_scheduler = Arc::new(
             LifecycleScheduler::new(
                 state.store_manager.clone(),
-                state.cluster_store.clone(),
                 scheduler_interval,
                 config.scheduler_run_on_start,
             )

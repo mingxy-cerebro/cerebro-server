@@ -8,8 +8,6 @@ import {
   getSchedulerStatus,
   pauseLifecycle,
   resumeLifecycle,
-  pauseClustering,
-  resumeClustering,
 } from "@/api/scheduler"
 import {
   Play,
@@ -29,7 +27,6 @@ interface SchedulerState {
 
 interface StatusData {
   lifecycle: SchedulerState
-  clustering: SchedulerState
 }
 
 function StatusSkeleton() {
@@ -203,34 +200,6 @@ export function SchedulerPage() {
     }
   }
 
-  const handlePauseClustering = async () => {
-    try {
-      setActionLoading("pause-clustering")
-      const res = await pauseClustering()
-      toast.success(res.action)
-      loadStatus()
-    } catch (err) {
-      console.error("Failed to pause clustering:", err)
-      toast.error("暂停归簇调度器失败")
-    } finally {
-      setActionLoading(null)
-    }
-  }
-
-  const handleResumeClustering = async () => {
-    try {
-      setActionLoading("resume-clustering")
-      const res = await resumeClustering()
-      toast.success(res.action)
-      loadStatus()
-    } catch (err) {
-      console.error("Failed to resume clustering:", err)
-      toast.error("恢复归簇调度器失败")
-    } finally {
-      setActionLoading(null)
-    }
-  }
-
   return (
     <div className="space-y-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between">
@@ -240,7 +209,7 @@ export function SchedulerPage() {
             调度器控制
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            管理生命周期和归簇调度器的运行状态
+            管理生命周期调度器的运行状态
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={loadStatus} disabled={loading}>
@@ -252,24 +221,14 @@ export function SchedulerPage() {
       {loading && !status ? (
         <StatusSkeleton />
       ) : status ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <SchedulerCard
-            title="Lifecycle Scheduler"
-            description="生命周期评估与衰减计算"
-            state={status.lifecycle}
-            loading={actionLoading === "pause-lifecycle" || actionLoading === "resume-lifecycle"}
-            onPause={handlePauseLifecycle}
-            onResume={handleResumeLifecycle}
-          />
-          <SchedulerCard
-            title="Clustering Scheduler"
-            description="记忆归簇与关联任务"
-            state={status.clustering}
-            loading={actionLoading === "pause-clustering" || actionLoading === "resume-clustering"}
-            onPause={handlePauseClustering}
-            onResume={handleResumeClustering}
-          />
-        </div>
+        <SchedulerCard
+          title="Lifecycle Scheduler"
+          description="生命周期评估与衰减计算"
+          state={status.lifecycle}
+          loading={actionLoading === "pause-lifecycle" || actionLoading === "resume-lifecycle"}
+          onPause={handlePauseLifecycle}
+          onResume={handleResumeLifecycle}
+        />
       ) : (
         <Card>
           <CardContent className="py-8 text-center">

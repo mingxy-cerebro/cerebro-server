@@ -9,7 +9,6 @@ import {
   ChevronRight,
   User,
   History,
-  Layers,
   Timer,
   BookOpen,
 } from "lucide-react"
@@ -22,8 +21,6 @@ const navItems = [
   { icon: Home, label: "空间管理", path: "/spaces" },
   { icon: BarChart3, label: "统计分析", path: "/analytics" },
   { icon: History, label: "等级变更", path: "/tier-history" },
-  { icon: Layers, label: "簇列表", path: "/clusters/list" },
-  { icon: Layers, label: "归簇管理", path: "/clusters" },
   { icon: Timer, label: "生命周期", path: "/lifecycle" },
   { icon: Import, label: "批量导入", path: "/import" },
   { icon: BookOpen, label: "分类字典", path: "/categories" },
@@ -44,11 +41,7 @@ export function AppSidebar() {
       </div>
       <nav className="flex-1 space-y-0.5 p-2">
         {navItems.map((item) => {
-          const isActive = item.path === "/clusters/list"
-            ? location.pathname.startsWith("/clusters") && location.pathname !== "/clusters"
-            : item.path === "/clusters"
-              ? location.pathname === "/clusters"
-              : location.pathname.startsWith(item.path)
+          const isActive = location.pathname.startsWith(item.path)
           return (
             <Link
               key={item.path}

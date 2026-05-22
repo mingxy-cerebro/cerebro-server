@@ -20,12 +20,6 @@ pub struct OmemConfig {
     pub recall_llm_model: String,
     pub recall_llm_base_url: String,
 
-    // Cluster LLM (cheaper model for clustering/profile tasks, e.g. Qwen3.5-4B via SiliconFlow)
-    pub cluster_llm_provider: String,
-    pub cluster_llm_api_key: String,
-    pub cluster_llm_model: String,
-    pub cluster_llm_base_url: String,
-
     pub scheduler_interval_secs: u64,
     pub scheduler_run_on_start: bool,
 
@@ -40,28 +34,6 @@ pub struct OmemConfig {
     pub admission_reject_threshold: Option<f32>,
     /// Custom admission admit threshold (overrides preset). Default: None
     pub admission_admit_threshold: Option<f32>,
-
-    // Clustering configuration
-    /// Minimum similarity score (0.0-1.0) for a memory to be considered for cluster assignment.
-    /// Memories with similarity below this threshold will create new clusters.
-    /// Default: 0.75
-    pub cluster_similarity_threshold: f32,
-    
-    /// Similarity score (0.0-1.0) above which memories are automatically assigned to existing clusters
-    /// without LLM judgment. Higher values = more conservative assignments.
-    /// Default: 0.90
-    pub cluster_auto_merge_threshold: f32,
-    
-    /// Number of candidate clusters to search for when assigning a memory.
-    /// Higher values = more thorough search but slower.
-    /// Default: 5
-    pub cluster_candidate_count: usize,
-    
-    /// Whether to use LLM for judging cluster assignments in the ambiguous range
-    /// (between similarity_threshold and auto_merge_threshold).
-    /// Set to "false" to disable LLM judgment and use similarity scores only.
-    /// Default: true
-    pub cluster_llm_judge_enabled: bool,
 
     // Lifecycle decay configuration
     pub decay_half_life_days: f32,
@@ -141,20 +113,12 @@ impl Default for OmemConfig {
             recall_llm_api_key: String::new(),
             recall_llm_model: String::new(),
             recall_llm_base_url: String::new(),
-            cluster_llm_provider: String::new(),
-            cluster_llm_api_key: String::new(),
-            cluster_llm_model: String::new(),
-            cluster_llm_base_url: String::new(),
             scheduler_interval_secs: 21600,
             scheduler_run_on_start: true,
             should_recall_min_interval_secs: 30,
             admission_preset: "high_recall".to_string(),
             admission_reject_threshold: None,
             admission_admit_threshold: None,
-            cluster_similarity_threshold: 0.55,
-            cluster_auto_merge_threshold: 0.90,
-            cluster_candidate_count: 15,
-            cluster_llm_judge_enabled: true,
             decay_half_life_days: 30.0,
             decay_stale_threshold: 0.3,
             decay_importance_modulation: 1.5,
@@ -224,10 +188,6 @@ impl OmemConfig {
             recall_llm_api_key: env::var("OMEM_RECALL_LLM_API_KEY").unwrap_or(defaults.recall_llm_api_key),
             recall_llm_model: env::var("OMEM_RECALL_LLM_MODEL").unwrap_or(defaults.recall_llm_model),
             recall_llm_base_url: env::var("OMEM_RECALL_LLM_BASE_URL").unwrap_or(defaults.recall_llm_base_url),
-            cluster_llm_provider: env::var("OMEM_CLUSTER_LLM_PROVIDER").unwrap_or(defaults.cluster_llm_provider),
-            cluster_llm_api_key: env::var("OMEM_CLUSTER_LLM_API_KEY").unwrap_or(defaults.cluster_llm_api_key),
-            cluster_llm_model: env::var("OMEM_CLUSTER_LLM_MODEL").unwrap_or(defaults.cluster_llm_model),
-            cluster_llm_base_url: env::var("OMEM_CLUSTER_LLM_BASE_URL").unwrap_or(defaults.cluster_llm_base_url),
             scheduler_interval_secs: env::var("OMEM_SCHEDULER_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -248,22 +208,6 @@ impl OmemConfig {
             admission_admit_threshold: env::var("OMEM_ADMISSION_ADMIT_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok()),
-            cluster_similarity_threshold: env::var("OMEM_CLUSTER_SIMILARITY_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.cluster_similarity_threshold),
-            cluster_auto_merge_threshold: env::var("OMEM_CLUSTER_AUTO_MERGE_THRESHOLD")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.cluster_auto_merge_threshold),
-            cluster_candidate_count: env::var("OMEM_CLUSTER_CANDIDATE_COUNT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.cluster_candidate_count),
-            cluster_llm_judge_enabled: env::var("OMEM_CLUSTER_LLM_JUDGE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(defaults.cluster_llm_judge_enabled),
             decay_half_life_days: env::var("OMEM_DECAY_HALF_LIFE_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())

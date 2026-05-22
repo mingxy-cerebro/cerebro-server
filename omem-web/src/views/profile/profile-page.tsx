@@ -289,7 +289,9 @@ export function ProfilePage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [scopeFilter, setScopeFilter] = useState<string>("all")
   const [slotPage, setSlotPage] = useState(1)
+  const [changelogPage, setChangelogPage] = useState(1)
   const SLOTS_PER_PAGE = 5
+  const CHANGELOG_PER_PAGE = 10
 
   useEffect(() => {
     async function loadAll() {
@@ -843,51 +845,96 @@ export function ProfilePage() {
                   </div>
                 </CardContent>
               </Card>
-            ) : (
-              <div className="relative pl-6 space-y-3 overflow-hidden">
-                <div className="absolute left-[11px] top-2 bottom-2 w-px bg-gradient-to-b from-violet-300 via-sky-300 to-transparent dark:from-violet-500/40 dark:via-sky-500/40 dark:to-transparent" />
-                {changelog.map((entry) => {
-                  const isCreated = entry.action === "created"
-                  const isUpdated = entry.action === "updated"
-                  const actionStyle = isCreated
-                    ? { bg: "from-emerald-400 to-teal-400", color: "text-emerald-700 dark:text-emerald-300", badgeClass: "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/30", symbol: "+", label: "创建" }
-                    : isUpdated
-                      ? { bg: "from-blue-400 to-sky-400", color: "text-blue-700 dark:text-blue-300", badgeClass: "bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-500/30", symbol: "~", label: "更新" }
-                      : { bg: "from-rose-400 to-red-400", color: "text-rose-700 dark:text-rose-300", badgeClass: "bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/30", symbol: "−", label: "删除" }
+            ) : (() => {
+              const totalChangelogPages = Math.ceil(changelog.length / CHANGELOG_PER_PAGE)
+              const paginatedChangelog = changelog.slice((changelogPage - 1) * CHANGELOG_PER_PAGE, changelogPage * CHANGELOG_PER_PAGE)
 
-                  return (
-                    <div key={entry.id} className="relative group">
-                      <div className={cn(
-                        "absolute -left-6 top-2.5 size-[22px] rounded-full bg-gradient-to-br ring-[3px] ring-background flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform",
-                        actionStyle.bg
-                      )}>
-                        <span className="text-[9px] font-bold text-white">{actionStyle.symbol}</span>
-                      </div>
-                      <Card className="overflow-hidden hover:shadow-sm transition-shadow">
-                        <CardContent className="p-4 space-y-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Badge variant="outline" className={cn("text-[10px] gap-1", actionStyle.badgeClass)}>
-                              {isCreated ? <Plus className="size-2.5" /> : isUpdated ? <Edit3 className="size-2.5" /> : <Trash2 className="size-2.5" />}
-                              {actionStyle.label}
-                            </Badge>
-                            {entry.source && (
-                              <span className="text-[10px] text-muted-foreground">{entry.source}</span>
-                            )}
-                            <span className="text-[10px] text-muted-foreground ml-auto">{formatRelativeDate(entry.created_at)}</span>
+              return (
+                <>
+                  <div className="relative pl-6 space-y-3">
+                    <div className="absolute left-[11px] top-2 bottom-2 w-px bg-gradient-to-b from-violet-300 via-sky-300 to-transparent dark:from-violet-500/40 dark:via-sky-500/40 dark:to-transparent" />
+                    {paginatedChangelog.map((entry) => {
+                      const isCreated = entry.action === "created"
+                      const isUpdated = entry.action === "updated"
+                      const actionStyle = isCreated
+                        ? { bg: "from-emerald-400 to-teal-400", color: "text-emerald-700 dark:text-emerald-300", badgeClass: "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/30", symbol: "+", label: "创建" }
+                        : isUpdated
+                          ? { bg: "from-blue-400 to-sky-400", color: "text-blue-700 dark:text-blue-300", badgeClass: "bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-500/30", symbol: "~", label: "更新" }
+                          : { bg: "from-rose-400 to-red-400", color: "text-rose-700 dark:text-rose-300", badgeClass: "bg-rose-50 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-500/30", symbol: "−", label: "删除" }
+
+                      return (
+                        <div key={entry.id} className="relative group min-w-0">
+                          <div className={cn(
+                            "absolute -left-6 top-2.5 size-[22px] rounded-full bg-gradient-to-br ring-[3px] ring-background flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform",
+                            actionStyle.bg
+                          )}>
+                            <span className="text-[9px] font-bold text-white">{actionStyle.symbol}</span>
                           </div>
-                          {entry.old_value && (
-                            <p className="text-xs text-muted-foreground line-through truncate">{entry.old_value}</p>
-                          )}
-                          {entry.new_value && (
-                            <p className="text-sm leading-relaxed">{entry.new_value}</p>
-                          )}
-                        </CardContent>
-                      </Card>
+                          <Card className="overflow-hidden hover:shadow-sm transition-shadow min-w-0">
+                            <CardContent className="p-4 space-y-2 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Badge variant="outline" className={cn("text-[10px] gap-1 shrink-0", actionStyle.badgeClass)}>
+                                  {isCreated ? <Plus className="size-2.5" /> : isUpdated ? <Edit3 className="size-2.5" /> : <Trash2 className="size-2.5" />}
+                                  {actionStyle.label}
+                                </Badge>
+                                {entry.source && (
+                                  <span className="text-[10px] text-muted-foreground truncate">{entry.source}</span>
+                                )}
+                                <span className="text-[10px] text-muted-foreground ml-auto shrink-0">{formatRelativeDate(entry.created_at)}</span>
+                              </div>
+                              {entry.old_value && (
+                                <p className="text-xs text-muted-foreground line-through break-all">{entry.old_value}</p>
+                              )}
+                              {entry.new_value && (
+                                <p className="text-sm leading-relaxed break-words">{entry.new_value}</p>
+                              )}
+                            </CardContent>
+                          </Card>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {totalChangelogPages > 1 && (
+                    <div className="flex items-center justify-center gap-2 pt-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        disabled={changelogPage <= 1}
+                        onClick={() => setChangelogPage(p => Math.max(1, p - 1))}
+                      >
+                        <ChevronLeft className="size-3" />
+                        上一页
+                      </Button>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: totalChangelogPages }, (_, i) => i + 1).map(page => (
+                          <Button
+                            key={page}
+                            variant={changelogPage === page ? "default" : "ghost"}
+                            size="sm"
+                            className="h-7 w-7 text-xs p-0"
+                            onClick={() => setChangelogPage(page)}
+                          >
+                            {page}
+                          </Button>
+                        ))}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        disabled={changelogPage >= totalChangelogPages}
+                        onClick={() => setChangelogPage(p => Math.min(totalChangelogPages, p + 1))}
+                      >
+                        下一页
+                        <ChevronRight className="size-3" />
+                      </Button>
                     </div>
-                  )
-                })}
-              </div>
-            )}
+                  )}
+                </>
+              )
+            })()}
           </TabsContent>
         </Tabs>
       </div>

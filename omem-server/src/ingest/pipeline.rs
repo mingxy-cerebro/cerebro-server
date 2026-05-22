@@ -12,9 +12,6 @@ use crate::ingest::admission::AdmissionControl;
 use crate::ingest::extractor::FactExtractor;
 use crate::ingest::noise::NoiseFilter;
 use crate::ingest::privacy::{is_fully_private, strip_private_content};
-use crate::cluster::assigner::ClusterAssigner;
-use crate::cluster::cluster_store::ClusterStore;
-use crate::cluster::manager::ClusterManager;
 use crate::ingest::reconciler::Reconciler;
 use crate::ingest::session::{SessionMessage, SessionStore};
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest, IngestResponse};
@@ -28,8 +25,6 @@ const MESSAGE_BUDGET: usize = 20;
 pub struct IngestPipeline {
     extractor: Arc<FactExtractor>,
     reconciler: Arc<Reconciler>,
-    cluster_assigner: Arc<ClusterAssigner>,
-    cluster_manager: Arc<ClusterManager>,
     store: Arc<LanceStore>,
     session_store: Arc<SessionStore>,
     noise_filter: Arc<tokio::sync::Mutex<NoiseFilter>>,
@@ -47,7 +42,6 @@ impl IngestPipeline {
         session_store: Arc<SessionStore>,
         embed: Arc<dyn EmbedService>,
         llm: Arc<dyn LlmService>,
-        cluster_store: Arc<ClusterStore>,
         admission_preset: &str,
         admission_reject_threshold: Option<f32>,
         admission_admit_threshold: Option<f32>,
@@ -56,8 +50,6 @@ impl IngestPipeline {
     ) -> Result<Self, OmemError> {
         let extractor = Arc::new(FactExtractor::new(llm.clone()));
         let reconciler = Arc::new(Reconciler::new(llm.clone(), store.clone(), embed.clone(), registry.clone(), tenant_id.clone()));
-        let cluster_manager = Arc::new(ClusterManager::new(cluster_store.clone(), Some(llm.clone())));
-        let cluster_assigner = Arc::new(ClusterAssigner::new(cluster_store, embed.clone()).with_llm(llm.clone()));
         let noise_filter = Arc::new(tokio::sync::Mutex::new(NoiseFilter::new(Vec::new())));
         let category_registry = registry.clone();
         let admission = Arc::new(
@@ -67,8 +59,6 @@ impl IngestPipeline {
         Ok(Self {
             extractor,
             reconciler,
-            cluster_assigner,
-            cluster_manager,
             store,
             session_store,
             noise_filter,
@@ -141,9 +131,7 @@ impl IngestPipeline {
 
         let extractor = self.extractor.clone();
         let reconciler = self.reconciler.clone();
-        let cluster_assigner = self.cluster_assigner.clone();
-        let cluster_manager = self.cluster_manager.clone();
-        let store = self.store.clone();
+        let _store = self.store.clone();
         let noise_filter = self.noise_filter.clone();
         let admission = self.admission.clone();
         let embed = self.embed.clone();
@@ -309,48 +297,6 @@ impl IngestPipeline {
                         "reconciliation complete"
                     );
                     
-                    for mem in &memories {
-                        match cluster_assigner.assign(mem).await {
-                            Ok(result) => {
-                                match result.action {
-                                    crate::cluster::assigner::AssignAction::AutoAssign => {
-                                        if let Some(cid) = result.cluster_id {
-                                            match cluster_manager.assign_to_cluster(&mem.id, &cid, store.clone()
-                                            ).await {
-                                                Ok(_) => info!(memory_id = %mem.id, cluster_id = %cid, "assigned to existing cluster"),
-                                                Err(e) => warn!(error = %e, memory_id = %mem.id, "failed to assign memory to cluster"),
-                                            }
-                                        }
-                                    }
-                                    crate::cluster::assigner::AssignAction::CreateNew => {
-                                        match embed.embed(std::slice::from_ref(&mem.content)).await {
-                                            Ok(vectors) => {
-                                                if let Some(vector) = vectors.first() {
-                                                    match cluster_manager.create_cluster(mem, vector, mem.tags.clone()).await {
-                                                        Ok(cluster) => {
-                                                            // 回写 memory.cluster_id，否则召回时聚合器找不到簇关系
-                                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
-                                                                warn!(error = %e, memory_id = %mem.id, "failed to link memory to new cluster");
-                                                            } else {
-                                                                info!(memory_id = %mem.id, cluster_id = %cluster.id, "created new cluster and linked memory");
-                                                            }
-                                                        }
-                                                        Err(e) => warn!(error = %e, memory_id = %mem.id, "failed to create cluster"),
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => warn!(error = %e, memory_id = %mem.id, "failed to embed for cluster creation"),
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, memory_id = %mem.id, "cluster assignment failed");
-                            }
-                        }
-                    }
-
                     if let Some(engine) = induction_engine {
                         let candidate_texts: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
                         let ind_tenant = tenant_id.clone();
@@ -565,9 +511,6 @@ mod tests {
         session_store.init_table().await.expect("init sessions");
 
         let embed: Arc<dyn EmbedService> = Arc::new(MockEmbed);
-        let cluster_store = Arc::new(
-            ClusterStore::new(store.db()).await.expect("cluster store")
-        );
         let sqlite = SqliteStore::new_in_memory().expect("sqlite");
         let conn = sqlite.conn().lock().expect("lock");
         sqlite_schema::create_tables(&conn).expect("tables");
@@ -579,7 +522,6 @@ mod tests {
             session_store.clone(),
             embed,
             llm,
-            cluster_store,
             "balanced",
             None,
             None,

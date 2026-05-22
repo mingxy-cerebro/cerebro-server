@@ -229,7 +229,6 @@ pub async fn create_memory(
                 session_store,
                 state.embed.clone(),
                 state.llm.clone(),
-                state.cluster_store.clone(),
                 &state.config.admission_preset,
                 state.config.admission_reject_threshold,
                 state.config.admission_admit_threshold,
@@ -1481,8 +1480,6 @@ pub async fn session_ingest(
             entry.value().0.clone()
         };
         let _session_guard = lock_arc.lock().await;
-        let cluster_store = state.cluster_store.clone();
-        let llm_for_cluster = Some(state.llm.clone());
         let store = match state
             .store_manager
             .get_store(&personal_space_id(&tenant_id))
@@ -1494,13 +1491,6 @@ pub async fn session_ingest(
                 return;
             }
         };
-
-        let cluster_assigner = crate::cluster::assigner::ClusterAssigner::new(
-            cluster_store.clone(),
-            state.embed.clone(),
-        )
-        .with_llm(state.llm.clone())
-        .with_lance_store(Some(store.clone()));
 
         // 获取同session的EMOTIONAL记忆摘要（避免重复提取 + 用于追加）
         let emotional_summary = fetch_session_emotional_memory(
@@ -1593,6 +1583,7 @@ pub async fn session_ingest(
 
         let mut stored = 0usize;
         let mut created_memories: Vec<(Memory, Option<Vec<f32>>)> = Vec::new();
+        let mut refined_texts: Vec<String> = Vec::new();
         let mut work_original_parent_id: Option<String> = None;
         let mut emotional_original_parent_id: Option<String> = None;
 
@@ -1917,6 +1908,7 @@ pub async fn session_ingest(
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
                             } else {
                                 tracing::info!(memory_id = %existing.id, "session_ingest: appended to existing emotional memory (same topic)");
+                                refined_texts.push(new_content.clone());
                                 existing_emotional = Some(existing);
                                 appended = true;
                             }
@@ -1952,6 +1944,7 @@ pub async fn session_ingest(
                                     continue;
                                 }
                                 tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback emotional memory (same topic, shortest fit)");
+                                refined_texts.push(new_content.clone());
                                 existing_emotional = Some(mem);
                                 appended = true;
                                 break;
@@ -2019,6 +2012,7 @@ pub async fn session_ingest(
                                         "session_ingest: BUG - refined content exceeds 3000 chars despite ≤500 truncation"
                                     );
                                 }
+                                refined_texts.push(refined.content.clone());
                                 existing_work_memory = Some(refined);
                                 continue;
                             }
@@ -2091,6 +2085,7 @@ pub async fn session_ingest(
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
                             } else {
                                 tracing::info!(memory_id = %existing.id, "session_ingest: updated WORK memory (same topic)");
+                                refined_texts.push(new_content.clone());
                                 existing_work_memory = Some(existing);
                                 appended = true;
                             }
@@ -2101,6 +2096,7 @@ pub async fn session_ingest(
                                     work_original_parent_id = Some(existing.id.clone());
                                 }
                                 add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                refined_texts.push(new_content.clone());
                                 existing_work_memory = Some(existing);
                                 appended = true;
                             }
@@ -2137,6 +2133,7 @@ pub async fn session_ingest(
                                     continue;
                                 }
                                 tracing::info!(memory_id = %mem.id, "session_ingest: appended to fallback WORK memory (same topic, shortest fit)");
+                                refined_texts.push(new_content.clone());
                                 existing_work_memory = Some(mem);
                                 appended = true;
                                 break;
@@ -2147,6 +2144,7 @@ pub async fn session_ingest(
                                         work_original_parent_id = Some(mem.id.clone());
                                     }
                                     add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                    refined_texts.push(new_content.clone());
                                     existing_work_memory = Some(mem);
                                     appended = true;
                                     break;
@@ -2266,86 +2264,10 @@ pub async fn session_ingest(
             created_memories.push((memory.clone(), vector.clone()));
         }
 
-        // ── Cluster语义归簇：逐条匹配已有cluster ──
-        if !created_memories.is_empty() {
-            let cluster_manager = crate::cluster::manager::ClusterManager::new(
-                cluster_store.clone(),
-                llm_for_cluster.clone(),
-            );
-
-            for (mem, vector) in &created_memories {
-                match cluster_assigner.assign(mem).await {
-                    Ok(result) => {
-                        match result.action {
-                            crate::cluster::assigner::AssignAction::AutoAssign => {
-                                if let Some(ref cid) = result.cluster_id {
-                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
-                                        Ok(_) => {
-                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: assigned to existing cluster");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to assign to cluster");
-                                        }
-                                    }
-                                }
-                            }
-                            crate::cluster::assigner::AssignAction::CreateNew => {
-                                // 用已有的vector创建cluster（避免重复embed）
-                                if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
-                                        Ok(cluster) => {
-                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
-                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to new cluster");
-                                            } else {
-                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: created new cluster");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to create cluster");
-                                        }
-                                    }
-                                } else {
-                                    tracing::warn!(memory_id = %mem.id, "session_ingest: no vector available for cluster creation");
-                                }
-                            }
-                            crate::cluster::assigner::AssignAction::LlmJudge => {
-                                // LLM裁决：有cluster_id则归入，无则创建新cluster
-                                if let Some(ref cid) = result.cluster_id {
-                                    match cluster_manager.assign_to_cluster(&mem.id, cid, store.clone()).await {
-                                        Ok(_) => {
-                                            tracing::info!(memory_id = %mem.id, cluster_id = %cid, "session_ingest: LLM-judged assignment to existing cluster");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed LLM-judged assignment");
-                                        }
-                                    }
-                                } else if let Some(vec) = vector {
-                                    match cluster_manager.create_cluster(mem, vec, mem.tags.clone()).await {
-                                        Ok(cluster) => {
-                                            if let Err(e) = cluster_manager.assign_to_cluster(&mem.id, &cluster.id, store.clone()).await {
-                                                tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: failed to link to LLM-judged new cluster");
-                                            } else {
-                                                tracing::info!(memory_id = %mem.id, cluster_id = %cluster.id, "session_ingest: LLM-judged new cluster created");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: LLM-judged cluster creation failed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, memory_id = %mem.id, "session_ingest: cluster assignment failed");
-                    }
-                }
-            }
-        }
-
         // --- Profile V2 Induction Trigger ---
         let engine = state.induction_engine.clone();
-        let ind_texts: Vec<String> = created_memories.iter().map(|(m, _)| m.content.clone()).collect();
+        let mut ind_texts: Vec<String> = created_memories.iter().map(|(m, _)| m.content.clone()).collect();
+        ind_texts.extend(refined_texts);
         let ind_tenant = tenant_id.clone();
         if !ind_texts.is_empty() {
             tracing::debug!(texts_count = ind_texts.len(), "triggering profile induction from session_ingest");

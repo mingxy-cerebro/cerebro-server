@@ -42,7 +42,6 @@ interface MemoryItem {
   access_count: number
   tags: string[]
   scope: string
-  cluster_id?: string
   visibility?: string
   created_at: string
   updated_at: string
@@ -652,11 +651,6 @@ export function MemoryListPage() {
                     <Badge variant="outline" className={`text-xs ${getTierBadgeClass(memory.tier)}`}>
                       {getTierLabel(memory.tier)}
                     </Badge>
-                    {memory.cluster_id && (
-                      <Badge variant="outline" className="text-xs bg-blue-50 text-blue-600 border-blue-200" title={memory.cluster_id}>
-                        已归簇 · {memory.cluster_id.slice(0, 8)}...
-                      </Badge>
-                    )}
                     {isPrivateMemory(memory.tags, memory.visibility) && (
                       <Badge
                         variant="outline"
