@@ -333,6 +333,80 @@ export async function buildMemoryInjection(
   };
 }
 
+const injectedSessions = new Set<string>();
+
+export function chatMessageRecallHook(
+  client: CerebroClient,
+  _containerTags: string[],
+  tui: any,
+  config: Partial<OmemPluginConfig> = {},
+  getAgentName?: () => string,
+  directory?: string,
+) {
+  return async (
+    input: { sessionID: string; messageID?: string },
+    output: { message: UserMessage; parts: Part[] },
+  ) => {
+    if (!input.sessionID) return;
+    if (injectedSessions.has(input.sessionID)) return;
+
+    const agentId = getAgentName?.() || process.env.OMEM_AGENT_ID || "opencode";
+    const policy = resolveAgentPolicy(agentId, config);
+    if (policy === "none") {
+      injectedSessions.add(input.sessionID);
+      return;
+    }
+
+    const textContent = output.parts
+      .filter((p: any) => p.type === "text")
+      .map((p: any) => p.text || (p as any).content || "")
+      .join(" ")
+      || (output.message as any).content
+      || "";
+
+    const query = extractUserRequest(textContent);
+
+    const TRIVIAL_PATTERNS = /^(hi|hello|hey|你好|嗨|嗯|ok|okay|好的|收到|\s*)$/i;
+    if (!query || TRIVIAL_PATTERNS.test(query.trim())) {
+      logDebug("chatMessageRecallHook: trivial query, will retry next turn", { sessionId: input.sessionID });
+      return;
+    }
+
+    try {
+      const injection = await buildMemoryInjection(client, directory, query, config);
+
+      const hasContent = (injection.profileCount ?? 0) > 0
+        || (injection.memoryCount ?? 0) > 0
+        || (injection.projectMemoryCount ?? 0) > 0;
+
+      if (injection.text && hasContent && injection.text.length > 20) {
+        injectedSessions.add(input.sessionID);
+
+        output.parts.unshift({
+          type: "text",
+          text: injection.text,
+          synthetic: true,
+        } as any);
+
+        showToast(tui, "🧠 Memory Injected",
+          `${injection.profileCount} prefs · ${injection.projectMemoryCount} project · ${injection.memoryCount} relevant`,
+          "success");
+      } else if (!hasContent) {
+        logDebug("chatMessageRecallHook: no content available, will retry next turn", {
+          sessionId: input.sessionID,
+          profileCount: injection.profileCount,
+          memoryCount: injection.memoryCount,
+          projectMemoryCount: injection.projectMemoryCount,
+        });
+        showToast(tui, "🧠 Memory Unavailable", "API timeout or no memories yet", "warning");
+      }
+    } catch (err) {
+      logErr("chatMessageRecallHook failed", { error: String(err) });
+      showToast(tui, "🧠 Memory Injection Failed", "Check connection", "error");
+    }
+  };
+}
+
 /**
  * Score-weighted budget allocation: high-score memories get more chars.
  * Falls back to uniform distribution when totalScore === 0 or all scores equal.
@@ -860,6 +934,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       lastUserMsgCount.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
       processedMessageIds.delete(input.sessionID);
+      injectedSessions.delete(input.sessionID);
       if (input.sessionID) {
         logDebug("compactingHook cleared session state", { sessionID: input.sessionID });
       }
@@ -870,6 +945,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       profileInjectedSessions.delete(input.sessionID);
       lastUserMsgCount.delete(input.sessionID);
       processedMessageIds.delete(input.sessionID);
+      injectedSessions.delete(input.sessionID);
       logDebug("compactingHook cleared profile TTL for re-injection", { sessionID: input.sessionID });
     }
   };
