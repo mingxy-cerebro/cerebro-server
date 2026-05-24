@@ -51,6 +51,11 @@ pub async fn create_tenant(
 
     state.tenant_store.create(&tenant).await?;
 
+    // Seed default categories for new tenant
+    if let Err(e) = state.category_registry.seed_tenant(&id) {
+        tracing::warn!("Failed to seed categories for new tenant {}: {e}", id);
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let personal_space = Space {
         id: format!("personal/{id}"),
