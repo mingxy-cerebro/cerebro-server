@@ -64,6 +64,15 @@ pub struct OpenAICompatLlm {
     enable_thinking: Option<bool>,
 }
 
+fn resolve_chat_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1/chat/completions")
+    }
+}
+
 impl OpenAICompatLlm {
     pub fn new(config: &OmemConfig) -> Result<Self, OmemError> {
         let base_url = config.llm_base_url.trim_end_matches('/');
@@ -93,13 +102,13 @@ impl OpenAICompatLlm {
 
         Ok(Self {
             client,
-            url: format!("{base_url}/v1/chat/completions"),
+            url: resolve_chat_url(base_url),
             model: config.llm_model.clone(),
             response_format: config
                 .llm_response_format
                 .clone()
                 .map(|t| ResponseFormat { format_type: t }),
-            enable_thinking: None,
+            enable_thinking: Some(false),
         })
     }
 
@@ -131,7 +140,7 @@ impl OpenAICompatLlm {
 
         Ok(Self {
             client,
-            url: format!("{base_url}/v1/chat/completions"),
+            url: resolve_chat_url(base_url),
             model: config.recall_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
@@ -166,7 +175,7 @@ impl OpenAICompatLlm {
 
         Ok(Self {
             client,
-            url: format!("{base_url}/v1/chat/completions"),
+            url: resolve_chat_url(base_url),
             model: config.profile_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
@@ -331,6 +340,20 @@ mod tests {
     }
 
     #[test]
+    fn full_path_used_as_is() {
+        let config = OmemConfig {
+            llm_base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+                .to_string(),
+            ..OmemConfig::default()
+        };
+        let llm = OpenAICompatLlm::new(&config).unwrap();
+        assert_eq!(
+            llm.url,
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
+    }
+
+    #[test]
     fn build_request_structure() {
         let config = OmemConfig::default();
         let llm = OpenAICompatLlm::new(&config).unwrap();
@@ -360,5 +383,29 @@ mod tests {
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][1]["content"], "hello");
         assert!(json.get("response_format").is_none());
+    }
+
+    #[test]
+    fn resolve_chat_url_openai_style() {
+        assert_eq!(
+            super::resolve_chat_url("https://api.openai.com"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn resolve_chat_url_deepseek_style() {
+        assert_eq!(
+            super::resolve_chat_url("https://api.deepseek.com/"),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn resolve_chat_url_zhipu_full_path() {
+        assert_eq!(
+            super::resolve_chat_url("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
     }
 }

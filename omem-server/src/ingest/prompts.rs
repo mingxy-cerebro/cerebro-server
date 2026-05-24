@@ -122,8 +122,12 @@ pub fn build_system_prompt(entity_context: Option<&str>, categories: &[CategoryC
 }
 
 pub fn build_user_prompt(conversation_text: &str, project_name: Option<&str>) -> String {
+    let now = chrono::Local::now();
+    let current_datetime = now.format("%Y-%m-%d %H:%M").to_string();
+
     let mut prompt = format!(
-        "Extract all distinct, atomic facts from the following conversation:\n\n{conversation_text}"
+        "**Current datetime: {} (CST, UTC+8)**\n\nExtract all distinct, atomic facts from the following conversation:\n\n{conversation_text}",
+        current_datetime
     );
     if let Some(name) = project_name {
         prompt.push_str(&format!("\n\n**Project Prefix Rule**: Each extracted fact's summary MUST be prefixed with [{}]. For example: \"[{}] fix memory leak\". For CJK topics: \"修复内存泄漏\" → \"[{}] 修复内存泄漏\".", name, name, name));

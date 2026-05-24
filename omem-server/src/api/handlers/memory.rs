@@ -2003,13 +2003,10 @@ pub async fn session_ingest(
                                     new_len = refined.content.chars().count(),
                                     "session_ingest: WORK refined successfully"
                                 );
-                                // B2: content ≤ 500 after refine_service truncation (P3),
-                                // so 3000-char split never triggers on refine path.
-                                // Defensive check: warn if unexpectedly exceeds 3000 chars.
                                 if refined.content.chars().count() > 3000 {
                                     tracing::warn!(
                                         len = refined.content.chars().count(),
-                                        "session_ingest: BUG - refined content exceeds 3000 chars despite ≤500 truncation"
+                                        "session_ingest: refined content exceeds 3000 chars, should have been truncated by refine_service"
                                     );
                                 }
                                 refined_texts.push(refined.content.clone());

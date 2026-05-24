@@ -65,7 +65,11 @@ Remove all narrative/process description."#;
 pub fn build_refine_prompt(input: &RefineInput) -> (String, String) {
     let system = REFINE_SYSTEM_PROMPT.to_string();
 
+    let now = chrono::Local::now();
+    let current_datetime = now.format("%Y-%m-%d %H:%M").to_string();
+
     let mut user = format!("## Topic: {}\n\n", input.topic);
+    user.push_str(&format!("**Current datetime: {} (CST, UTC+8)**\n\n", current_datetime));
 
     for (i, content) in input.existing_contents.iter().enumerate() {
         user.push_str(&format!("### Existing Memory #{}\n{}\n\n", i + 1, content));

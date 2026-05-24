@@ -15,6 +15,8 @@ const MAX_INPUT_CHARS: usize = 8000;
 const MAX_CHAIN_FOR_REFINE: usize = 3;
 /// 单条旧记忆最大字符数（超过截断）
 const MAX_SINGLE_MEMORY_CHARS: usize = 3000;
+/// 精炼后全文最大字符数（超限截断）
+const MAX_REFINED_CONTENT_CHARS: usize = 3000;
 
 /// BFS遍历Continues/ContinuedBy relation链，收集链上所有Memory实体（含root）
 pub async fn collect_chain_memories(
@@ -150,7 +152,7 @@ pub async fn refine_and_replace(
 
     let refined: RefineOutput = complete_json(&**llm, &system, &user).await?;
 
-    let refined_content = truncate_at_sentence_boundary(&refined.refined_content, 500);
+    let refined_content = truncate_at_sentence_boundary(&refined.refined_content, MAX_REFINED_CONTENT_CHARS);
     let l1_overview = truncate_at_sentence_boundary(&refined.l1_overview, 150);
     let l2_content = truncate_at_sentence_boundary(&refined.l2_content, 300);
     let best_tier_str = chain_memories
