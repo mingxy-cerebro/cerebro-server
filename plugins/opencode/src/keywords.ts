@@ -1,17 +1,7 @@
 const SAVE_KEYWORDS: readonly string[] = [
-  // English
-  "remember", "save this", "don't forget", "keep in mind",
-  "note that", "store this", "memorize",
-  "make a note", "write this down", "jot this down",
-  "for future reference", "bear in mind",
-  "commit to memory", "take note",
-  // Chinese
+  "remember", "save this", "don't forget",
   "记住", "记一下", "保存", "记下来", "别忘了",
-  "记好", "存一下", "记住了",
-  "写下来", "记到", "存起来",
-  // Tool-related
-  "memory_store", "save memory", "store memory",
-  "保存记忆", "存储记忆",
+  "memory_store",
 ] as const;
 
 export function detectSaveKeyword(text: string): boolean {
