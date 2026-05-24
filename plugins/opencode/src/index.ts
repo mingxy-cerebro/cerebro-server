@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { CerebroClient } from "./client.js";
-import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, showToast as hooksShowToast, sessionMessages, firstMessages } from "./hooks.js";
+import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, createToast, sessionMessages, firstMessages } from "./hooks.js";
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
@@ -64,33 +64,30 @@ const OmemPlugin: Plugin = async (input) => {
   } catch {}
 
   const config = loadPluginConfig(overrides as any);
+  const toast = createToast(config);
 
   const cerebroClient = new CerebroClient(config.connection.apiUrl, config.connection.apiKey, config);
 
-  // 启动时检测连接状态
   try {
     await cerebroClient.getStats();
-    hooksShowToast(tui, "🧠 Cerebro · Connected", `Version v${pluginVersion}`, "success", 6000);
     logInfo(`Connected to ${config.connection.apiUrl}`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logError(`Connection failed: ${errMsg}`);
     if (errMsg.includes("[cerebro]")) {
       const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-      hooksShowToast(
+      toast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Server Error`,
         cleanMsg.substring(0, 150),
-        "error",
-        8000
+        "error"
       );
     } else {
-      hooksShowToast(
+      toast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Connection Failed`,
         `Unable to reach ${config.connection.apiUrl}`,
-        "error",
-        8000
+        "error"
       );
     }
   }
@@ -108,6 +105,7 @@ const OmemPlugin: Plugin = async (input) => {
 
   let webServer: Server | null = null;
   const webEnabled = config.web?.enabled !== false;
+  let webPort: number | undefined;
   if (webEnabled) {
     try {
       webServer = await startWebServer({
@@ -116,13 +114,18 @@ const OmemPlugin: Plugin = async (input) => {
       });
       if (webServer) {
         const addr = webServer.address();
-        const actualPort = typeof addr === "object" && addr ? addr.port : config.web?.port || 5212;
-        hooksShowToast(tui, "🌐 Cerebro Web", `http://localhost:${actualPort}`, "info", 8000);
-        logInfo(`Web UI available at http://localhost:${actualPort}`);
+        webPort = typeof addr === "object" && addr ? addr.port : config.web?.port || 5212;
+        logInfo(`Web UI available at http://localhost:${webPort}`);
       }
     } catch (err) {
       logError(`Web server start failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  if (webPort) {
+    toast(tui, "🧠 Connected", `v${pluginVersion}\n🌐 Open http://localhost:${webPort} in browser`, "success");
+  } else {
+    toast(tui, "🧠 Connected", `v${pluginVersion}`, "success");
   }
 
   const shutdown = async () => {
@@ -164,19 +167,25 @@ const OmemPlugin: Plugin = async (input) => {
       }
       if (detectSaveKeyword(textContent)) {
         output.parts.push({
+          id: `prt_cerebro-save-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message?.id,
           type: "text",
           text: KEYWORD_NUDGE,
           synthetic: true,
         } as any);
-        logDebug("keyword nudge pushed via parts.push", { sessionId: input.sessionID });
+        logDebug("save keyword detected, nudge pushed", { sessionId: input.sessionID });
       }
       if (detectRecallKeyword(textContent)) {
         output.parts.push({
+          id: `prt_cerebro-recall-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message?.id,
           type: "text",
           text: RECALL_NUDGE,
           synthetic: true,
         } as any);
-        logDebug("recall nudge pushed via parts.push", { sessionId: input.sessionID });
+        logDebug("recall keyword detected, nudge pushed", { sessionId: input.sessionID });
       }
       const policy = resolveAgentPolicy(agentId, config);
       if (policy !== "none") {

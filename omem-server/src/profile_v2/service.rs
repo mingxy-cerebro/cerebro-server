@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(pc.cache_ttl_secs, 1800);
         assert_eq!(pc.induction_cooldown_secs, 600);
         assert_eq!(pc.induction_threshold, 5);
-        assert_eq!(pc.injection_budget_tokens, 500);
+        assert_eq!(pc.injection_budget_tokens, 3000);
         assert_eq!(pc.max_global_preferences, 20);
         assert_eq!(pc.max_project_preferences, 10);
         assert_eq!(pc.dormant_days, 90);

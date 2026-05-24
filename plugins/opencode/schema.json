@@ -33,7 +33,7 @@
     },
     "content": {
       "type": "object",
-      "description": "Limits for content processing and ingestion",
+      "description": "Limits for content processing and injection",
       "properties": {
         "maxQueryLength": {
           "type": "number",
@@ -44,16 +44,51 @@
         },
         "maxContentChars": {
           "type": "number",
-          "description": "Max content chars sent to the server per ingestion",
+          "description": "Max total characters for the entire memory injection block",
           "default": 30000,
           "minimum": 1000,
           "maximum": 100000
         },
         "maxContentLength": {
           "type": "number",
-          "description": "Max single content item length for auto-capture",
-          "default": 500,
-          "minimum": 100,
+          "description": "Max characters per single content item",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 30000
+        }
+      },
+      "additionalProperties": false
+    },
+    "injection": {
+      "type": "object",
+      "description": "Controls how memories are injected into agent context",
+      "properties": {
+        "recentCount": {
+          "type": "number",
+          "description": "Number of recent project memories to inject",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 20
+        },
+        "searchCount": {
+          "type": "number",
+          "description": "Number of search results to inject",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 30
+        },
+        "recentTruncateChars": {
+          "type": "number",
+          "description": "Truncate each recent memory to this many characters. 0 = no truncation",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "searchTruncateChars": {
+          "type": "number",
+          "description": "Truncate each search result to this many characters. 0 = no truncation",
+          "default": 0,
+          "minimum": 0,
           "maximum": 5000
         }
       },
@@ -75,75 +110,6 @@
           "description": "Ingestion mode: smart = LLM-powered extraction, raw = store as-is",
           "enum": ["smart", "raw"],
           "default": "smart"
-        }
-      },
-      "additionalProperties": false
-    },
-    "recall": {
-      "type": "object",
-      "description": "Tuning for memory retrieval relevance",
-      "properties": {
-        "similarityThreshold": {
-          "type": "number",
-          "description": "Minimum cosine similarity to include a result (0.0-1.0)",
-          "default": 0.4,
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "maxRecallResults": {
-          "type": "number",
-          "description": "Maximum number of memories returned per recall",
-          "default": 10,
-          "minimum": 1,
-          "maximum": 50
-        },
-        "fetchMultiplier": {
-          "type": "number",
-          "description": "Search breadth multiplier: fetch_limit = max_results * N",
-          "default": 3,
-          "minimum": 1,
-          "maximum": 10
-        },
-        "topkCapMultiplier": {
-          "type": "number",
-          "description": "Candidate cap multiplier: topk_cap = max_results * N",
-          "default": 2,
-          "minimum": 1,
-          "maximum": 10
-        },
-        "mmrJaccardThreshold": {
-          "type": "number",
-          "description": "Jaccard similarity threshold for MMR diversity penalty",
-          "default": 0.85,
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "mmrPenaltyFactor": {
-          "type": "number",
-          "description": "Score penalty factor for similar memories in MMR diversity",
-          "default": 0.5,
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "phase2Multiplier": {
-          "type": "number",
-          "description": "Phase2 global fallback search multiplier",
-          "default": 2,
-          "minimum": 1,
-          "maximum": 10
-        },
-        "llmMaxEval": {
-          "type": "number",
-          "description": "Maximum candidates sent to LLM for relevance evaluation",
-          "default": 15,
-          "minimum": 1,
-          "maximum": 50
-        },
-        "refineStrategy": {
-          "type": "string",
-          "description": "LLM refinement strategy: strict (high only), balanced (high+medium), loose (keep all)",
-          "enum": ["strict", "balanced", "loose"],
-          "default": "loose"
         }
       },
       "additionalProperties": false
@@ -177,10 +143,29 @@
       "properties": {
         "toastDelayMs": {
           "type": "number",
-          "description": "Delay in ms before toast notifications auto-dismiss",
+          "description": "Delay in ms before showing toast notifications",
           "default": 7000,
           "minimum": 1000,
-          "maximum": 30000
+          "maximum": 60000
+        }
+      },
+      "additionalProperties": false
+    },
+    "web": {
+      "type": "object",
+      "description": "Built-in web UI server configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable the built-in web UI server (env: OMEM_WEB_ENABLED)",
+          "default": true
+        },
+        "port": {
+          "type": "number",
+          "description": "Port for the web UI server (env: OMEM_LOCAL_PORT takes priority)",
+          "default": 5212,
+          "minimum": 1024,
+          "maximum": 65535
         }
       },
       "additionalProperties": false
@@ -205,39 +190,6 @@
       "description": "Default policy for agents not listed in agentMemoryPolicy",
       "enum": ["none", "readonly", "readwrite"],
       "default": "readwrite"
-    },
-    "profile": {
-      "type": "object",
-      "description": "Profile injection configuration",
-      "properties": {
-        "ttlMs": {
-          "type": "number",
-          "description": "Profile injection TTL (milliseconds). Within TTL, profile injection is skipped but context injection proceeds normally",
-          "default": 300000,
-          "minimum": 0,
-          "maximum": 3600000
-        }
-      },
-      "additionalProperties": false
-    },
-    "web": {
-      "type": "object",
-      "description": "Built-in web UI server configuration",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Enable or disable the built-in web UI server (env: OMEM_WEB_ENABLED)",
-          "default": true
-        },
-        "port": {
-          "type": "number",
-          "description": "Port for the web UI server (env: OMEM_LOCAL_PORT takes priority)",
-          "default": 5212,
-          "minimum": 1024,
-          "maximum": 65535
-        }
-      },
-      "additionalProperties": false
     }
   },
   "additionalProperties": false

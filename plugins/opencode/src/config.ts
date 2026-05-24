@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 // ── Nested config interface ──────────────────────────────────────────
 
-export interface OmemPluginConfig {
+export interface CerebroPluginConfig {
   connection: {
     apiUrl: string;
     apiKey: string;
@@ -15,20 +15,15 @@ export interface OmemPluginConfig {
     maxContentChars: number;
     maxContentLength: number;
   };
+  injection: {
+    recentCount: number;
+    searchCount: number;
+    recentTruncateChars: number;
+    searchTruncateChars: number;
+  };
   ingest: {
     autoCaptureThreshold: number;
     ingestMode: "smart" | "raw";
-  };
-  recall: {
-    similarityThreshold: number;
-    maxRecallResults: number;
-    fetchMultiplier: number;
-    topkCapMultiplier: number;
-    mmrJaccardThreshold: number;
-    mmrPenaltyFactor: number;
-    phase2Multiplier: number;
-    llmMaxEval: number;
-    refineStrategy: "strict" | "balanced" | "loose";
   };
   logging: {
     logEnabled: boolean;
@@ -42,16 +37,13 @@ export interface OmemPluginConfig {
     enabled?: boolean;
     port?: number;
   };
-  profile?: {
-    ttlMs?: number;
-  };
   agentMemoryPolicy?: Record<string, "none" | "readonly" | "readwrite">;
   defaultPolicy?: "none" | "readonly" | "readwrite";
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────
 
-const DEFAULTS: OmemPluginConfig = {
+const DEFAULTS: CerebroPluginConfig = {
   connection: {
     apiUrl: "https://www.mengxy.cc",
     apiKey: "",
@@ -60,22 +52,17 @@ const DEFAULTS: OmemPluginConfig = {
   content: {
     maxQueryLength: 200,
     maxContentChars: 30000,
-    maxContentLength: 500,
+    maxContentLength: 3000,
+  },
+  injection: {
+    recentCount: 5,
+    searchCount: 10,
+    recentTruncateChars: 0,   // 0 = 不截断
+    searchTruncateChars: 0,   // 0 = 不截断
   },
   ingest: {
     autoCaptureThreshold: 5,
     ingestMode: "smart",
-  },
-  recall: {
-    similarityThreshold: 0.4,
-    maxRecallResults: 10,
-    fetchMultiplier: 3,
-    topkCapMultiplier: 2,
-    mmrJaccardThreshold: 0.85,
-    mmrPenaltyFactor: 0.5,
-    phase2Multiplier: 2,
-    llmMaxEval: 15,
-    refineStrategy: "loose",
   },
   logging: {
     logEnabled: true,
@@ -87,9 +74,6 @@ const DEFAULTS: OmemPluginConfig = {
   },
   web: {
     enabled: true,
-  },
-  profile: {
-    ttlMs: 300000,
   },
 };
 
@@ -105,8 +89,6 @@ interface FlatConfig {
   maxContentLength?: number;
   autoCaptureThreshold?: number;
   ingestMode?: "smart" | "raw";
-  similarityThreshold?: number;
-  maxRecallResults?: number;
   toastDelayMs?: number;
   logEnabled?: boolean;
   logLevel?: "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -119,7 +101,7 @@ function isFlatConfig(cfg: Record<string, unknown>): boolean {
   return "apiUrl" in cfg && !("connection" in cfg);
 }
 
-function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
+function migrateFlatToNested(flat: FlatConfig): CerebroPluginConfig {
   return {
     connection: {
       apiUrl: flat.apiUrl ?? DEFAULTS.connection.apiUrl,
@@ -131,20 +113,10 @@ function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
       maxContentChars: flat.maxContentChars ?? DEFAULTS.content.maxContentChars,
       maxContentLength: flat.maxContentLength ?? DEFAULTS.content.maxContentLength,
     },
+    injection: { ...DEFAULTS.injection },
     ingest: {
       autoCaptureThreshold: flat.autoCaptureThreshold ?? DEFAULTS.ingest.autoCaptureThreshold,
       ingestMode: flat.ingestMode ?? DEFAULTS.ingest.ingestMode,
-    },
-    recall: {
-      similarityThreshold: flat.similarityThreshold ?? DEFAULTS.recall.similarityThreshold,
-      maxRecallResults: flat.maxRecallResults ?? DEFAULTS.recall.maxRecallResults,
-      fetchMultiplier: DEFAULTS.recall.fetchMultiplier,
-      topkCapMultiplier: DEFAULTS.recall.topkCapMultiplier,
-      mmrJaccardThreshold: DEFAULTS.recall.mmrJaccardThreshold,
-      mmrPenaltyFactor: DEFAULTS.recall.mmrPenaltyFactor,
-      phase2Multiplier: DEFAULTS.recall.phase2Multiplier,
-      llmMaxEval: DEFAULTS.recall.llmMaxEval,
-      refineStrategy: DEFAULTS.recall.refineStrategy,
     },
     logging: {
       logEnabled: flat.logEnabled ?? DEFAULTS.logging.logEnabled,
@@ -162,17 +134,16 @@ function migrateFlatToNested(flat: FlatConfig): OmemPluginConfig {
 type IngestMode = "smart" | "raw";
 const INGEST_MODES: ReadonlySet<string> = new Set<IngestMode>(["smart", "raw"]);
 
-function deepMerge(base: OmemPluginConfig, overrides: Partial<OmemPluginConfig>): OmemPluginConfig {
-  const result: OmemPluginConfig = {
+function deepMerge(base: CerebroPluginConfig, overrides: Partial<CerebroPluginConfig>): CerebroPluginConfig {
+  const result: CerebroPluginConfig = {
     connection: { ...base.connection, ...overrides.connection },
     content: { ...base.content, ...overrides.content },
+    injection: { ...base.injection, ...overrides.injection },
     ingest: { ...base.ingest, ...overrides.ingest },
-    recall: { ...base.recall, ...overrides.recall },
     logging: { ...base.logging, ...overrides.logging },
     ui: { ...base.ui, ...overrides.ui },
   };
   result.web = { ...base.web!, ...overrides.web };
-  result.profile = { ...base.profile!, ...overrides.profile };
   if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
   if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
   return result;
@@ -218,8 +189,8 @@ function configLog(message: string, fields?: Record<string, unknown>, level: str
   }
 }
 
-export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPluginConfig {
-  let config: OmemPluginConfig = structuredClone(DEFAULTS);
+export function loadPluginConfig(overrides?: Partial<CerebroPluginConfig>): CerebroPluginConfig {
+  let config: CerebroPluginConfig = structuredClone(DEFAULTS);
 
   // Try loading from config file
   try {
@@ -227,7 +198,7 @@ export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPlu
     const raw = JSON.parse(readFileSync(cfgPath, "utf-8")) as Record<string, unknown>;
 
     // Auto-migrate flat format
-    const parsed: OmemPluginConfig = isFlatConfig(raw) ? migrateFlatToNested(raw as FlatConfig) : raw as unknown as OmemPluginConfig;
+    const parsed: CerebroPluginConfig = isFlatConfig(raw) ? migrateFlatToNested(raw as FlatConfig) : raw as unknown as CerebroPluginConfig;
 
     // Merge nested groups with defaults for safety
     config = deepMerge(config, parsed);
@@ -252,12 +223,6 @@ export function loadPluginConfig(overrides?: Partial<OmemPluginConfig>): OmemPlu
   if (INGEST_MODES.has(process.env.OMEM_INGEST_MODE ?? "")) {
     config.ingest.ingestMode = process.env.OMEM_INGEST_MODE as IngestMode;
   }
-  if (process.env.OMEM_SIMILARITY_THRESHOLD) {
-    config.recall.similarityThreshold = parseFloat(process.env.OMEM_SIMILARITY_THRESHOLD) || DEFAULTS.recall.similarityThreshold;
-  }
-  if (process.env.OMEM_MAX_RECALL_RESULTS) {
-    config.recall.maxRecallResults = parseInt(process.env.OMEM_MAX_RECALL_RESULTS, 10) || DEFAULTS.recall.maxRecallResults;
-  }
 
   if (process.env.OMEM_WEB_ENABLED === "false" || process.env.OMEM_WEB_ENABLED === "0") {
     config.web = { ...config.web!, enabled: false };
@@ -280,7 +245,7 @@ export type AgentPolicy = "none" | "readonly" | "readwrite";
 
 export function resolveAgentPolicy(
   agentName: string,
-  config: Partial<OmemPluginConfig>,
+  config: Partial<CerebroPluginConfig>,
 ): AgentPolicy {
   const policies = config.agentMemoryPolicy;
   if (policies) {

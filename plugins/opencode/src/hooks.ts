@@ -1,6 +1,6 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
 import type { CerebroClient, SearchResult } from "./client.js";
-import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
+import { type CerebroPluginConfig, DEFAULTS, resolveAgentPolicy } from "./config.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 
@@ -111,15 +111,23 @@ async function detectProjectName(rootPath: string): Promise<string | undefined> 
   return result;
 }
 
-export function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs: number = 7000) {
+export function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs?: number) {
   if (!tui) return;
+  const effectiveDelay = delayMs ?? DEFAULTS.ui.toastDelayMs;
   setTimeout(() => {
     try {
       tui.showToast({ body: { title, message, variant, duration: 5000 } });
     } catch (err) {
       logErr("showToast failed", { error: String(err) });
     }
-  }, delayMs);
+  }, effectiveDelay);
+}
+
+export function createToast(config: Partial<CerebroPluginConfig>) {
+  const defaultDelay = config.ui?.toastDelayMs ?? DEFAULTS.ui.toastDelayMs;
+  return (tui: any, title: string, message: string, variant: string = "info", delayMs?: number) => {
+    showToast(tui, title, message, variant, delayMs ?? defaultDelay);
+  };
 }
 
 const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
@@ -211,7 +219,7 @@ const FETCH_POLICY = [
   "</cerebro-fetch-policy>",
 ].join("\n");
 
-const INJECTION_MAX_CHARS_FALLBACK = 4000;
+const MAX_INJECTION_CHARS_FALLBACK = DEFAULTS.content.maxContentChars;
 
 interface InjectionResult {
   text: string;
@@ -224,23 +232,28 @@ export async function buildMemoryInjection(
   client: CerebroClient,
   projectPath: string | undefined,
   query: string,
-  config: Partial<OmemPluginConfig>,
+  config: Partial<CerebroPluginConfig>,
 ): Promise<InjectionResult> {
-  const maxChars = config.content?.maxContentLength ?? INJECTION_MAX_CHARS_FALLBACK;
+  const maxChars = config.content?.maxContentChars ?? MAX_INJECTION_CHARS_FALLBACK;
+  const ic = config.injection ?? DEFAULTS.injection;
+  const recentCount = ic.recentCount || DEFAULTS.injection.recentCount;
+  const searchCount = ic.searchCount || DEFAULTS.injection.searchCount;
+  const recentTruncate = ic.recentTruncateChars || 0;   // 0 = 不截断
+  const searchTruncate = ic.searchTruncateChars || 0;    // 0 = 不截断
 
   const [profile, projectMemories, searchResults] = await Promise.all([
     Promise.race([
       client.getInjection(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
     ]).catch(() => null),
     Promise.race([
-      client.listRecent(5, projectPath),
-      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 2000)),
+      client.listRecent(recentCount, projectPath),
+      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 1000)),
     ]).catch(() => []),
     query
       ? Promise.race([
-          client.searchMemories(query, 10, undefined, undefined, projectPath),
-          new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 3000)),
+          client.searchMemories(query, searchCount, undefined, undefined, projectPath),
+          new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 1500)),
         ]).catch(() => [])
       : Promise.resolve([]),
   ]);
@@ -259,7 +272,7 @@ export async function buildMemoryInjection(
     for (const m of projectMemories) {
       seenIds.add(m.id);
       const age = formatRelativeAge(m.updated_at || m.created_at) || "unknown";
-      const content = truncate(m.content, 200);
+      const content = recentTruncate > 0 ? truncate(m.content, recentTruncate) : m.content;
       sections.push(`- (${age}) ${content}`);
     }
     sections.push("");
@@ -270,7 +283,7 @@ export async function buildMemoryInjection(
     sections.push("## Relevant Memories");
     for (const r of dedupedResults) {
       const age = formatRelativeAge(r.memory.created_at) || "unknown";
-      const content = truncate(r.memory.content, 300);
+      const content = searchTruncate > 0 ? truncate(r.memory.content, searchTruncate) : r.memory.content;
       sections.push(`- (${age}) ${content}`);
     }
     sections.push("");
@@ -298,7 +311,7 @@ export function chatMessageRecallHook(
   client: CerebroClient,
   _containerTags: string[],
   tui: any,
-  config: Partial<OmemPluginConfig> = {},
+  config: Partial<CerebroPluginConfig> = {},
   getAgentName?: () => string,
   directory?: string,
 ) {
@@ -342,6 +355,9 @@ export function chatMessageRecallHook(
         injectedSessions.add(input.sessionID);
 
         output.parts.unshift({
+          id: `prt_cerebro-inject-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message?.id,
           type: "text",
           text: injection.text,
           synthetic: true,
@@ -350,6 +366,21 @@ export function chatMessageRecallHook(
         showToast(tui, "🧠 Memory Injected",
           `${injection.profileCount} prefs · ${injection.projectMemoryCount} project · ${injection.memoryCount} relevant`,
           "success");
+
+        client.createRecallEvent({
+          session_id: input.sessionID,
+          recall_type: "auto",
+          query_text: query,
+          max_score: 0,
+          llm_confidence: 0,
+          profile_injected: injection.profileCount > 0,
+          kept_count: injection.projectMemoryCount + injection.memoryCount,
+          discarded_count: 0,
+          injected_count: injection.projectMemoryCount + injection.memoryCount,
+          injected_content: injection.text,
+        }).catch((e: unknown) => {
+          logErr("chatMessageRecallHook createRecallEvent failed", { error: String(e) });
+        });
       } else if (!hasContent) {
         logDebug("chatMessageRecallHook: no content available, will retry next turn", {
           sessionId: input.sessionID,
@@ -417,7 +448,7 @@ export function createCerebroCompactionPrompt(
   return sections.join("\n");
 }
 
-export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<OmemPluginConfig> = {}, agentId?: string, directory?: string) {
+export function compactingHook(client: CerebroClient, containerTags: string[], tui: any, ingestMode: "smart" | "raw" = "smart", isAutoStoreEnabled?: (sessionId: string | undefined) => boolean, getMainSessionId?: () => string | undefined, sdkClient?: any, config: Partial<CerebroPluginConfig> = {}, agentId?: string, directory?: string) {
   const effectiveAgentId = agentId || process.env.OMEM_AGENT_ID || "opencode";
   return async (
     input: { sessionID?: string },
@@ -550,7 +581,7 @@ export function autocontinueHook(
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
   getMainSessionId?: () => string | undefined,
   sdkClient?: any,
-  config: Partial<OmemPluginConfig> = {},
+  config: Partial<CerebroPluginConfig> = {},
   agentId?: string,
   directory?: string,
 ) {
@@ -665,7 +696,7 @@ export function sessionIdleHook(
   getMainSessionId?: () => string | undefined,
   isAutoStoreEnabled?: (sessionId: string | undefined) => boolean,
   agentId?: string,
-  config: Partial<OmemPluginConfig> = {},
+  config: Partial<CerebroPluginConfig> = {},
   onAgentResolved?: (name: string) => void,
   directory?: string,
 ) {

@@ -1,5 +1,5 @@
-import { logInfo, logWarn, logError } from "./logger.js";
-import type { OmemPluginConfig } from "./config.js";
+import { logWarn, logError } from "./logger.js";
+import type { CerebroPluginConfig } from "./config.js";
 
 function sanitizeContent(text: string, maxLen: number): string {
   let clean = text.replace(/<[\w-]+[^>]*>[\s\S]*?<\/[\w-]+>/g, "");
@@ -42,25 +42,6 @@ export interface ListResponse {
   offset: number;
 }
 
-
-export interface DiscardedItem {
-  memory_id: string;
-  content: string;
-  score: number;
-  refine_relevance?: string;
-  refine_reasoning?: string;
-}
-
-export interface ShouldRecallResponse {
-  should_recall: boolean;
-  query?: string;
-  reason?: string;
-  similarity_score?: number;
-  confidence?: number;
-  memories?: SearchResult[];
-  discarded?: DiscardedItem[];
-}
-
 export interface PreferenceDto {
   id: string;
   slot: string;
@@ -101,16 +82,16 @@ export class CerebroClient {
   constructor(
     private baseUrl: string,
     private apiKey: string,
-    private config?: Partial<OmemPluginConfig>,
+    private config?: Partial<CerebroPluginConfig>,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
-  private getCfg<S extends keyof OmemPluginConfig, K extends string & keyof OmemPluginConfig[S]>(
-    section: S, key: K, fallback: OmemPluginConfig[S][K],
-  ): OmemPluginConfig[S][K] {
+  private getCfg<S extends keyof CerebroPluginConfig, K extends string & keyof CerebroPluginConfig[S]>(
+    section: S, key: K, fallback: CerebroPluginConfig[S][K],
+  ): CerebroPluginConfig[S][K] {
     const sec = this.config?.[section] as Record<string, unknown> | undefined;
-    return (sec?.[key] ?? fallback) as OmemPluginConfig[S][K];
+    return (sec?.[key] ?? fallback) as CerebroPluginConfig[S][K];
   }
 
   private async request<T>(
@@ -202,7 +183,7 @@ export class CerebroClient {
     category?: string,
     projectPath?: string,
   ): Promise<MemoryDto | null> {
-    const safeContent = sanitizeContent(content, this.getCfg("content", "maxContentChars", 30000));
+    const safeContent = sanitizeContent(content, this.getCfg("content", "maxContentLength", 3000));
     return this.post<MemoryDto>("/v1/memories", {
       content: safeContent,
       tags,
@@ -261,7 +242,7 @@ export class CerebroClient {
   ): Promise<unknown> {
     const safeMessages = messages.map(m => ({
       role: m.role,
-      content: sanitizeContent(m.content, this.getCfg("content", "maxContentChars", 30000)),
+      content: sanitizeContent(m.content, this.getCfg("content", "maxContentLength", 3000)),
     }));
     return this.post("/v1/memories", {
       messages: safeMessages,
@@ -360,49 +341,6 @@ export class CerebroClient {
       `/v1/memories/${encodeURIComponent(memoryId)}/reshare`,
       { target_space: targetSpace },
     );
-  }
-
-  async shouldRecall(
-    query_text: string,
-    last_query_text: string | undefined,
-    session_id: string,
-    similarity_threshold?: number,
-    max_results?: number,
-    project_tags?: string[],
-    conversation_context?: string[],
-    recall_overrides?: {
-      fetch_multiplier?: number;
-      topk_cap_multiplier?: number;
-      mmr_jaccard_threshold?: number;
-      mmr_penalty_factor?: number;
-      phase2_multiplier?: number;
-      llm_max_eval?: number;
-      refine_strategy?: string;
-      skip_llm_gate?: boolean;
-    },
-    projectPath?: string,
-  ): Promise<ShouldRecallResponse | null> {
-    const res = await this.post<ShouldRecallResponse>("/v1/should-recall", {
-      query_text,
-      last_query_text,
-      session_id,
-      similarity_threshold,
-      max_results,
-      project_tags,
-      conversation_context,
-      ...recall_overrides,
-      project_path: projectPath,
-    }, 20_000);
-    logInfo("shouldRecall raw response", {
-      should_recall: res?.should_recall,
-      memCount: res?.memories?.length ?? 0,
-      discardedCount: res?.discarded?.length ?? 0,
-      confidence: res?.confidence,
-      reason: res?.reason,
-      rawKeys: res ? Object.keys(res) : "null",
-      rawJSON: JSON.stringify(res).slice(0, 500),
-    });
-    return res;
   }
 
   async updateProfileInjected(
