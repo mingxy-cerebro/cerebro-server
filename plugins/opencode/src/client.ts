@@ -1,4 +1,4 @@
-import { logWarn, logError } from "./logger.js";
+import { logInfo, logWarn, logError } from "./logger.js";
 import type { OmemPluginConfig } from "./config.js";
 
 function sanitizeContent(text: string, maxLen: number): string {
@@ -298,9 +298,11 @@ export class CerebroClient {
     return this.request("/v2/profile/stats");
   }
 
-  async listRecent(limit = 20): Promise<MemoryDto[]> {
+  async listRecent(limit = 20, projectPath?: string): Promise<MemoryDto[]> {
+    const params = new URLSearchParams({ limit: String(limit), offset: "0", sort: "updated_at", order: "desc" });
+    if (projectPath) params.set("project_path", projectPath);
     const res = await this.request<ListResponse>(
-      `/v1/memories?limit=${limit}&offset=0`,
+      `/v1/memories?${params}`,
     );
     return res?.memories ?? [];
   }
@@ -391,6 +393,15 @@ export class CerebroClient {
       ...recall_overrides,
       project_path: projectPath,
     }, 20_000);
+    logInfo("shouldRecall raw response", {
+      should_recall: res?.should_recall,
+      memCount: res?.memories?.length ?? 0,
+      discardedCount: res?.discarded?.length ?? 0,
+      confidence: res?.confidence,
+      reason: res?.reason,
+      rawKeys: res ? Object.keys(res) : "null",
+      rawJSON: JSON.stringify(res).slice(0, 500),
+    });
     return res;
   }
 
