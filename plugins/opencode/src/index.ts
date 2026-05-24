@@ -125,13 +125,17 @@ const OmemPlugin: Plugin = async (input) => {
   }
 
   const shutdown = async () => {
-    if (webServer) {
-      await stopWebServer(webServer);
-      webServer = null;
-    }
+    try {
+      if (webServer) {
+        await stopWebServer(webServer);
+        webServer = null;
+      }
+    } catch {}
+    process.exit(0);  // 强制退出，确保 HTTP server 停止
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+  process.on("disconnect", shutdown);  // OpenCode 窗口关闭时触发
 
   return {
     config: async (cfg: any) => {
