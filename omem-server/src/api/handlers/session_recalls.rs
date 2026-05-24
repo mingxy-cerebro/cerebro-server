@@ -25,25 +25,26 @@ enum SignalStrength {
     Strong,
 }
 
-const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"判断用户问题是否需要从知识库检索历史记忆。
+const SHOULD_RECALL_SYSTEM_PROMPT: &str = r#"判断用户问题是否需要从知识库检索历史记忆，并提取检索关键词。
 
 知识库内容：过往笔记、项目经验、技术决策、偏好设置、配置信息等。
 
-回答 yes 的场景（满足任一即可）：
+需要召回的场景（满足任一即可）：
 - 引用过去的事件、决策、方案（"之前"、"上次"、"we decided"）
 - 询问个人偏好、习惯、工具选择
 - 讨论特定项目/模块的设计或实现（可能涉及历史决策）
 - 提到配置、环境、部署等（可能需要历史配置记录）
 - 遇到问题寻求解决（可能之前有类似经验）
 
-回答 no 的场景（仅在以下情况）：
+不需要召回的场景（仅在以下情况）：
 - 纯通用知识问答（"什么是REST"、"冒泡排序怎么写"）
 - 简单计算或数学推导
 - 与用户个人历史完全无关的新话题闲聊
 
-核心原则：宁可多召回。只要问题可能与用户的过往经验、项目上下文、个人偏好有关，就回答 yes。
+核心原则：宁可多召回。
 
-只回答 yes 或 no。"#;
+以JSON格式回复：{"should_recall": true/false, "keywords": ["关键词1", "关键词2"]}
+keywords为2-5个代表检索意图的核心词，去掉语气词和连接词。"#;
 
 #[derive(Deserialize)]
 pub struct ShouldRecallRequest {
@@ -233,34 +234,60 @@ pub async fn should_recall(
 
     let denoised_query = denoise_for_recall(&body.query_text);
 
-    let system = SHOULD_RECALL_SYSTEM_PROMPT;
-    let user = format!(
-        "用户问题：{}\n\n这个问题是否需要从用户个人知识库中检索相关记忆来回答？回答 yes 或 no。",
+    let gate_system_prompt = SHOULD_RECALL_SYSTEM_PROMPT;
+    let gate_user_prompt = format!(
+        "用户问题：{}\n\n判断是否需要从知识库检索历史记忆，并提取2-5个最能代表检索意图的核心关键词（去掉语气词和连接词）。\n只回答JSON格式：{{\"should_recall\": true/false, \"keywords\": [\"关键词1\", \"关键词2\"]}}",
         denoised_query
     );
 
+    #[derive(serde::Deserialize)]
+    struct GateResponse {
+        should_recall: bool,
+        #[serde(default)]
+        keywords: Vec<String>,
+    }
+
     let skip_llm = body.skip_llm_gate.unwrap_or(false);
-    let (llm_yes, _llm_reason) = if skip_llm {
+    let (llm_yes, llm_keywords) = if skip_llm {
         tracing::info!(query = %body.query_text, reason = "skipped_llm_gate", "recall_llm_skipped");
-        (true, "skipped_llm_gate")
+        (true, Vec::<String>::new())
     } else {
-        match state.recall_llm.complete_text(system, &user).await {
-            Ok(llm_response) => {
-                let trimmed = llm_response.trim().to_lowercase();
-                let yes = trimmed.starts_with("yes");
-                tracing::info!(query = %body.query_text, llm_response = %trimmed, llm_yes = yes, "recall_llm_response");
-                (yes, if yes { "llm_yes" } else { "llm_no" })
+        match crate::llm::complete_json::<GateResponse>(
+            state.recall_llm.as_ref(),
+            gate_system_prompt,
+            &gate_user_prompt,
+        ).await {
+            Ok(gate) => {
+                tracing::info!(
+                    query = %body.query_text,
+                    should_recall = gate.should_recall,
+                    keywords = ?gate.keywords,
+                    "recall_llm_gate"
+                );
+                (gate.should_recall, gate.keywords)
             }
             Err(e) => {
                 tracing::warn!(query = %body.query_text, error = %e, "recall_llm_error_fallback");
-                (true, "llm_error_fallback")
+                (true, Vec::<String>::new())
             }
         }
     };
 
+    let search_query = if llm_keywords.is_empty() {
+        denoised_query.clone()
+    } else {
+        let keyword_part = llm_keywords.join(" ");
+        if keyword_part.chars().count() < denoised_query.chars().count() / 2 {
+            denoised_query.clone()
+        } else {
+            keyword_part
+        }
+    };
+    tracing::info!(search_query = %search_query, source = if llm_keywords.is_empty() { "denoised" } else { "keywords" }, "recall_search_query");
+
     let vectors = state
         .embed
-        .embed(std::slice::from_ref(&denoised_query))
+        .embed(std::slice::from_ref(&search_query))
         .await
         .map_err(|e| OmemError::Embedding(format!("failed to embed query: {e}")))?;
     let query_vector = vectors.into_iter().next();
@@ -358,13 +385,13 @@ pub async fn should_recall(
     if let Some(tags) = project_tags_slice {
         if !tags.is_empty() {
             let search_req = SearchRequest {
-                query: denoised_query.clone(),
-                query_vector: query_vector.clone(),
-                tenant_id: auth.tenant_id.clone(),
-                scope_filter: None,
-                limit: Some(max_results),
-                min_score: Some(effective_min_score),
-                include_trace: false,
+            query: search_query.clone(),
+            query_vector: query_vector.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            scope_filter: None,
+            limit: Some(max_results),
+            min_score: Some(effective_min_score),
+            include_trace: false,
                 tags_filter: Some(tags.to_vec()),
                 source_filter: None,
                 agent_id_filter: body.agent_id.clone(),
@@ -404,7 +431,7 @@ pub async fn should_recall(
     let need_global = all_results.len() < max_results;
     if need_global || (project_tags_slice.is_none() || project_tags_slice.is_none_or(|t| t.is_empty())) {
         let global_search_req = SearchRequest {
-            query: denoised_query.clone(),
+            query: search_query.clone(),
             query_vector: query_vector.clone(),
             tenant_id: auth.tenant_id.clone(),
             scope_filter: None,

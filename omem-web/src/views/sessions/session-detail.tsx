@@ -70,8 +70,8 @@ interface RecallItem {
   event_id: string
   memory_id: string
   score: number
-  refine_relevance: "high" | "medium" | "irrelevant"
-  refine_reasoning: string
+  refine_relevance: "high" | "medium" | "irrelevant" | null
+  refine_reasoning: string | null
   is_kept: boolean
   tenant_id: string
   created_at: string
@@ -152,11 +152,18 @@ function ScoreBar({ label, value, max = 1 }: { label: string; value: number; max
   )
 }
 
-function RefineBadge({ relevance, isKept }: { relevance: string; isKept: boolean }) {
+function RefineBadge({ relevance, isKept }: { relevance: string | null; isKept: boolean }) {
   if (!isKept) {
     return (
       <Badge variant="outline" className="text-xs bg-red-500/10 text-red-600 border-red-500/30">
         🔴 被精炼掉
+      </Badge>
+    )
+  }
+  if (!relevance) {
+    return (
+      <Badge variant="outline" className="text-xs bg-blue-500/10 text-blue-600 border-blue-500/30">
+        🔵 保留
       </Badge>
     )
   }
@@ -200,7 +207,8 @@ function ItemCard({
   onLock?: (memoryId: string) => void
   onVaultUnlock?: () => void
 }) {
-  const [activeTab, setActiveTab] = useState<"refine" | "raw">("refine")
+  const isRefined = !!item.refine_relevance
+  const [activeTab, setActiveTab] = useState<"refine" | "raw">("raw")
   const [showPwInput, setShowPwInput] = useState(false)
   const [pw, setPw] = useState("")
   const [pwErr, setPwErr] = useState<string | null>(null)
@@ -281,11 +289,13 @@ function ItemCard({
       <div className="flex items-center gap-1 border-b border-border pb-1">
         <button
           type="button"
-          onClick={() => setActiveTab("refine")}
+          onClick={() => isRefined && setActiveTab("refine")}
           className={`text-xs px-2 py-1 rounded transition-colors ${
-            activeTab === "refine"
-              ? "bg-primary/10 text-primary font-medium"
-              : "text-muted-foreground hover:text-foreground"
+            !isRefined
+              ? "text-muted-foreground/40 cursor-not-allowed"
+              : activeTab === "refine"
+                ? "bg-primary/10 text-primary font-medium"
+                : "text-muted-foreground hover:text-foreground"
           }`}
         >
           精炼
@@ -305,10 +315,16 @@ function ItemCard({
 
       {activeTab === "refine" ? (
         <div className="space-y-2">
-          <div className="text-sm text-foreground">
-            <span className="font-medium">推理说明：</span>
-            <span className="text-muted-foreground">{item.refine_reasoning || "—"}</span>
-          </div>
+          {item.refine_reasoning ? (
+            <div className="text-sm text-foreground">
+              <span className="font-medium">推理说明：</span>
+              <span className="text-muted-foreground">{item.refine_reasoning}</span>
+            </div>
+          ) : (
+            <div className="text-sm text-muted-foreground italic">
+              未经精炼 · 自动保留
+            </div>
+          )}
           <ScoreBar label="相似度得分" value={item.score} max={1} />
         </div>
       ) : (
@@ -561,9 +577,11 @@ function EventCard({
                 <span className="text-emerald-600 dark:text-emerald-400">
                   保留 {event.kept_count} 条
                 </span>
-                <span className="text-red-600 dark:text-red-400">
-                  精炼掉 {event.discarded_count} 条
-                </span>
+                {event.discarded_count > 0 && (
+                  <span className="text-red-600 dark:text-red-400">
+                    精炼掉 {event.discarded_count} 条
+                  </span>
+                )}
                 {event.injected_count != null && event.injected_count > 0 && (
                   <span className="text-blue-600 dark:text-blue-400">
                     实际注入 {event.injected_count} 条
@@ -816,14 +834,16 @@ export function SessionDetailPage() {
         </Card>
       </div>
 
-      {(stats.totalKept > 0 || stats.totalDiscarded > 0) && (
+      {stats.totalKept > 0 && (
         <div className="flex items-center gap-4 text-sm">
           <span className="text-emerald-600 dark:text-emerald-400 font-medium">
             共保留 {stats.totalKept} 条记忆
           </span>
-          <span className="text-red-600 dark:text-red-400 font-medium">
-            共精炼掉 {stats.totalDiscarded} 条记忆
-          </span>
+          {stats.totalDiscarded > 0 && (
+            <span className="text-red-600 dark:text-red-400 font-medium">
+              共精炼掉 {stats.totalDiscarded} 条记忆
+            </span>
+          )}
         </div>
       )}
 

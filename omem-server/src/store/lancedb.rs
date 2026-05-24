@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
@@ -106,10 +106,10 @@ pub struct LanceStore {
     recall_items_table: Table,
     fts_indexed: AtomicBool,
     uri: String,
-    write_count: Arc<AtomicU32>,
-    rebuilding: Arc<AtomicBool>,
-    recall_write_count: Arc<AtomicU32>,
-    recall_rebuilding: Arc<AtomicBool>,
+    /// GC mutex: prevents concurrent GC runs on this LanceStore instance.
+    gc_running: Arc<AtomicBool>,
+    /// Tracks the version at which the last GC completed, for incremental GC triggering.
+    last_gc_version: Arc<AtomicU64>,
 }
 
 impl LanceStore {
@@ -159,6 +159,8 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("failed to open recall_items table: {e}")))?;
 
+        let current_version = table.version().await.unwrap_or(0);
+
         Ok(Self {
             db,
             table,
@@ -166,10 +168,8 @@ impl LanceStore {
             recall_items_table,
             fts_indexed: AtomicBool::new(false),
             uri: uri.to_string(),
-            write_count: Arc::new(AtomicU32::new(0)),
-            rebuilding: Arc::new(AtomicBool::new(false)),
-            recall_write_count: Arc::new(AtomicU32::new(0)),
-            recall_rebuilding: Arc::new(AtomicBool::new(false)),
+            gc_running: Arc::new(AtomicBool::new(false)),
+            last_gc_version: Arc::new(AtomicU64::new(current_version)),
         })
     }
 
@@ -837,7 +837,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to insert recall_event: {e}")))?;
-        self.after_recall_mutation();
+        self.after_recall_mutation().await;
         Ok(())
     }
 
@@ -891,7 +891,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("failed to batch insert recall_items: {e}")))?;
-        self.after_recall_mutation();
+        self.after_recall_mutation().await;
         Ok(())
     }
 
@@ -1017,7 +1017,7 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("update recall_event profile_injected failed: {e}")))?;
 
-        self.after_recall_mutation();
+        self.after_recall_mutation().await;
         Ok(())
     }
 
@@ -1070,7 +1070,7 @@ impl LanceStore {
             .delete(&filter)
             .await
             .map_err(|e| OmemError::Storage(format!("failed to delete recall_events by session: {e}")))?;
-        self.after_recall_mutation();
+        self.after_recall_mutation().await;
         Ok(())
     }
 
@@ -1616,7 +1616,7 @@ impl LanceStore {
         }
 
         // OOM guard: no maybe_optimize on write path — auto_cleanup handles it
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(())
     }
 
@@ -1799,7 +1799,7 @@ impl LanceStore {
                 .await
                 .map_err(|e| OmemError::Storage(format!("update failed: {e}")))?;
         }
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(())
     }
 
@@ -1822,7 +1822,7 @@ impl LanceStore {
             .execute()
             .await
             .map_err(|e| OmemError::Storage(format!("batch_bump_access_count failed: {e}")))?;
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(())
     }
 
@@ -1832,13 +1832,13 @@ impl LanceStore {
             .delete(&format!("id = '{}'", escape_sql(id)))
             .await
             .map_err(|e| OmemError::Storage(format!("hard_delete failed: {e}")))?;
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(())
     }
 
     pub async fn batch_hard_delete_by_ids(&self, ids: &[String]) -> Result<usize, OmemError> {
         if ids.is_empty() {
-            self.after_mutation();
+            self.after_mutation().await;
             return Ok(0);
         }
         let table = self.table.clone();
@@ -1848,7 +1848,7 @@ impl LanceStore {
             .delete(&format!("id IN ({id_list})"))
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete_by_ids failed: {e}")))?;
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(ids.len())
     }
 
@@ -2304,7 +2304,7 @@ impl LanceStore {
             .delete(filter)
             .await
             .map_err(|e| OmemError::Storage(format!("batch_hard_delete failed: {e}")))?;
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(count)
     }
 
@@ -2342,7 +2342,7 @@ impl LanceStore {
             .await
             .map_err(|e| OmemError::Storage(format!("batch_update_project_path failed: {e}")))?;
 
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(count)
     }
 
@@ -2354,7 +2354,7 @@ impl LanceStore {
             .delete("true")
             .await
             .map_err(|e| OmemError::Storage(format!("delete_all failed: {e}")))?;
-        self.after_mutation();
+        self.after_mutation().await;
         Ok(count)
     }
 
@@ -2579,27 +2579,38 @@ impl LanceStore {
         Ok(())
     }
 
-    const GC_WRITE_THRESHOLD: u32 = 50;
+    /// Version-based GC threshold: trigger when this many versions have accumulated since last GC.
+    const GC_VERSION_THRESHOLD: u64 = 30;
 
     /// Called after every mutation (add/update/delete) to trigger periodic GC.
-    /// Unified GC: prune old versions → compact fragments → merge indices → cleanup orphan UUIDs.
-    /// Only runs when write_count exceeds threshold; zero-cost when idle.
-    fn after_mutation(&self) {
-        let count = self.write_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if count < Self::GC_WRITE_THRESHOLD {
+    /// Uses LanceDB's persisted version number instead of an in-memory counter,
+    /// so GC works correctly even after LRU cache eviction recreates LanceStore instances.
+    async fn after_mutation(&self) {
+        if self.gc_running.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             return;
         }
-        if self.rebuilding.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        let version = match self.table.version().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "after_mutation: failed to get table version");
+                self.gc_running.store(false, Ordering::Release);
+                return;
+            }
+        };
+        let last = self.last_gc_version.load(Ordering::Acquire);
+        if version < last + Self::GC_VERSION_THRESHOLD {
+            self.gc_running.store(false, Ordering::Release);
             return;
         }
+
         let table = self.table.clone();
         let recall_events_table = self.recall_events_table.clone();
         let recall_items_table = self.recall_items_table.clone();
         let uri = self.uri.clone();
-        let wc = Arc::clone(&self.write_count);
-        let rb = Arc::clone(&self.rebuilding);
+        let gc_running = self.gc_running.clone();
+        let last_gc_version = self.last_gc_version.clone();
         tokio::spawn(async move {
-            tracing::info!(write_count = count, "GC trigger: unified gc (prune + compact + index merge + orphan cleanup)");
+            tracing::info!(version, "GC trigger: unified gc (prune + compact + index merge + orphan cleanup)");
 
             // Step 1-3: Prune + compact memories table
             match table
@@ -2688,22 +2699,19 @@ impl LanceStore {
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "GC orphan cleanup: load_indices failed, skipping disk cleanup");
-                            wc.store(0, Ordering::Relaxed);
-                            rb.store(false, Ordering::Release);
+                            gc_running.store(false, Ordering::Release);
                             return;
                         }
                     },
                     Err(e) => {
                         tracing::warn!(error = %e, "GC orphan cleanup: dataset get failed, skipping disk cleanup");
-                        wc.store(0, Ordering::Relaxed);
-                        rb.store(false, Ordering::Release);
+                        gc_running.store(false, Ordering::Release);
                         return;
                     }
                 }
             } else {
                 tracing::warn!("GC orphan cleanup: no dataset available, skipping disk cleanup");
-                wc.store(0, Ordering::Relaxed);
-                rb.store(false, Ordering::Release);
+                gc_running.store(false, Ordering::Release);
                 return;
             };
 
@@ -2740,29 +2748,33 @@ impl LanceStore {
                 "GC: unified gc complete"
             );
 
-            // Reset counters
-            wc.store(0, Ordering::Relaxed);
-            rb.store(false, Ordering::Release);
+            gc_running.store(false, Ordering::Release);
+            last_gc_version.store(version, Ordering::Release);
         });
     }
 
-    /// Called after every recall table mutation to trigger periodic GC for recall tables.
-    /// Separate counter from memories table — recall tables can have much higher write frequency.
-    fn after_recall_mutation(&self) {
-        let count = self.recall_write_count.fetch_add(1, Ordering::Relaxed) + 1;
-        const RECALL_GC_THRESHOLD: u32 = 20;
-        if count < RECALL_GC_THRESHOLD {
+    async fn after_recall_mutation(&self) {
+        if self.gc_running.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             return;
         }
-        if self.recall_rebuilding.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        let version = match self.recall_events_table.version().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "after_recall_mutation: failed to get recall table version");
+                self.gc_running.store(false, Ordering::Release);
+                return;
+            }
+        };
+        if version < 20 {
+            self.gc_running.store(false, Ordering::Release);
             return;
         }
+
         let recall_events_table = self.recall_events_table.clone();
         let recall_items_table = self.recall_items_table.clone();
-        let wc = Arc::clone(&self.recall_write_count);
-        let rb = Arc::clone(&self.recall_rebuilding);
+        let gc_running = self.gc_running.clone();
         tokio::spawn(async move {
-            tracing::info!(write_count = count, "recall GC trigger: pruning + compacting recall tables");
+            tracing::info!(version, "recall GC trigger: pruning + compacting recall tables");
 
             let gc_recall_table = |tbl: Table, label: &str| {
                 let label = label.to_string();
@@ -2791,8 +2803,7 @@ impl LanceStore {
                 gc_recall_table(recall_items_table, "recall_items"),
             );
 
-            wc.store(0, Ordering::Relaxed);
-            rb.store(false, Ordering::Release);
+            gc_running.store(false, Ordering::Release);
         });
     }
 
@@ -3216,7 +3227,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), recall_write_count: Arc::new(AtomicU32::new(0)), recall_rebuilding: Arc::new(AtomicBool::new(false)) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), gc_running: Arc::new(AtomicBool::new(false)), last_gc_version: Arc::new(AtomicU64::new(0)) };
 
         let schema_before = store.table.schema().await.unwrap();
         assert!(schema_before.field_with_name("version").is_err());
@@ -3277,7 +3288,7 @@ mod tests {
         let table = db.open_table(TABLE_NAME).execute().await.unwrap();
         let recall_events_table = db.open_table(RECALL_EVENTS_TABLE).execute().await.unwrap();
         let recall_items_table = db.open_table(RECALL_ITEMS_TABLE).execute().await.unwrap();
-        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), write_count: Arc::new(AtomicU32::new(0)), rebuilding: Arc::new(AtomicBool::new(false)), recall_write_count: Arc::new(AtomicU32::new(0)), recall_rebuilding: Arc::new(AtomicBool::new(false)) };
+        let store = LanceStore { db, table, recall_events_table, recall_items_table, fts_indexed: AtomicBool::new(false), uri: String::new(), gc_running: Arc::new(AtomicBool::new(false)), last_gc_version: Arc::new(AtomicU64::new(0)) };
 
         store.init_table().await.unwrap();
         let result = store.find_by_provenance_source("some-id").await.unwrap();

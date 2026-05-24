@@ -144,7 +144,7 @@ impl Default for OmemConfig {
             search_mmr_penalty_factor: 0.5,
             recall_phase2_multiplier: 2,
             recall_llm_max_eval: 15,
-            recall_refine_strategy: "balanced".to_string(),
+            recall_refine_strategy: "loose".to_string(),
             recall_llm_refine_timeout_secs: 15,
             profile_enabled: true,
             profile_llm_provider: "openai-compatible".to_string(),

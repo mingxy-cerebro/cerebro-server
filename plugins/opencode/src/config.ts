@@ -75,7 +75,7 @@ const DEFAULTS: OmemPluginConfig = {
     mmrPenaltyFactor: 0.5,
     phase2Multiplier: 2,
     llmMaxEval: 15,
-    refineStrategy: "balanced",
+    refineStrategy: "loose",
   },
   logging: {
     logEnabled: true,
