@@ -123,7 +123,7 @@ const OmemPlugin: Plugin = async (input) => {
   }
 
   if (webPort) {
-    toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `\n🌐 Open in browser http://localhost:${webPort}`, "success");
+    toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `🌐 Open in browser http://localhost:${webPort}`, "success");
   } else {
     toast(tui, "🧠 Connected", `v${pluginVersion}`, "success");
   }
