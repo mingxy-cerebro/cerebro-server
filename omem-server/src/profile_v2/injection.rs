@@ -111,18 +111,15 @@ impl InjectionBuilder {
             );
         }
 
-        // 5. 格式化为 <cerebro-profile> XML块
+        // 5. 格式化为 markdown
         let content = if selected.is_empty() {
             String::new()
         } else {
             let lines: Vec<String> = selected
                 .iter()
-                .map(|p| format!("  · {} — {}", p.slot, p.value))
+                .map(|p| format!("- {}: {}", p.slot, p.value))
                 .collect();
-            format!(
-                "<cerebro-profile>\n{}\n</cerebro-profile>",
-                lines.join("\n")
-            )
+            format!("## User Profile\n{}", lines.join("\n"))
         };
 
         let result = InjectionResult {

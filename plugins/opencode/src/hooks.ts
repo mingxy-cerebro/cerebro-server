@@ -1,7 +1,7 @@
 import type { Model, UserMessage, Part } from "@opencode-ai/sdk";
 import type { CerebroClient, SearchResult } from "./client.js";
 import { type OmemPluginConfig, resolveAgentPolicy } from "./config.js";
-import { detectSaveKeyword, KEYWORD_NUDGE } from "./keywords.js";
+import { detectSaveKeyword, detectRecallKeyword as _detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE as _RECALL_NUDGE } from "./keywords.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 import { stripPrivateContent } from "./privacy.js";
@@ -251,6 +251,87 @@ const FETCH_POLICY = [
   "Do NOT rely on condensed summaries alone — depth of recall determines quality of response.",
   "</cerebro-fetch-policy>",
 ].join("\n");
+
+const INJECTION_MAX_CHARS_FALLBACK = 4000;
+
+interface InjectionResult {
+  text: string;
+  profileCount: number;
+  memoryCount: number;
+  projectMemoryCount: number;
+}
+
+export async function buildMemoryInjection(
+  client: CerebroClient,
+  projectPath: string | undefined,
+  query: string,
+  config: Partial<OmemPluginConfig>,
+): Promise<InjectionResult> {
+  const maxChars = config.content?.maxContentLength ?? INJECTION_MAX_CHARS_FALLBACK;
+
+  const [profile, projectMemories, searchResults] = await Promise.all([
+    Promise.race([
+      client.getInjection(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]).catch(() => null),
+    Promise.race([
+      client.listRecent(5, projectPath),
+      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 2000)),
+    ]).catch(() => []),
+    query
+      ? Promise.race([
+          client.searchMemories(query, 10, undefined, undefined, projectPath),
+          new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 3000)),
+        ]).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+
+  const sections: string[] = ["[CEREBRO-MEMORY]", ""];
+
+  if (profile?.content) {
+    sections.push(profile.content);
+    sections.push("");
+  }
+
+  const seenIds = new Set<string>();
+
+  if (projectMemories.length > 0) {
+    sections.push("## Recent Project Activity");
+    for (const m of projectMemories) {
+      seenIds.add(m.id);
+      const age = formatRelativeAge(m.updated_at || m.created_at) || "unknown";
+      const content = truncate(m.content, 200);
+      sections.push(`- (${age}) ${content}`);
+    }
+    sections.push("");
+  }
+
+  const dedupedResults = (searchResults || []).filter((r) => !seenIds.has(r.memory.id));
+  if (dedupedResults.length > 0) {
+    sections.push("## Relevant Memories");
+    for (const r of dedupedResults) {
+      const age = formatRelativeAge(r.memory.created_at) || "unknown";
+      const content = truncate(r.memory.content, 300);
+      sections.push(`- (${age}) ${content}`);
+    }
+    sections.push("");
+  }
+
+  sections.push("[/CEREBRO-MEMORY]");
+
+  let text = sections.join("\n");
+  if (text.length > maxChars) {
+    const cutoff = text.lastIndexOf('\n', maxChars);
+    text = text.slice(0, cutoff > 0 ? cutoff : maxChars) + "\n…\n[/CEREBRO-MEMORY]";
+  }
+
+  return {
+    text,
+    profileCount: profile?.preference_count ?? 0,
+    memoryCount: dedupedResults?.length ?? 0,
+    projectMemoryCount: projectMemories.length,
+  };
+}
 
 /**
  * Score-weighted budget allocation: high-score memories get more chars.
@@ -1154,3 +1235,26 @@ export function sessionIdleHook(
     }, 10000);
   };
 }
+
+// ---- POC: Verify parts.unshift(synthetic:true) is seen by LLM ----
+const pocInjectedSessions = new Set<string>();
+
+export function pocChatMessageHook() {
+  return async (
+    input: { sessionID: string; messageID?: string },
+    output: { message: UserMessage; parts: Part[] },
+  ) => {
+    if (!input.sessionID) return;
+    if (pocInjectedSessions.has(input.sessionID)) return;
+
+    pocInjectedSessions.add(input.sessionID);
+    output.parts.unshift({
+      type: "text",
+      text: "[CEREBRO-POC] Test injection - if you see this, respond with 'POC received'.",
+      synthetic: true,
+    } as any);
+
+    logInfo("POC: injected synthetic part", { sessionID: input.sessionID });
+  };
+}
+// ---- END POC ----

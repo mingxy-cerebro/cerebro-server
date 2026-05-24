@@ -1,0 +1,7 @@
+$ cd plugins/opencode && npx tsc --noEmit
+(无输出 — 类型检查通过，零错误)
+
+验证内容:
+- shutdown handler 已包含 process.exit(0) (index.ts:134)
+- shutdown handler 已包含 process.on("disconnect", shutdown) (index.ts:138)
+- TypeScript 编译通过，无类型错误

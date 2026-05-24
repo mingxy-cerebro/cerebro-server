@@ -2380,6 +2380,25 @@ pub fn clean_message_content(content: &str) -> String {
         }
     }
 
+    // Remove bracket-style tags like [CEREBRO-MEMORY]...[/CEREBRO-MEMORY]
+    let bracket_patterns = [
+        ("[CEREBRO-MEMORY]", "[/CEREBRO-MEMORY]"),
+    ];
+    for (open, close) in &bracket_patterns {
+        while let Some(start) = cleaned.find(open) {
+            if let Some(end) = cleaned[start + open.len()..].find(close) {
+                let block_end = start + open.len() + end + close.len();
+                cleaned = format!("{}{}", &cleaned[..start], &cleaned[block_end..]);
+            } else {
+                if let Some(line_end) = cleaned[start..].find('\n') {
+                    cleaned = format!("{}{}", &cleaned[..start], &cleaned[start + line_end..]);
+                } else {
+                    cleaned.truncate(start);
+                }
+            }
+        }
+    }
+
     // Remove noise patterns
     let noise_patterns = [
         "[Compressed conversation section]",

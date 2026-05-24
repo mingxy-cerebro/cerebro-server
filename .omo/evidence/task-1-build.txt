@@ -1,0 +1,3 @@
+src/hooks.ts(264,16): error TS6133: 'buildMemoryInjection' is declared but its value is never read.
+src/hooks.ts(268,3): error TS6133: 'config' is declared but its value is never read.
+src/hooks.ts(270,9): error TS6133: 'empty' is declared but its value is never read.

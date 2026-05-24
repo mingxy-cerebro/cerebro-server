@@ -315,7 +315,16 @@ pub async fn should_recall(
             }
         }
     });
-    let quality_gate = if llm_yes || signal_level == SignalStrength::Strong {
+    // When refine is disabled (loose/none), skip quality gate entirely.
+    // Without LLM refinement, raw vector scores can't reach the gate threshold,
+    // causing all recall results to be discarded.
+    let refine_is_disabled = body
+        .refine_strategy
+        .as_deref()
+        .is_some_and(|s| s == "loose" || s == "none");
+    let quality_gate = if refine_is_disabled {
+        0.0
+    } else if llm_yes || signal_level == SignalStrength::Strong {
         0.35
     } else {
         match signal_level {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, showToast as hooksShowToast } from "./hooks.js";
+import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, showToast as hooksShowToast, pocChatMessageHook } from "./hooks.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
@@ -154,7 +154,12 @@ const OmemPlugin: Plugin = async (input) => {
       }
       return recallHook(input, output);
     },
-    "chat.message": keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId),
+    "chat.message": async (input: any, output: any) => {
+      // POC: test synthetic injection
+      await pocChatMessageHook()(input, output);
+      // Original keyword detection + message tracking
+      return keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId)(input, output);
+    },
     "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId, getProjectPath: () => directory }),

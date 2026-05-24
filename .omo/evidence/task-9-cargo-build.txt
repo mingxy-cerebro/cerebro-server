@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling omem-server v0.3.2 (/mnt/d/dev/github/project/omem-server-source/omem-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 15s
