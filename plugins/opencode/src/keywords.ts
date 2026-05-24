@@ -5,11 +5,17 @@ const SAVE_KEYWORDS: readonly string[] = [
 ] as const;
 
 const RECALL_KEYWORDS: readonly string[] = [
+  // English — explicit past-conversation references (low false-positive)
   "i remember", "i recall", "we discussed", "we talked about",
-  "last time", "previously", "before we", "earlier we",
-  "look up", "find that", "search for", "check what",
-  "我记得", "之前说过", "之前聊过", "上次说的", "查一下",
-  "搜一下", "之前讨论", "我记得之前", "找一下",
+  "last time", "earlier we",
+  "what did we", "do you remember", "from our previous", "as discussed",
+  // Chinese — explicit memory recall cues (low false-positive)
+  "我记得", "之前说过", "之前聊过", "上次说的",
+  "之前讨论", "我记得之前",
+  "之前提到", "记得吗", "你还记得", "回忆一下",
+  "上次那个", "之前那个", "上次讨论", "上次做的",
+  "之前记录", "之前保存", "上次决定", "之前约定",
+  // Direct tool references
   "memory_search", "memory_get",
 ] as const;
 
@@ -27,4 +33,4 @@ export const KEYWORD_NUDGE =
   "[cerebro] The user wants you to remember this. Use the `memory_store` tool to save it now.";
 
 export const RECALL_NUDGE =
-  "[cerebro] The user is referencing past context. Use the `memory_search` tool to find relevant memories before responding.";
+  "[cerebro] The user references past conversations or stored information. Use `memory_search` with keywords from their message to retrieve relevant memories before responding.";
