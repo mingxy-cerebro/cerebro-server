@@ -478,8 +478,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
       };
 
       if (!shouldRecallRes.should_recall) {
-        const didInjectProfile = profileTtlExpired && !!profileBlock;
-        if (didInjectProfile) {
+        if (profileTtlExpired && profileBlock) {
           appendToSystem(output.system, profileBlock);
           logDebug("autoRecallHook profile injected (no-recall path)", { sessionId: input.sessionID, outputSystemLength: output.system.length });
 
@@ -523,7 +522,7 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
         logDebug("autoRecallHook block was EMPTY — no injection", { sessionId: input.sessionID });
       }
 
-      if (profileBlock) {
+      if (profileTtlExpired && profileBlock) {
         appendToSystem(output.system, profileBlock);
         logDebug("autoRecallHook profile injected after context", { sessionId: input.sessionID, outputSystemLength: output.system.length });
       }
@@ -779,6 +778,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       profileInjectedSessions.delete(input.sessionID);
       lastUserMsgCount.delete(input.sessionID);
       firstMessages.delete(input.sessionID);
+      processedMessageIds.delete(input.sessionID);
       if (input.sessionID) {
         logDebug("compactingHook cleared session state", { sessionID: input.sessionID });
       }
@@ -788,6 +788,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
     if (input.sessionID) {
       profileInjectedSessions.delete(input.sessionID);
       lastUserMsgCount.delete(input.sessionID);
+      processedMessageIds.delete(input.sessionID);
       logDebug("compactingHook cleared profile TTL for re-injection", { sessionID: input.sessionID });
     }
   };
@@ -903,7 +904,7 @@ export function autocontinueHook(
   };
 }
 
-const processedMessageIds = new Set<string>();
+const processedMessageIds = new Map<string, Set<string>>();
 const pluginStartTime = Date.now();
 
 export function sessionIdleHook(
@@ -1072,7 +1073,11 @@ export function sessionIdleHook(
 
         for (const msg of messages) {
           const msgId = msg.info?.id;
-          if (!msgId || processedMessageIds.has(msgId)) continue;
+          if (!msgId) continue;
+          if (!processedMessageIds.has(sessionID)) {
+            processedMessageIds.set(sessionID, new Set());
+          }
+          if (processedMessageIds.get(sessionID)!.has(msgId)) continue;
 
           const msgTime = msg.info?.createdAt ? new Date(msg.info.createdAt).getTime() : 0;
           if (msgTime > 0 && msgTime < pluginStartTime) continue;
@@ -1132,7 +1137,7 @@ export function sessionIdleHook(
           await cerebroClient.sessionIngest(conversationMessages, sessionID, effectiveAgentId, sessionTitle, projectName, projectPath);
           logInfo("sessionIdleHook sessionIngest ok");
           for (const id of newMessageIds) {
-            processedMessageIds.add(id);
+            processedMessageIds.get(sessionID)!.add(id);
           }
           showToast(tui, "🧠 Memory Sealed", `${conversationMessages.length} dialogues captured · entrusted to the heavens for refinement`, "success");
         } catch (err) {
