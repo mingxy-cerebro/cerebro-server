@@ -5,11 +5,12 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { CerebroClient } from "./client.js";
-import { autoRecallHook, autocontinueHook, compactingHook, keywordDetectionHook, sessionIdleHook, showToast as hooksShowToast, pocChatMessageHook } from "./hooks.js";
+import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, showToast as hooksShowToast, sessionMessages, firstMessages } from "./hooks.js";
+import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
-import { loadPluginConfig } from "./config.js";
+import { loadPluginConfig, resolveAgentPolicy } from "./config.js";
 import { startWebServer, stopWebServer } from "./web-server.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -103,7 +104,7 @@ const OmemPlugin: Plugin = async (input) => {
   let mainSessionLocked = false;
   let cachedAgentName: string | undefined;
 
-  const recallHook = autoRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
+  const chatMessageRecall = chatMessageRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
 
   let webServer: Server | null = null;
   const webEnabled = config.web?.enabled !== false;
@@ -145,20 +146,45 @@ const OmemPlugin: Plugin = async (input) => {
         description: "Toggle Cerebro auto-store ON or OFF for current session",
       };
     },
-    "experimental.chat.system.transform": async (input: any, output: any) => {
-      logDebug("transform input", { sessionID: input.sessionID });
+    "chat.message": async (input: any, output: any) => {
       if (input.sessionID && !mainSessionLocked) {
         mainSessionId = input.sessionID;
         mainSessionLocked = true;
         logInfo("mainSessionId locked", { sessionId: input.sessionID });
       }
-      return recallHook(input, output);
-    },
-    "chat.message": async (input: any, output: any) => {
-      // POC: test synthetic injection
-      await pocChatMessageHook()(input, output);
-      // Original keyword detection + message tracking
-      return keywordDetectionHook(cerebroClient, containerTags, config.ingest.autoCaptureThreshold, tui, config.ingest.ingestMode, config, agentId)(input, output);
+      await chatMessageRecall(input, output);
+      const textContent = output.parts
+        .filter((p: any) => p.type === "text" && !(p as any).synthetic)
+        .map((p: any) => p.text || (p as any).content || "")
+        .join(" ")
+        || (output.message as any).content
+        || "";
+      if (!firstMessages.has(input.sessionID)) {
+        firstMessages.set(input.sessionID, textContent);
+      }
+      if (detectSaveKeyword(textContent)) {
+        output.parts.push({
+          type: "text",
+          text: KEYWORD_NUDGE,
+          synthetic: true,
+        } as any);
+        logDebug("keyword nudge pushed via parts.push", { sessionId: input.sessionID });
+      }
+      if (detectRecallKeyword(textContent)) {
+        output.parts.push({
+          type: "text",
+          text: RECALL_NUDGE,
+          synthetic: true,
+        } as any);
+        logDebug("recall nudge pushed via parts.push", { sessionId: input.sessionID });
+      }
+      const policy = resolveAgentPolicy(agentId, config);
+      if (policy !== "none") {
+        if (!sessionMessages.has(input.sessionID)) {
+          sessionMessages.set(input.sessionID, []);
+        }
+        sessionMessages.get(input.sessionID)!.push({ role: "user", content: textContent });
+      }
     },
     "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
