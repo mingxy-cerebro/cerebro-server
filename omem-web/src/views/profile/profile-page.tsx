@@ -947,7 +947,7 @@ export function ProfilePage() {
             <AlertDialogDescription>
               确定要删除这条偏好吗？此操作不可撤销。
               {deleteTarget && (
-                <span className="block mt-2 px-3 py-2 rounded-lg bg-muted text-sm text-foreground truncate">
+                <span className="block mt-2 px-3 py-2 rounded-lg bg-muted text-sm text-foreground max-h-24 overflow-y-auto break-words">
                   {deleteTarget.value}
                 </span>
               )}
