@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -417,7 +417,6 @@ function EventCard({
   }, [initialItems, items])
 
   const loadMemory = useCallback(async (memoryId: string) => {
-    if (memories.has(memoryId) || memoriesLoading.has(memoryId)) return
     try {
       setMemoriesLoading((prev) => new Set(prev).add(memoryId))
       const data = await apiClient.get<MemoryDetail>(`/v1/memories/${memoryId}`)
@@ -435,16 +434,19 @@ function EventCard({
         return next
       })
     }
-  }, [memories, memoriesLoading])
+  }, [])
+
+  const loadedIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     if (!expanded || !items || items.length === 0) return
     items.forEach((item) => {
-      if (!memories.has(item.memory_id) && !memoriesLoading.has(item.memory_id)) {
+      if (!loadedIdsRef.current.has(item.memory_id)) {
+        loadedIdsRef.current.add(item.memory_id)
         loadMemory(item.memory_id)
       }
     })
-  }, [expanded, items, memories, memoriesLoading, loadMemory])
+  }, [expanded, items, loadMemory])
 
   const memoryUnlockedFor = (memoryId: string) => {
     return (vaultUnlocked && !manuallyLocked.has(memoryId)) || unlockedMemories.has(memoryId)

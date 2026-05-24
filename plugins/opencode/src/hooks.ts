@@ -136,8 +136,6 @@ export function showToast(tui: any, title: string, message: string, variant: str
 }
 
 const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
-  /^\[search-mode\]/,
-  /^\[analyze-mode\]/,
   /<!--\s*OMO_INTERNAL_INITIATOR\s*-->/,
   /^\[SYSTEM DIRECTIVE:/,
   /^\[restore checkpointed/,
@@ -148,7 +146,6 @@ const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
   /^\[GOAL\]/,
   /^## 任务[：:]/,
   /^## 改动/,
-  /^## 任务：/,
   /^Analyze the attached file/,
   /^Provide ONLY the extracted/,
   /^Called the Read tool/,
@@ -156,9 +153,20 @@ const SYSTEM_INJECTION_PATTERNS: RegExp[] = [
   /^[▣▪]\s*DCP/,
 ];
 
+const MODE_TAG_PATTERN = /^\[(?:search-mode|analyze-mode)\][\s\S]*?\n---\n?/;
+const MODE_TAG_LINE = /^\[(?:search-mode|analyze-mode)\]\s*\n/;
+
 function extractUserRequest(content: string): string {
   const match = content.match(/<user-request>([\s\S]*?)<\/user-request>/);
   let text = match ? match[1].trim() : content;
+
+  // [search-mode] / [analyze-mode]: 剥离标签+系统指令+分隔线，保留用户实际内容
+  const stripped = text.replace(MODE_TAG_PATTERN, "");
+  if (stripped !== text && stripped.trim()) {
+    text = stripped.trim();
+  } else {
+    text = text.replace(MODE_TAG_LINE, "").trim();
+  }
 
   for (const pattern of SYSTEM_INJECTION_PATTERNS) {
     if (pattern.test(text)) return "";
@@ -356,6 +364,14 @@ export function autoRecallHook(client: CerebroClient, containerTags: string[], t
               showToast(tui, "⚠️ Profile Inject Failed", "Preference injection skipped · will retry next turn", "error", toastDelayMs);
             }
           }
+        }
+      } else {
+        // TTL 未过期 — 从缓存恢复 profile 内容
+        const cached = lastProfileBlock.get(input.sessionID);
+        if (cached) {
+          profileBlock = cached.content;
+          profileCountText = `${cached.count} preferences`;
+          logDebug("autoRecallHook profile restored from cache", { preferenceCount: cached.count, contentLen: cached.content.length });
         }
       }
 
