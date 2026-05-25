@@ -25,42 +25,30 @@ pub const REFINE_SYSTEM_PROMPT: &str = r#"You are a memory refinement engine. Yo
 - Remove duplicate/redundant information across all sections.
 - If multiple sections describe the same event/decision, MERGE into one section using the LATEST timestamp.
 - Keep ONLY: final conclusions, key decisions, important outcomes, critical data points.
-- Remove: intermediate steps, verbose process details, outdated information, repetitive descriptions.
+- Remove: intermediate steps, verbose process details, outdated information within the same topic only, repetitive descriptions.
+- CRITICAL: Never remove an entire topic section. Each `## YYYY-MM-DD HH:MM Topic` section represents a distinct subject and MUST be preserved. Only compress content WITHIN each section.
+- CRITICAL: When new information is being added to existing memories, the output length MUST NOT be shorter than the existing memory content. Adding new facts should make the result LONGER, not shorter.
 
 ### Rule 3: Format Preservation
 - Maintain `## YYYY-MM-DD HH:MM Topic` section structure for distinct events.
 - Each section covers ONE distinct event/decision/milestone.
 - Chronological order (oldest first).
 
-### Rule 4: Precision Over Recall
-- It is BETTER to lose minor details than to keep redundant content.
-- The refined content MUST be shorter than the sum of all input contents.
-- Target: compress to 30-60% of original total length.
+### Rule 4: Length and Quality
+- Preserve ALL distinct facts, technical details, and key data points. Discard narrative filler, process descriptions, and verbose explanations.
+- Each fact should be stated ONCE in the most concise form possible. Merge redundant phrasing aggressively.
+- LENGTH RULE: Output MUST be at least 60% of existing memory length when adding new facts. Output grows ONLY by the net new unique facts added.
+- HARD MINIMUM: Output MUST be at least 30% of total input length (existing + new). Below this = you deleted important content.
+- Remove ALL: introductory phrases, transitional sentences, meta-commentary, and descriptive padding.
 
-## OUTPUT FORMAT
-Return ONLY valid JSON:
+## OUTPUT FORMAT (MANDATORY — ALL FIELDS MUST FOLLOW THESE EXACT FORMATS)
+Return ONLY valid JSON (all fields MUST be in the same language as the input):
 {
-  "refined_content": "Deduplicated content in section format",
-  "l0_abstract": "Topic label covering the full scope (≤100 chars)",
-  "l1_overview": "Timeline in arrow format: A→B→C→result (≤150 chars)",
-  "l2_content": "Key facts: decisions, conclusions, data (≤300 chars)"
-}
-
-## l1_overview FORMAT (MANDATORY)
-Must use arrow notation: `verb phrase→verb phrase→result`
-Examples:
-- "diagnosed bug→traced to handler→fixed with lookup table→verified→deployed v1.16.10"
-- "requirement analysis→design review→implemented→tested→released"
-- "identified perf issue→benchmarked 3 solutions→chose option B→deployed→latency reduced 70%"
-Each node = verb phrase (what happened), arrows = temporal/causal progression.
-
-## l2_content FORMAT
-Compress to structured key facts only:
-- Root cause: X
-- Fix: Y
-- Verification: Z
-- Key metric: N
-Remove all narrative/process description."#;
+  "refined_content": "Deduplicated content in ## YYYY-MM-DD HH:MM Topic section format",
+  "l0_abstract": "Short topic label (≤100 chars, e.g. 'PostgreSQL性能优化')",
+  "l1_overview": "MUST be arrow notation: verb→verb→result (≤150 chars, e.g. 'diagnosed→traced→fixed→verified→deployed v1.16.10'). NEVER write paragraphs. NEVER use ## headers.",
+  "l2_content": "Structured key facts only: decisions, conclusions, data points (≤300 chars, e.g. 'Root cause: X. Fix: Y. Result: Z.'). NEVER write paragraphs. NEVER use ## headers."
+}"#;
 
 pub fn build_refine_prompt(input: &RefineInput) -> (String, String) {
     let system = REFINE_SYSTEM_PROMPT.to_string();

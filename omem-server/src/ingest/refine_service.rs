@@ -9,15 +9,8 @@ use crate::store::lancedb::LanceStore;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// LLM精炼输入最大字符数
-const MAX_INPUT_CHARS: usize = 8000;
-/// 精炼时最多取的旧记忆条数
-const MAX_CHAIN_FOR_REFINE: usize = 3;
-/// 单条旧记忆最大字符数（超过截断）
-const MAX_SINGLE_MEMORY_CHARS: usize = 3000;
-/// 精炼后全文最大字符数（超限截断）
-const MAX_REFINED_CONTENT_CHARS: usize = 3000;
-
+/// 单条旧记忆最大字符数（超过截断或触发split）
+pub const MAX_SINGLE_MEMORY_CHARS: usize = 3000;
 /// BFS遍历Continues/ContinuedBy relation链，收集链上所有Memory实体（含root）
 pub async fn collect_chain_memories(
     store: &LanceStore,
@@ -78,7 +71,7 @@ pub async fn find_similar_work_memory(
     // MemoryType has no Work variant; session_ingest distinguishes via scope
     let work_memories: Vec<Memory> = session_memories
         .into_iter()
-        .filter(|m| m.scope != "private")
+        .filter(|m| m.scope != "private" && m.source.as_deref() == Some("session_ingest"))
         .collect();
 
     let mut best: Option<(Memory, f32)> = None;
@@ -98,7 +91,10 @@ pub async fn find_similar_work_memory(
     Ok(best.map(|(m, _)| m))
 }
 
-/// 调LLM精炼，存结果，物理删除旧记忆
+/// 调LLM精炼，原地update目标记忆（id不变，保留relations）
+/// 
+/// 只精炼链尾（root_memory自身），不合并整条链。
+/// 精炼后直接update原记忆，不删旧建新，保留所有关联。
 pub async fn refine_and_replace(
     store: &LanceStore,
     llm: &Arc<dyn LlmService>,
@@ -112,38 +108,18 @@ pub async fn refine_and_replace(
         topic = %topic,
         chain_len = chain_memories.len(),
         new_fact_len = new_fact.chars().count(),
-        "session_ingest: starting WORK refine"
+        "session_ingest: starting WORK refine (in-place update)"
     );
 
-    let mut contents: Vec<String> = chain_memories
-        .iter()
-        .rev()
-        .take(MAX_CHAIN_FOR_REFINE)
-        .map(|m| {
-            if m.content.chars().count() > MAX_SINGLE_MEMORY_CHARS {
-                let truncated: String = m.content.chars().take(MAX_SINGLE_MEMORY_CHARS).collect();
-                format!("{truncated}...")
-            } else {
-                m.content.clone()
-            }
-        })
-        .collect();
-    contents.reverse();
-
-    let total_chars: usize = contents.iter().map(|c| c.chars().count()).sum();
-    if total_chars > MAX_INPUT_CHARS {
-        if let Some(latest) = chain_memories.last() {
-            contents = vec![if latest.content.chars().count() > MAX_SINGLE_MEMORY_CHARS {
-                let truncated: String = latest.content.chars().take(MAX_SINGLE_MEMORY_CHARS).collect();
-                format!("{truncated}...")
-            } else {
-                latest.content.clone()
-            }];
-        }
-    }
+    let existing_content = if root_memory.content.chars().count() > MAX_SINGLE_MEMORY_CHARS {
+        let truncated: String = root_memory.content.chars().take(MAX_SINGLE_MEMORY_CHARS).collect();
+        format!("{truncated}...")
+    } else {
+        root_memory.content.clone()
+    };
 
     let input = RefineInput {
-        existing_contents: contents,
+        existing_contents: vec![existing_content],
         new_fact: new_fact.to_string(),
         topic: topic.to_string(),
     };
@@ -152,22 +128,23 @@ pub async fn refine_and_replace(
 
     let refined: RefineOutput = complete_json(&**llm, &system, &user).await?;
 
-    let refined_content = truncate_at_sentence_boundary(&refined.refined_content, MAX_REFINED_CONTENT_CHARS);
+    let refined_content = refined.refined_content;
     let l1_overview = truncate_at_sentence_boundary(&refined.l1_overview, 150);
     let l2_content = truncate_at_sentence_boundary(&refined.l2_content, 300);
+
     let best_tier_str = chain_memories
         .iter()
         .map(|m| m.tier.to_string())
         .max_by_key(|t| tier_priority(t))
-        .unwrap_or_else(|| "peripheral".to_string());
+        .unwrap_or_else(|| root_memory.tier.to_string());
     let inherited_tier = best_tier_str
         .parse()
-        .unwrap_or_else(|_| crate::domain::types::Tier::Peripheral);
+        .unwrap_or(root_memory.tier.clone());
 
     let inherited_importance = chain_memories
         .iter()
         .map(|m| m.importance)
-        .fold(0.5f32, f32::max);
+        .fold(root_memory.importance, f32::max);
 
     let mut inherited_tags: Vec<String> = chain_memories
         .iter()
@@ -176,44 +153,43 @@ pub async fn refine_and_replace(
     inherited_tags.sort();
     inherited_tags.dedup();
 
-    let mut new_memory = root_memory.clone();
-    new_memory.id = uuid::Uuid::new_v4().to_string();
-    new_memory.content = refined_content;
-    new_memory.l0_abstract = refined.l0_abstract;
-    new_memory.l1_overview = l1_overview;
-    new_memory.l2_content = l2_content;
-    new_memory.tier = inherited_tier;
-    new_memory.importance = inherited_importance;
-    new_memory.tags = inherited_tags;
-    new_memory.relations = Vec::new();
-    new_memory.superseded_by = None;
-    new_memory.updated_at = chrono::Utc::now().to_rfc3339();
+    let mut updated = root_memory.clone();
+    updated.content = refined_content;
+    updated.l0_abstract = refined.l0_abstract;
+    updated.l1_overview = l1_overview;
+    updated.l2_content = l2_content;
+    updated.tier = inherited_tier;
+    updated.importance = inherited_importance;
+    updated.tags = inherited_tags;
+    updated.updated_at = chrono::Utc::now().to_rfc3339();
+
+    // If content exceeds 3000 chars, do NOT embed+update here —
+    // the caller will handle split, which embeds and writes each part.
+    // This avoids a wasted embed+update that split_memory would immediately overwrite.
+    if updated.content.chars().count() > MAX_SINGLE_MEMORY_CHARS {
+        tracing::info!(
+            memory_id = %updated.id,
+            content_len = updated.content.chars().count(),
+            "session_ingest: WORK refined content exceeds 3000, deferring to split"
+        );
+        return Ok(updated);
+    }
 
     let vectors = embed
-        .embed(&[new_memory.content.clone()])
+        .embed(&[updated.content.clone()])
         .await
         .map_err(|e| OmemError::Embedding(format!("embed failed: {e}")))?;
     let vector = vectors.into_iter().next();
 
-    if let Some(ref v) = vector {
-        store.create(&new_memory, Some(v)).await?;
-    } else {
-        store.create(&new_memory, None).await?;
-    }
+    store.update(&updated, vector.as_deref()).await?;
 
     tracing::info!(
-        new_content_len = new_memory.content.chars().count(),
-        deleted_count = chain_memories.len(),
-        "session_ingest: WORK refine completed, replacing old memories"
+        memory_id = %updated.id,
+        new_content_len = updated.content.chars().count(),
+        "session_ingest: WORK refine completed (in-place update, relations preserved)"
     );
 
-    let old_ids: Vec<String> = chain_memories.iter().map(|m| m.id.clone()).collect();
-
-    if !old_ids.is_empty() {
-        store.batch_hard_delete_by_ids(&old_ids).await?;
-    }
-
-    Ok(new_memory)
+    Ok(updated)
 }
 
 /// 按句子边界截断字符串，超限强制chars().take(max_chars)

@@ -1733,6 +1733,9 @@ pub async fn session_ingest(
                 for &pos in &heading_positions {
                     let first_half = &content[..pos];
                     let char_count = first_half.trim_end().chars().count();
+                    if char_count == 0 {
+                        continue;
+                    }
                     if char_count <= max_chars {
                         best_split_byte = Some(pos);
                     } else {
@@ -1775,49 +1778,33 @@ pub async fn session_ingest(
                 }
 
                 original.content = first_half.clone();
-                if first_half.chars().count() <= 150 {
-                    original.l1_overview = first_half.clone();
-                } else {
-                    original.l1_overview = format!("{}...", first_half.chars().take(147).collect::<String>());
+                // Preserve L1/L2 from refine LLM (arrow format) instead of overwriting with raw content truncation
+                if original.l1_overview.chars().count() > 150 {
+                    let truncated: String = original.l1_overview.chars().take(147).collect();
+                    original.l1_overview = format!("{truncated}...");
                 }
-                if first_half.chars().count() <= 500 {
-                    original.l2_content = first_half.clone();
-                } else {
-                    original.l2_content = format!("{}...", first_half.chars().take(497).collect::<String>());
+                if original.l2_content.chars().count() > 500 {
+                    let truncated: String = original.l2_content.chars().take(497).collect();
+                    original.l2_content = format!("{truncated}...");
                 }
 
-                let original_vec = match state.embed.embed(&[first_half.clone()]).await {
-                    Ok(vecs) => vecs.into_iter().next(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "session_ingest: failed to re-embed truncated WORK memory");
-                        None
-                    }
-                };
-                if let Err(e) = store.update(original, original_vec.as_deref()).await {
-                    tracing::warn!(error = %e, memory_id = %original.id, "session_ingest: failed to update truncated WORK memory");
-                    return None;
-                }
-                tracing::info!(
-                    memory_id = %original.id,
-                    first_chars = first_half.chars().count(),
-                    "session_ingest: truncated WORK memory for split"
-                );
-
+                // ── Create the second half FIRST, then update original ──
+                // If create fails, original still has full content (safe degradation).
                 let now = chrono::Utc::now().to_rfc3339();
                 let new_id = uuid::Uuid::new_v4().to_string();
                 let new_mem = crate::domain::memory::Memory {
                     id: new_id.clone(),
                     content: second_half.clone(),
                     l0_abstract: original.l0_abstract.clone(),
-                    l1_overview: if second_half.chars().count() <= 150 {
-                        second_half.clone()
+                    l1_overview: if original.l1_overview.chars().count() <= 150 {
+                        original.l1_overview.clone()
                     } else {
-                        format!("{}...", second_half.chars().take(147).collect::<String>())
+                        format!("{}...", original.l1_overview.chars().take(147).collect::<String>())
                     },
-                    l2_content: if second_half.chars().count() <= 500 {
-                        second_half.clone()
+                    l2_content: if original.l2_content.chars().count() <= 500 {
+                        original.l2_content.clone()
                     } else {
-                        format!("{}...", second_half.chars().take(497).collect::<String>())
+                        format!("{}...", original.l2_content.chars().take(497).collect::<String>())
                     },
                     category: original.category.clone(),
                     memory_type: original.memory_type.clone(),
@@ -1863,13 +1850,42 @@ pub async fn session_ingest(
                 };
 
                 if let Err(e) = store.create(&new_mem, new_vec.as_deref()).await {
-                    tracing::warn!(error = %e, "session_ingest: failed to create split continuation WORK memory");
+                    tracing::warn!(error = %e, "session_ingest: failed to create split continuation WORK memory — keeping original intact");
                     return None;
                 }
                 tracing::info!(
                     new_memory_id = %new_id,
                     second_chars = new_mem.content.chars().count(),
                     "session_ingest: created WORK continuation memory from split"
+                );
+
+                // ── Now safe to truncate the original to first half ──
+                // If this fails, we have both: original (full) + new (second half) — slightly redundant but no data loss.
+                 original.content = first_half.clone();
+                 if original.l1_overview.chars().count() > 150 {
+                     let truncated: String = original.l1_overview.chars().take(147).collect();
+                     original.l1_overview = format!("{truncated}...");
+                 }
+                 if original.l2_content.chars().count() > 500 {
+                     let truncated: String = original.l2_content.chars().take(497).collect();
+                     original.l2_content = format!("{truncated}...");
+                 }
+
+                let original_vec = match state.embed.embed(&[first_half.clone()]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to re-embed truncated WORK memory");
+                        None
+                    }
+                };
+                if let Err(e) = store.update(original, original_vec.as_deref()).await {
+                    tracing::warn!(error = %e, memory_id = %original.id, "session_ingest: failed to update truncated WORK memory — continuation already created");
+                    // Non-fatal: new_mem exists, original just wasn't truncated
+                }
+                tracing::info!(
+                    memory_id = %original.id,
+                    first_chars = first_half.chars().count(),
+                    "session_ingest: truncated WORK memory for split"
                 );
 
                 Some(new_id)
@@ -1997,19 +2013,31 @@ pub async fn session_ingest(
                                 refine_and_replace(&store, &state.llm, &state.embed, existing, &chain, &summary, &topic.topic).await
                             }
                         ).await {
-                            Ok(Ok(refined)) => {
+                            Ok(Ok(mut refined)) => {
+                                let content_len = refined.content.chars().count();
                                 tracing::info!(
                                     memory_id = %refined.id,
-                                    new_len = refined.content.chars().count(),
+                                    new_len = content_len,
                                     "session_ingest: WORK refined successfully"
                                 );
-                                if refined.content.chars().count() > 3000 {
-                                    tracing::warn!(
-                                        len = refined.content.chars().count(),
-                                        "session_ingest: refined content exceeds 3000 chars, should have been truncated by refine_service"
-                                    );
+                                if content_len > crate::ingest::refine_service::MAX_SINGLE_MEMORY_CHARS {
+                                    let head_id = work_original_parent_id.as_deref().unwrap_or(&refined.id).to_string();
+                                    let content_for_split = refined.content.clone();
+                                    if let Some(child_id) = split_memory(&mut refined, &content_for_split, &head_id, &state, &store).await {
+                                        if work_original_parent_id.is_none() {
+                                            work_original_parent_id = Some(refined.id.clone());
+                                        }
+                                        add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                        tracing::info!(
+                                            parent_id = %refined.id,
+                                            child_id = %child_id,
+                                            "session_ingest: refined content split, created continuation"
+                                        );
+                                    }
+                                    refined_texts.push(content_for_split);
+                                } else {
+                                    refined_texts.push(refined.content.clone());
                                 }
-                                refined_texts.push(refined.content.clone());
                                 existing_work_memory = Some(refined);
                                 continue;
                             }
@@ -2515,6 +2543,7 @@ async fn fetch_session_work_memory(
                     m.session_id.as_deref() == Some(sid)
                         && m.scope != "private"
                         && m.category != Category::new("preferences")
+                        && m.source.as_deref() == Some("session_ingest")
                 })
                 .collect::<Vec<_>>(),
         Err(_) => return None,
