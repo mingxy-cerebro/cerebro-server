@@ -8,7 +8,7 @@ import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHoo
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
-import { logInfo, logDebug, logError } from "./logger.js";
+import { logInfo, logDebug, logError, setOpencodeClient } from "./logger.js";
 import { loadPluginConfig, resolveAgentPolicy } from "./config.js";
 import { checkAndUpdate } from "./updater.js";
 import { startWebServer, stopWebServer, type WebServerHandle } from "./web-server.js";
@@ -65,6 +65,8 @@ const OmemPlugin: Plugin = async (input) => {
 
   const config = loadPluginConfig(overrides as any);
   const toast = createToast(config);
+
+  setOpencodeClient(client);
 
   const cerebroClient = new CerebroClient(config.connection.apiUrl, config.connection.apiKey, config);
 

@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
+import { logInfo, logWarn, logError } from "./logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,7 +76,7 @@ export async function startWebServer(
 
   // ── Step 1: 检查端口是否已有 cerebro server ──
   if (await probeExistingServer(port)) {
-    console.log(`[cerebro:web] Reusing existing server on port ${port}`);
+    logInfo("web-server: reusing existing server", { port });
     return createHandle(port, heartbeatFilePath);
   }
 
@@ -87,9 +88,7 @@ export async function startWebServer(
       // 有其他进程正在 fork 或运行，等待 200ms 后重试
       await new Promise((r) => setTimeout(r, 200));
       if (await probeExistingServer(port)) {
-        console.log(
-          `[cerebro:web] Reusing server after PID check on port ${port}`,
-        );
+        logInfo("web-server: reusing server after PID check", { port });
         return createHandle(port, heartbeatFilePath);
       }
     } else {
@@ -101,15 +100,11 @@ export async function startWebServer(
   // ── Step 3: 检查 web 目录 ──
   const webDir = path.resolve(__dirname, "..", "web");
   if (!fs.existsSync(webDir)) {
-    console.warn(
-      `[cerebro:web] Web directory not found: ${webDir}, skipping server start`,
-    );
+    logWarn("web-server: web directory not found, skipping", { webDir });
     return null;
   }
   if (!fs.existsSync(path.join(webDir, "index.html"))) {
-    console.warn(
-      `[cerebro:web] index.html not found in ${webDir}, skipping server start`,
-    );
+    logWarn("web-server: index.html not found, skipping", { webDir });
     return null;
   }
 
@@ -119,7 +114,10 @@ export async function startWebServer(
   } catch { /* ignore */ }
 
   // ── Step 5: Fork 子进程 ──
-  const childPath = path.resolve(__dirname, "web-server-child.js");
+  // TS runtime: .ts exists; compiled: .js exists
+  const childTs = path.resolve(__dirname, "web-server-child.ts");
+  const childJs = path.resolve(__dirname, "web-server-child.js");
+  const childPath = fs.existsSync(childTs) ? childTs : childJs;
 
   const child = fork(childPath, [], {
     detached: true,
@@ -161,17 +159,13 @@ export async function startWebServer(
   });
 
   if (!ready) {
-    console.warn(
-      `[cerebro:web] Failed to start web server child process on port ${port}`,
-    );
+    logError("web-server: failed to start child process", { port });
     try { child.kill(); } catch { /* ignore */ }
     try { fs.unlinkSync(pidFilePath); } catch { /* ignore */ }
     return null;
   }
 
-  console.log(
-    `[cerebro:web] Web server child process started on port ${port}`,
-  );
+  logInfo("web-server: child process started", { port, pid: child.pid });
   return createHandle(port, heartbeatFilePath);
 }
 

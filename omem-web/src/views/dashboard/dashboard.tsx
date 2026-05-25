@@ -48,6 +48,9 @@ interface StatsResponse {
   by_tier: Record<string, number>
   by_state: Record<string, number>
   by_space: Record<string, number>
+  by_visibility: Record<string, number>
+  by_agent: Record<string, number>
+  by_source: Record<string, number>
   timeline: TimelineEntry[]
   avg_importance: number
   avg_confidence: number
@@ -194,6 +197,29 @@ export function DashboardPage() {
   const categoryData = useMemo(() => {
     if (!stats?.by_category) return []
     return Object.entries(stats.by_category)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10)
+  }, [stats])
+
+  const visibilityData = useMemo(() => {
+    if (!stats?.by_visibility) return []
+    return Object.entries(stats.by_visibility)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+  }, [stats])
+
+  const agentData = useMemo(() => {
+    if (!stats?.by_agent) return []
+    return Object.entries(stats.by_agent)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10)
+  }, [stats])
+
+  const sourceData = useMemo(() => {
+    if (!stats?.by_source) return []
+    return Object.entries(stats.by_source)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 10)
@@ -455,6 +481,112 @@ export function DashboardPage() {
                   <Bar
                     dataKey="value"
                     fill="#06b6d4"
+                    radius={[0, 4, 4, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">可见性分布</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <ChartSkeleton />
+            ) : visibilityData.length === 0 ? (
+              <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
+                暂无数据
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={280}>
+                <PieChart>
+                  <Pie
+                    data={visibilityData}
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={100}
+                    dataKey="value"
+                    label={({ name, percent }) =>
+                      `${name} ${(percent * 100).toFixed(0)}%`
+                    }
+                  >
+                    {visibilityData.map((entry, index) => (
+                      <Cell
+                        key={`visibility-${entry.name}`}
+                        fill={COLORS[index % COLORS.length]}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Agent TOP10</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <ChartSkeleton />
+            ) : agentData.length === 0 ? (
+              <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
+                暂无数据
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={agentData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                  <XAxis type="number" tick={{ fontSize: 12 }} />
+                  <YAxis
+                    dataKey="name"
+                    type="category"
+                    tick={{ fontSize: 11 }}
+                    width={100}
+                  />
+                  <Tooltip />
+                  <Bar
+                    dataKey="value"
+                    fill="#6366f1"
+                    radius={[0, 4, 4, 0]}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">来源 TOP10</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <ChartSkeleton />
+            ) : sourceData.length === 0 ? (
+              <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
+                暂无数据
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={sourceData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                  <XAxis type="number" tick={{ fontSize: 12 }} />
+                  <YAxis
+                    dataKey="name"
+                    type="category"
+                    tick={{ fontSize: 11 }}
+                    width={100}
+                  />
+                  <Tooltip />
+                  <Bar
+                    dataKey="value"
+                    fill="#f59e0b"
                     radius={[0, 4, 4, 0]}
                   />
                 </BarChart>

@@ -33,8 +33,12 @@ function getConfig() {
   return cachedConfig;
 }
 
-function getLogFilePath(): string {
-  return join(getConfig().logging.logDir, "plugin.log");
+function getLogFilePath(sessionId?: string): string {
+  const base = getConfig().logging.logDir;
+  if (sessionId) {
+    return join(base, `cerebro-${sessionId}.log`);
+  }
+  return join(base, "cerebro.log");
 }
 
 function getMinLevel(): number {
@@ -109,7 +113,8 @@ function writeLog(level: string, message: string, fields?: Record<string, unknow
   if (lvl < getMinLevel()) return;
 
   const cfg = getConfig();
-  const logFile = getLogFilePath();
+  const sid = (fields?.sessionId ?? fields?.sessionID) as string | undefined;
+  const logFile = getLogFilePath(sid);
   ensureLogDir(cfg.logging.logDir);
 
   const now = new Date();

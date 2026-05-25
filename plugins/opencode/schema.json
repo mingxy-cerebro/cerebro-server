@@ -190,6 +190,11 @@
       "description": "Default policy for agents not listed in agentMemoryPolicy",
       "enum": ["none", "readonly", "readwrite"],
       "default": "readwrite"
+    },
+    "autoUpdate": {
+      "type": "boolean",
+      "description": "Enable automatic plugin update checks on startup (npm pack + tar, non-blocking)",
+      "default": false
     }
   },
   "additionalProperties": false

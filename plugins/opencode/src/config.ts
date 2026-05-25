@@ -177,7 +177,7 @@ function configLog(message: string, fields?: Record<string, unknown>, level: str
   if (lvl < CONFIGURED_MIN_LEVEL) return;
   try {
     const logDir = join(homedir(), ".config", "cerebro", "logs");
-    const logPath = join(logDir, "plugin.log");
+    const logPath = join(logDir, "cerebro.log");
     const ts = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
     const parts = [`${level.padEnd(5)} ${ts} service=cerebro ${message}`];
     if (fields) {

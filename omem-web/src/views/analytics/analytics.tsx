@@ -47,6 +47,9 @@ interface StatsData {
   by_tier: Record<string, number>
   by_state: Record<string, number>
   by_space: Record<string, number>
+  by_visibility: Record<string, number>
+  by_agent: Record<string, number>
+  by_source: Record<string, number>
   timeline: TimelineEntry[]
   avg_importance: number
   avg_confidence: number
@@ -108,6 +111,9 @@ export function AnalyticsPage() {
   const typeData = useMemo(() => toChartData(stats?.by_type), [stats])
   const tierData = useMemo(() => toChartData(stats?.by_tier), [stats])
   const stateData = useMemo(() => toChartData(stats?.by_state), [stats])
+  const visibilityData = useMemo(() => toChartData(stats?.by_visibility), [stats])
+  const agentData = useMemo(() => toChartData(stats?.by_agent, 10), [stats])
+  const sourceData = useMemo(() => toChartData(stats?.by_source, 10), [stats])
 
   const activityRate = useMemo(() => {
     if (!stats || !stats.total || !stats.total_access_count) return "0%"
@@ -360,6 +366,80 @@ export function AnalyticsPage() {
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Bar dataKey="value" fill="#10b981" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">可见性分布</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={280}>
+              <PieChart>
+                <Pie
+                  data={visibilityData}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={60}
+                  outerRadius={100}
+                  paddingAngle={2}
+                  dataKey="value"
+                >
+                  {visibilityData.map((entry, index) => (
+                    <Cell key={`vis-${entry.name}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-2 mt-4 justify-center">
+              {visibilityData.map((entry, index) => (
+                <Badge
+                  key={entry.name}
+                  variant="secondary"
+                  style={{
+                    backgroundColor: `${COLORS[index % COLORS.length]}20`,
+                    color: COLORS[index % COLORS.length],
+                  }}
+                >
+                  {entry.name} ({entry.value})
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Agent 分布</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={agentData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip />
+                <Bar dataKey="value" fill="#6366f1" />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">来源分布</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={sourceData} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+                <XAxis type="number" tick={{ fontSize: 12 }} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 12 }} width={80} />
+                <Tooltip />
+                <Bar dataKey="value" fill="#f59e0b" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </CardContent>

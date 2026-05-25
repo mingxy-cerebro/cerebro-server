@@ -10,6 +10,32 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
+// ── Lightweight file logger for child process ──────────────────────────
+// Cannot import logger.ts (no opencodeClient + circular dependency risk).
+// Writes to cerebro-web-child.log in the configured log directory.
+
+const CHILD_LOG_FILE = path.join(
+  process.env.OMEM_LOG_DIR || path.join(os.homedir(), ".config", "cerebro", "logs"),
+  "cerebro-web-child.log",
+);
+
+function childLog(level: string, message: string, fields?: Record<string, unknown>): void {
+  try {
+    const dir = path.dirname(CHILD_LOG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const now = new Date();
+    const ts = now.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+    const parts = [`${level.padEnd(5)} ${ts} service=cerebro-web-child`];
+    if (fields) {
+      for (const [k, v] of Object.entries(fields)) {
+        parts.push(`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
+      }
+    }
+    parts.push(message);
+    fs.appendFileSync(CHILD_LOG_FILE, parts.join(" ") + "\n");
+  } catch { /* best effort */ }
+}
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 interface ChildConfig {
@@ -138,14 +164,14 @@ function startServer(config: ChildConfig): void {
   try {
     fs.writeFileSync(pidFilePath, String(process.pid));
   } catch {
-    console.error("[cerebro:web-child] Failed to write PID file");
+    childLog("ERROR", "Failed to write PID file");
   }
 
   // 初始 touch 心跳文件
   try {
     fs.writeFileSync(heartbeatFilePath, "");
   } catch {
-    console.error("[cerebro:web-child] Failed to create heartbeat file");
+    childLog("ERROR", "Failed to create heartbeat file");
   }
 
   server = http.createServer(
@@ -199,15 +225,13 @@ function startServer(config: ChildConfig): void {
   );
 
   server.on("error", (err: NodeJS.ErrnoException) => {
-    console.error(`[cerebro:web-child] Server error: ${err.message}`);
+    childLog("ERROR", "Server error", { error: err.message });
     process.send?.({ type: "error", message: err.message });
     cleanup();
   });
 
   server.listen(port, "127.0.0.1", () => {
-    console.log(
-      `[cerebro:web-child] Server listening on http://localhost:${port}`,
-    );
+    childLog("INFO", "Server listening", { port });
     process.send?.({ type: "ready", port });
   });
 
@@ -216,9 +240,7 @@ function startServer(config: ChildConfig): void {
     try {
       const stat = fs.statSync(heartbeatFilePath);
       if (Date.now() - stat.mtimeMs > 60_000) {
-        console.log(
-          "[cerebro:web-child] Heartbeat expired, shutting down",
-        );
+        childLog("INFO", "Heartbeat expired, shutting down");
         cleanup();
       }
     } catch {
