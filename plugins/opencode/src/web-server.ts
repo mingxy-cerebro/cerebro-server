@@ -119,9 +119,13 @@ export async function startWebServer(
   const childJs = path.resolve(__dirname, "web-server-child.js");
   const childPath = fs.existsSync(childTs) ? childTs : childJs;
 
+  // Use the same executor as the parent process (tsx, node, etc.)
+  // so the child can run .ts files. Also inherit execArgv (--import tsx, etc.)
   const child = fork(childPath, [], {
     detached: true,
     stdio: ["pipe", "pipe", "pipe", "ipc"],
+    execPath: process.execPath,
+    execArgv: process.execArgv,
   });
 
   // Drain stdout/stderr to prevent pipe buffer from blocking the child
