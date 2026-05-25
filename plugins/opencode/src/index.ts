@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import type { Server } from "node:http";
 import { CerebroClient } from "./client.js";
 import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, createToast, sessionMessages, firstMessages } from "./hooks.js";
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
@@ -11,7 +10,8 @@ import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
 import { logInfo, logDebug, logError } from "./logger.js";
 import { loadPluginConfig, resolveAgentPolicy } from "./config.js";
-import { startWebServer, stopWebServer } from "./web-server.js";
+import { checkAndUpdate } from "./updater.js";
+import { startWebServer, stopWebServer, type WebServerHandle } from "./web-server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -103,7 +103,7 @@ const OmemPlugin: Plugin = async (input) => {
 
   const chatMessageRecall = chatMessageRecallHook(cerebroClient, containerTags, tui, config, () => cachedAgentName || agentId, directory);
 
-  let webServer: Server | null = null;
+  let webServer: WebServerHandle | null = null;
   const webEnabled = config.web?.enabled !== false;
   let webPort: number | undefined;
   if (webEnabled) {
@@ -125,8 +125,11 @@ const OmemPlugin: Plugin = async (input) => {
   if (webPort) {
     toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `🌐 Open in browser http://localhost:${webPort}`, "success");
   } else {
-    toast(tui, "🧠 Connected", `v${pluginVersion}`, "success");
+    toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, "No web server", "success");
   }
+
+  // Auto-update check (fire-and-forget, non-blocking)
+  checkAndUpdate(tui, pluginVersion).catch(() => {});
 
   const shutdown = async () => {
     try {

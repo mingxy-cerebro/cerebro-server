@@ -1,6 +1,16 @@
-import { appendFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  existsSync,
+  statSync,
+  renameSync,
+  readdirSync,
+  unlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { loadPluginConfig } from "./config.js";
+
+// ── Level map ─────────────────────────────────────────────────────────
 
 const LEVEL_MAP: Record<string, number> = {
   DEBUG: 0,
@@ -9,27 +19,99 @@ const LEVEL_MAP: Record<string, number> = {
   ERROR: 3,
 };
 
-const cfg = loadPluginConfig();
-const MIN_LEVEL = LEVEL_MAP[cfg.logging.logLevel] ?? LEVEL_MAP.INFO;
-const LOG_DIR = cfg.logging.logDir;
-const LOG_FILE = join(LOG_DIR, "plugin.log");
-const LOG_ENABLED = cfg.logging.logEnabled;
+// ── Config access with 30-second TTL cache ────────────────────────────
+
+let cachedConfig: ReturnType<typeof loadPluginConfig> | null = null;
+let configCacheTime = 0;
+const CONFIG_TTL_MS = 30_000;
+
+function getConfig() {
+  const now = Date.now();
+  if (cachedConfig && (now - configCacheTime) < CONFIG_TTL_MS) return cachedConfig;
+  cachedConfig = loadPluginConfig();
+  configCacheTime = now;
+  return cachedConfig;
+}
+
+function getLogFilePath(): string {
+  return join(getConfig().logging.logDir, "plugin.log");
+}
+
+function getMinLevel(): number {
+  return LEVEL_MAP[getConfig().logging.logLevel] ?? LEVEL_MAP.INFO;
+}
+
+function isLogEnabled(): boolean {
+  return getConfig().logging.logEnabled;
+}
+
+// ── Opencode client for dual-track logging ────────────────────────────
+
+let opencodeClient: any = null;
+
+export function setOpencodeClient(client: any): void {
+  opencodeClient = client;
+}
+
+// ── Log file rotation (5 MB threshold) ────────────────────────────────
+// NOTE: multi-window concurrent rotate is a known limitation — the last
+// writer to rename wins; earlier writers will create a fresh file.
+
+const MAX_LOG_SIZE = 5 * 1024 * 1024; // 5 MB
+
+function rotateIfNeeded(logFile: string): void {
+  try {
+    const s = statSync(logFile);
+    if (s.size > MAX_LOG_SIZE) {
+      renameSync(logFile, logFile.replace(".log", ".old.log"));
+    }
+  } catch { /* file doesn't exist yet, first write */ }
+}
+
+// ── Startup cleanup (delete logs older than 7 days) ───────────────────
+
+const LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function cleanupOldLogs(): void {
+  const logDir = getConfig().logging.logDir;
+  try {
+    const files = readdirSync(logDir);
+    const cutoff = Date.now() - LOG_MAX_AGE_MS;
+    for (const f of files) {
+      if (!f.endsWith(".log") && !f.endsWith(".old.log")) continue;
+      const fp = join(logDir, f);
+      try {
+        const s = statSync(fp);
+        if (s.mtimeMs < cutoff) unlinkSync(fp);
+      } catch {}
+    }
+  } catch {}
+}
+
+// Run cleanup once at module load
+cleanupOldLogs();
+
+// ── Core logging ──────────────────────────────────────────────────────
 
 let lastLogTime = Date.now();
 
-function ensureLogDir(): void {
-  if (!existsSync(LOG_DIR)) {
+function ensureLogDir(logDir: string): void {
+  if (!existsSync(logDir)) {
     try {
-      mkdirSync(LOG_DIR, { recursive: true });
+      mkdirSync(logDir, { recursive: true });
     } catch {}
   }
 }
 
 function writeLog(level: string, message: string, fields?: Record<string, unknown>): void {
-  if (!LOG_ENABLED) return;
+  if (!isLogEnabled()) return;
   const lvl = LEVEL_MAP[level] ?? 0;
-  if (lvl < MIN_LEVEL) return;
-  ensureLogDir();
+  if (lvl < getMinLevel()) return;
+
+  const cfg = getConfig();
+  const logFile = getLogFilePath();
+  ensureLogDir(cfg.logging.logDir);
+
   const now = new Date();
   const nowMs = now.getTime();
   const delta = ((nowMs - lastLogTime) / 1000).toFixed(2);
@@ -44,10 +126,22 @@ function writeLog(level: string, message: string, fields?: Record<string, unknow
     }
   }
   parts.push(message);
+
+  // Track 1: file
   try {
-    appendFileSync(LOG_FILE, parts.join(" ") + "\n");
+    rotateIfNeeded(logFile);
+    appendFileSync(logFile, parts.join(" ") + "\n");
   } catch {}
+
+  // Track 2: opencode client
+  try {
+    opencodeClient?.app?.log({
+      body: { service: "cerebro", level: level.toLowerCase(), message, extra: fields },
+    });
+  } catch { /* opencode client not available, skip */ }
 }
+
+// ── Public API ────────────────────────────────────────────────────────
 
 export function logInfo(message: string, fields?: Record<string, unknown>): void {
   writeLog("INFO", message, fields);

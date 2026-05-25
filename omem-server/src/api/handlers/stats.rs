@@ -38,6 +38,7 @@ pub struct StatsResponse {
     pub by_space: HashMap<String, usize>,
     pub by_visibility: HashMap<String, usize>,
     pub by_agent: HashMap<String, usize>,
+    pub by_source: HashMap<String, usize>,
     pub timeline: Vec<TimelineEntry>,
     pub avg_importance: f32,
     pub avg_confidence: f32,
@@ -115,6 +116,7 @@ pub async fn get_stats(
     let mut by_space: HashMap<String, usize> = HashMap::new();
     let mut by_visibility: HashMap<String, usize> = HashMap::new();
     let mut by_agent: HashMap<String, usize> = HashMap::new();
+    let mut by_source: HashMap<String, usize> = HashMap::new();
     let mut timeline_map: HashMap<String, (usize, HashMap<String, usize>)> = HashMap::new();
     let mut sum_importance = 0.0_f32;
     let mut sum_confidence = 0.0_f32;
@@ -137,6 +139,8 @@ pub async fn get_stats(
         *by_space.entry(space_key).or_insert(0) += 1;
         *by_visibility.entry(mem.visibility.clone()).or_insert(0) += 1;
         *by_agent.entry(mem.owner_agent_id.clone()).or_insert(0) += 1;
+        let source_key = mem.source.clone().unwrap_or_else(|| "store".to_string());
+        *by_source.entry(source_key).or_insert(0) += 1;
 
         sum_importance += mem.importance;
         sum_confidence += mem.confidence;
@@ -186,6 +190,7 @@ pub async fn get_stats(
         by_space,
         by_visibility,
         by_agent,
+        by_source,
         timeline,
         avg_importance,
         avg_confidence,

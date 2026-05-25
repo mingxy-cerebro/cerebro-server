@@ -1,6 +1,14 @@
-import * as http from "node:http";
+/**
+ * web-server.ts — Cerebro Web Server Manager (spawn mode)
+ *
+ * 不再直接创建 HTTP server，而是 fork 独立子进程 (web-server-child.ts)。
+ * 多窗口共享一个 server，任一窗口关闭不影响其他窗口。
+ * 子进程通过心跳文件 mtime 探测 plugin 存活状态，全部退出后自动关闭。
+ */
+import { fork } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,170 +21,185 @@ export interface WebServerConfig {
   port?: number;
 }
 
-// ── MIME map ─────────────────────────────────────────────────────────────
-
-const MIME_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".mjs": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".eot": "application/vnd.ms-fontobject",
-  ".webp": "image/webp",
-  ".webmanifest": "application/manifest+json",
-  ".map": "application/json",
-  ".txt": "text/plain; charset=utf-8",
-};
-
-function getMimeType(ext: string): string {
-  return MIME_TYPES[ext] || "application/octet-stream";
+export interface WebServerHandle {
+  address(): { port: number; family: string; address: string } | string | null;
 }
 
-// ── Safe path resolver (prevent traversal) ───────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────
 
-function resolveSafe(baseDir: string, pathname: string): string | null {
-  // Strip leading slash so path.resolve treats it as relative
-  const relative = pathname.startsWith("/") ? pathname.slice(1) : pathname;
-  const resolved = path.resolve(baseDir, relative || ".");
-  if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
-    return null;
+/** Touch a file — update mtime or create if missing */
+function touchFile(filePath: string): void {
+  try {
+    fs.utimesSync(filePath, new Date(), new Date());
+  } catch {
+    try {
+      fs.writeFileSync(filePath, "");
+    } catch { /* ignore */ }
   }
-  return resolved;
+}
+
+/** Check if a process with the given PID is still running */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Probe an existing server's /health endpoint */
+async function probeExistingServer(port: number): Promise<boolean> {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/health`);
+    if (resp.ok) {
+      const body = await resp.text();
+      return body.includes("cerebro");
+    }
+  } catch { /* connection refused → port free */ }
+  return false;
 }
 
 // ── Start / Stop ─────────────────────────────────────────────────────────
 
-export function startWebServer(config: WebServerConfig): Promise<http.Server | null> {
-  return new Promise((resolve) => {
-    const webDir = path.resolve(__dirname, "..", "web");
+export async function startWebServer(
+  config: WebServerConfig,
+): Promise<WebServerHandle | null> {
+  const port =
+    config.port || parseInt(process.env.OMEM_LOCAL_PORT || "", 10) || 5212;
+  const pidFilePath = path.join(os.tmpdir(), `cerebro-web-${port}.pid`);
+  const heartbeatFilePath = path.join(
+    os.tmpdir(),
+    `cerebro-web-${port}.heartbeat`,
+  );
 
-    // Check web directory exists
-    if (!fs.existsSync(webDir)) {
-      console.warn(`[cerebro:web] Web directory not found: ${webDir}, skipping server start`);
-      resolve(null);
-      return;
-    }
+  // ── Step 1: 检查端口是否已有 cerebro server ──
+  if (await probeExistingServer(port)) {
+    console.log(`[cerebro:web] Reusing existing server on port ${port}`);
+    return createHandle(port, heartbeatFilePath);
+  }
 
-    const indexPath = path.join(webDir, "index.html");
-    if (!fs.existsSync(indexPath)) {
-      console.warn(`[cerebro:web] index.html not found in ${webDir}, skipping server start`);
-      resolve(null);
-      return;
-    }
-
-    const port = config.port || parseInt(process.env.OMEM_LOCAL_PORT || "", 10) || 5212;
-
-    const server = http.createServer(
-      (req: http.IncomingMessage, res: http.ServerResponse) => {
-        // Only handle GET / HEAD
-        if (req.method !== "GET" && req.method !== "HEAD") {
-          res.writeHead(405, { "Content-Type": "text/plain" });
-          res.end("Method Not Allowed");
-          return;
-        }
-
-        // Parse URL, strip query string
-        const url = new URL(req.url || "/", `http://localhost:${port}`);
-        const pathname = decodeURIComponent(url.pathname);
-
-        // Resolve safe file path
-        const safePath = resolveSafe(webDir, pathname);
-
-        if (!safePath) {
-          res.writeHead(403, { "Content-Type": "text/plain" });
-          res.end("Forbidden");
-          return;
-        }
-
-        // Try to serve the file directly
-        fs.stat(safePath, (statErr, stats) => {
-          if (!statErr && stats.isFile()) {
-            serveFile(res, safePath, config.apiUrl);
-            return;
-          }
-
-          // SPA fallback: serve index.html for non-file paths
-          fs.stat(indexPath, (idxErr, idxStats) => {
-            if (idxErr || !idxStats.isFile()) {
-              res.writeHead(404, { "Content-Type": "text/plain" });
-              res.end("Not Found");
-              return;
-            }
-            serveFile(res, indexPath, config.apiUrl);
-          });
-        });
-      },
-    );
-
-    server.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        console.warn(`[cerebro:web] Port ${port} already in use, web server not started`);
-      } else {
-        console.warn(`[cerebro:web] Server error: ${err.message}`);
+  // ── Step 2: 检查 PID 文件（可能有其他进程正在 fork） ──
+  try {
+    const pidStr = fs.readFileSync(pidFilePath, "utf-8").trim();
+    const pid = parseInt(pidStr, 10);
+    if (pid > 0 && isProcessAlive(pid)) {
+      // 有其他进程正在 fork 或运行，等待 200ms 后重试
+      await new Promise((r) => setTimeout(r, 200));
+      if (await probeExistingServer(port)) {
+        console.log(
+          `[cerebro:web] Reusing server after PID check on port ${port}`,
+        );
+        return createHandle(port, heartbeatFilePath);
       }
-      resolve(null);
+    } else {
+      // 进程已死亡，清理 PID 文件
+      try { fs.unlinkSync(pidFilePath); } catch { /* ignore */ }
+    }
+  } catch { /* PID 文件不存在，继续 */ }
+
+  // ── Step 3: 检查 web 目录 ──
+  const webDir = path.resolve(__dirname, "..", "web");
+  if (!fs.existsSync(webDir)) {
+    console.warn(
+      `[cerebro:web] Web directory not found: ${webDir}, skipping server start`,
+    );
+    return null;
+  }
+  if (!fs.existsSync(path.join(webDir, "index.html"))) {
+    console.warn(
+      `[cerebro:web] index.html not found in ${webDir}, skipping server start`,
+    );
+    return null;
+  }
+
+  // ── Step 4: 写 PID 文件（标记正在 fork） ──
+  try {
+    fs.writeFileSync(pidFilePath, String(process.pid));
+  } catch { /* ignore */ }
+
+  // ── Step 5: Fork 子进程 ──
+  const childPath = path.resolve(__dirname, "web-server-child.js");
+
+  const child = fork(childPath, [], {
+    detached: true,
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+  });
+
+  // Drain stdout/stderr to prevent pipe buffer from blocking the child
+  child.stdout?.on("data", () => {});
+  child.stderr?.on("data", () => {});
+
+  child.unref();
+
+  // 发送配置给子进程
+  child.send({ port, webDir, apiUrl: config.apiUrl });
+
+  // ── Step 6: 等待 ready 或超时 5s ──
+  const ready = await new Promise<boolean>((resolve) => {
+    const timeout = setTimeout(() => resolve(false), 5000);
+
+    child.on("message", (msg: { type: string }) => {
+      if (msg.type === "ready") {
+        clearTimeout(timeout);
+        resolve(true);
+      } else if (msg.type === "error") {
+        clearTimeout(timeout);
+        resolve(false);
+      }
     });
 
-    server.listen(port, "127.0.0.1", () => {
-      const addr = server.address();
-      const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      console.log(`[cerebro:web] Static server listening on http://localhost:${actualPort}`);
-      resolve(server);
+    child.on("error", () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+
+    child.on("exit", () => {
+      clearTimeout(timeout);
+      resolve(false);
     });
   });
+
+  if (!ready) {
+    console.warn(
+      `[cerebro:web] Failed to start web server child process on port ${port}`,
+    );
+    try { child.kill(); } catch { /* ignore */ }
+    try { fs.unlinkSync(pidFilePath); } catch { /* ignore */ }
+    return null;
+  }
+
+  console.log(
+    `[cerebro:web] Web server child process started on port ${port}`,
+  );
+  return createHandle(port, heartbeatFilePath);
 }
 
-// ── File serving ─────────────────────────────────────────────────────────
+/** Create a handle with address() compat + heartbeat keep-alive */
+function createHandle(
+  port: number,
+  heartbeatFilePath: string,
+): WebServerHandle {
+  // 初始 touch
+  touchFile(heartbeatFilePath);
 
-function serveFile(
-  res: http.ServerResponse,
-  filePath: string,
-  apiUrl: string,
-): void {
-  const ext = path.extname(filePath).toLowerCase();
-  const contentType = getMimeType(ext);
+  // 每 30 秒 touch 心跳文件，保持子进程存活
+  const timer = setInterval(() => {
+    touchFile(heartbeatFilePath);
+  }, 30_000);
 
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("Internal Server Error");
-      return;
-    }
+  // 确保定时器不阻止进程退出
+  timer.unref();
 
-    let body: Buffer | string = data;
-
-    // Config injection: replace placeholder in index.html
-    if (ext === ".html" && data.includes("__OMEM_API_URL__")) {
-      body = data.toString("utf-8").replace(/window\.__OMEM_API_URL__\s*=\s*["']__OMEM_API_URL__["']/, `window.__OMEM_API_URL__ = "${apiUrl}"`);
-    }
-
-    res.writeHead(200, {
-      "Content-Type": contentType,
-      "Cache-Control": ext === ".html" ? "no-cache, no-store, must-revalidate" : "public, max-age=86400",
-    });
-    res.end(body);
-  });
+  return {
+    address() {
+      return { port, family: "IPv4", address: "127.0.0.1" };
+    },
+  };
 }
 
-// ── Graceful shutdown ────────────────────────────────────────────────────
-
-export function stopWebServer(server: http.Server): Promise<void> {
-  return new Promise((resolve) => {
-    server.closeAllConnections?.();
-    const timer = setTimeout(resolve, 3000);
-    server.close(() => {
-      clearTimeout(timer);
-      console.log("[cerebro:web] Server stopped");
-      resolve();
-    });
-  });
+export function stopWebServer(_handle: WebServerHandle): Promise<void> {
+  // Intentionally do NOT touch heartbeat: parent exits → timer stops →
+  // heartbeat ages out → child detects mtime > 60s → self-terminate.
+  return Promise.resolve();
 }

@@ -39,6 +39,7 @@ export interface CerebroPluginConfig {
   };
   agentMemoryPolicy?: Record<string, "none" | "readonly" | "readwrite">;
   defaultPolicy?: "none" | "readonly" | "readwrite";
+  autoUpdate?: boolean;  // default false
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ const DEFAULTS: CerebroPluginConfig = {
   web: {
     enabled: true,
   },
+  autoUpdate: false,
 };
 
 // ── Flat-to-nested migration ─────────────────────────────────────────
@@ -146,6 +148,7 @@ function deepMerge(base: CerebroPluginConfig, overrides: Partial<CerebroPluginCo
   result.web = { ...base.web!, ...overrides.web };
   if (overrides.agentMemoryPolicy) result.agentMemoryPolicy = overrides.agentMemoryPolicy;
   if (overrides.defaultPolicy) result.defaultPolicy = overrides.defaultPolicy;
+  if (overrides.autoUpdate !== undefined) result.autoUpdate = overrides.autoUpdate;
   return result;
 }
 

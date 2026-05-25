@@ -226,6 +226,8 @@ interface InjectionResult {
   profileCount: number;
   memoryCount: number;
   projectMemoryCount: number;
+  maxScore: number;
+  confidence: number;
 }
 
 export async function buildMemoryInjection(
@@ -297,11 +299,16 @@ export async function buildMemoryInjection(
     text = text.slice(0, cutoff > 0 ? cutoff : maxChars) + "\n…\n[/CEREBRO-MEMORY]";
   }
 
+  const maxScore = searchResults.reduce((max, r) => Math.max(max, r.score), 0);
+  const confidence = Math.min(maxScore, 1.0);
+
   return {
     text,
     profileCount: profile?.preference_count ?? 0,
     memoryCount: dedupedResults?.length ?? 0,
     projectMemoryCount: projectMemories.length,
+    maxScore,
+    confidence,
   };
 }
 
@@ -371,8 +378,8 @@ export function chatMessageRecallHook(
           session_id: input.sessionID,
           recall_type: "auto",
           query_text: query,
-          max_score: 0,
-          llm_confidence: 0,
+          max_score: injection.maxScore,
+          llm_confidence: injection.confidence,
           profile_injected: injection.profileCount > 0,
           kept_count: injection.projectMemoryCount + injection.memoryCount,
           discarded_count: 0,
