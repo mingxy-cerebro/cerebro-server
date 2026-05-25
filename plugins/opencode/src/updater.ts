@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { openSync, closeSync, unlinkSync, statSync, writeSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { loadPluginConfig } from "./config.js";
 import { logInfo, logDebug, logError } from "./logger.js";
+import { showToast } from "./hooks.js";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -142,9 +143,7 @@ export async function checkAndUpdate(tui: any, currentVersion: string): Promise<
     if (success) {
       logInfo("updater: update completed", { from: currentVersion, to: latest });
       try {
-        tui?.showToast?.({
-          body: { message: `Cerebro updated to v${latest} — restart opencode to apply`, variant: "info" }
-        });
+        showToast(tui, "🧠 Cerebro Updated", `v${currentVersion} → v${latest} · restart opencode to apply`, "info", 2000);
       } catch {}
     } else {
       logError("updater: update failed", { targetDir });

@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, createToast, sessionMessages, firstMessages } from "./hooks.js";
+import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, sessionMessages, firstMessages, showToast } from "./hooks.js";
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
@@ -64,7 +64,7 @@ const OmemPlugin: Plugin = async (input) => {
   } catch {}
 
   const config = loadPluginConfig(overrides as any);
-  const toast = createToast(config);
+  const STARTUP_DELAY = 2000;
 
   setOpencodeClient(client);
 
@@ -78,18 +78,20 @@ const OmemPlugin: Plugin = async (input) => {
     logError(`Connection failed: ${errMsg}`);
     if (errMsg.includes("[cerebro]")) {
       const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-      toast(
+      showToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Server Error`,
         cleanMsg.substring(0, 150),
-        "error"
+        "error",
+        STARTUP_DELAY
       );
     } else {
-      toast(
+      showToast(
         tui,
         `🧠 Cerebro v${pluginVersion} · Connection Failed`,
         `Unable to reach ${config.connection.apiUrl}`,
-        "error"
+        "error",
+        STARTUP_DELAY
       );
     }
   }
@@ -125,9 +127,9 @@ const OmemPlugin: Plugin = async (input) => {
   }
 
   if (webPort) {
-    toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `🌐 Open in browser http://localhost:${webPort}`, "success");
+    showToast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `🌐 Open in browser http://localhost:${webPort}`, "success", STARTUP_DELAY);
   } else {
-    toast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, "No web server", "success");
+    showToast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, "No web server", "success", STARTUP_DELAY);
   }
 
   // Auto-update check (fire-and-forget, non-blocking)

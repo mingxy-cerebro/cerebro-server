@@ -138,11 +138,11 @@ function writeLog(level: string, message: string, fields?: Record<string, unknow
     appendFileSync(logFile, parts.join(" ") + "\n");
   } catch {}
 
-  // Track 2: opencode client
+  // Track 2: opencode client (async — fire-and-forget with .catch)
   try {
     opencodeClient?.app?.log({
-      body: { service: "cerebro", level: level.toLowerCase(), message, extra: fields },
-    });
+      body: { service: "cerebro", level: level.toLowerCase() as "debug" | "info" | "warn" | "error", message, extra: fields },
+    })?.catch?.(() => {});
   } catch { /* opencode client not available, skip */ }
 }
 
