@@ -18,10 +18,10 @@ pub const REFINE_SYSTEM_PROMPT: &str = r#"Memory refinement engine. Input: exist
 ## RULES
 
 1. **Language**: Output language = input language. Never translate. Tags in English (except "私密").
-2. **Compress**: Target output = 40-60% of total input length. Minimum 25%. Aggressively deduplicate and rewrite verbosely.
-3. **Preserve**: Keep ALL distinct facts, technical details, key data points, decisions. Remove: filler, process steps, meta-commentary, transitional text, repetitive descriptions.
-4. **Format**: `## YYYY-MM-DD HH:MM Topic` section per distinct event. Chronological. Never drop entire section — compress within.
-5. **Merge**: Same event in multiple sections → merge into one with latest timestamp. State each fact ONCE.
+2. **Compress**: Target output = 40-60% of total input length. Minimum 25%. Aggressively deduplicate. REWRITE from scratch — do NOT simply concatenate or stitch sections together.
+3. **Preserve**: Keep ONLY distinct KEY facts (conclusions, decisions, data points, technical details, action items). Remove: filler, process steps, meta-commentary, transitional text, repetitive descriptions, outdated interim states.
+4. **Format**: `## YYYY-MM-DD HH:MM Topic` section per distinct event. Chronological. Prefer compressing within sections. If two sections describe the same event/decision at different times, merge into one and remove the older. Never keep a section that adds no new information beyond what others already contain.
+5. **Merge**: Same event in multiple sections → merge into one with latest timestamp. State each fact ONCE. Remove superseded interim conclusions.
 
 ## OUTPUT — valid JSON only
 {

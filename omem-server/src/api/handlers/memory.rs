@@ -1774,6 +1774,7 @@ pub async fn session_ingest(
 
             /// Split an over-sized memory: truncate original, create continuation memory.
             /// Returns the new continuation memory ID on success.
+            #[allow(dead_code)]
             async fn split_memory(
                 original: &mut crate::domain::memory::Memory,
                 new_content: &str,
