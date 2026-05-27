@@ -242,31 +242,52 @@ pub fn strip_envelope_metadata(text: &str) -> String {
         .expect("valid regex: sender_info");
     let result = sender_info.replace_all(&result, "");
 
-    let compressed_section = Regex::new(r"(?ms)^\s*\[Compressed conversation section\].*?(?=^\s*\[|^\s*$|\z)")
-        .expect("valid regex: compressed_section");
-    let result = compressed_section.replace_all(&result, "");
-
-    let dcp_message_id = Regex::new(r"(?ms)<dcp-message-id\b.*?</dcp-message-id>")
-        .expect("valid regex: dcp_message_id");
-    let result = dcp_message_id.replace_all(&result, "");
-
-    let dcp_system_reminder = Regex::new(r"(?ms)<dcp-system-reminder\b.*?</dcp-system-reminder>")
-        .expect("valid regex: dcp_system_reminder");
-    let result = dcp_system_reminder.replace_all(&result, "");
-
-    let system_reminder = Regex::new(r"(?ms)^\s*\[system-reminder\].*?(?=^\s*\[|^\s*$|\z)")
-        .expect("valid regex: system_reminder");
-    let result = system_reminder.replace_all(&result, "");
-
-    let category_skill = Regex::new(r"(?ms)^\s*\[Category\+Skill Reminder\].*?(?=^\s*\[|^\s*$|\z)")
-        .expect("valid regex: category_skill");
-    let result = category_skill.replace_all(&result, "");
+    let xml_tags = Regex::new(r"(?ms)<(?:dcp|acp)-(?:message-id|system-reminder)\b[^>]*>.*?</(?:dcp|acp)-(?:message-id|system-reminder)>")
+        .expect("valid regex: xml_tags");
+    let result = xml_tags.replace_all(&result, "");
 
     let html_comment = Regex::new(r"(?ms)<!--.*?-->")
         .expect("valid regex: html_comment");
     let result = html_comment.replace_all(&result, "");
 
-    result.into_owned()
+    const SECTION_HEADERS: &[&str] = &[
+        "[Compressed conversation section]",
+        "[system-reminder]",
+        "[Category+Skill Reminder]",
+    ];
+
+    let mut output = String::with_capacity(result.len());
+    let mut skipping = false;
+
+    for line in result.lines() {
+        let trimmed = line.trim();
+
+        if skipping {
+            if trimmed.starts_with('[') || trimmed.is_empty() {
+                skipping = false;
+                if SECTION_HEADERS.iter().any(|h| trimmed.starts_with(h)) {
+                    skipping = true;
+                    continue;
+                }
+                if trimmed.is_empty() {
+                    continue;
+                }
+                output.push_str(line);
+                output.push('\n');
+            }
+            continue;
+        }
+
+        if SECTION_HEADERS.iter().any(|h| trimmed.starts_with(h)) {
+            skipping = true;
+            continue;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    output.trim_end().to_string()
 }
 
 #[cfg(test)]

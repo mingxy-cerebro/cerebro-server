@@ -128,6 +128,11 @@ async fn evaluate_tiers(
             continue;
         }
 
+        // Private memories are protected from tier demotion
+        if memory.visibility == "private" {
+            continue;
+        }
+
         let old_tier = memory.tier.clone();
         let new_tier = tier_manager.evaluate_tier(&memory);
 
@@ -149,6 +154,14 @@ async fn evaluate_tiers(
     }
 
     if demoted_count > 0 {
-        tracing::info!(demoted = demoted_count, "lifecycle_tier_evaluation_complete");
+        if demoted_count >= 10 {
+            tracing::warn!(
+                demoted = demoted_count,
+                note = "First lifecycle run after upgrade may cause batch demotion of memories previously protected by floor clamping",
+                "lifecycle_tier_evaluation_complete_large_batch"
+            );
+        } else {
+            tracing::info!(demoted = demoted_count, "lifecycle_tier_evaluation_complete");
+        }
     }
 }

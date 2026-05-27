@@ -73,6 +73,7 @@ impl TierManager {
 
     pub fn evaluate_tier(&self, memory: &Memory) -> Tier {
         let composite = self.decay.compute_composite(memory);
+        let raw_composite = self.decay.compute_raw_composite(memory);
         let age_days = parse_days_ago(&memory.created_at);
 
         match memory.tier {
@@ -91,7 +92,7 @@ impl TierManager {
                     && memory.importance >= self.config.core_importance_threshold
                 {
                     Tier::Core
-                } else if composite < self.config.peripheral_composite_threshold
+                } else if raw_composite < self.config.peripheral_composite_threshold
                     || (age_days > self.config.peripheral_age_days
                         && memory.access_count < self.config.working_access_threshold)
                 {
@@ -101,7 +102,7 @@ impl TierManager {
                 }
             }
             Tier::Core => {
-                if composite < self.config.peripheral_composite_threshold
+                if raw_composite < self.config.peripheral_composite_threshold
                     && memory.access_count < self.config.working_access_threshold
                 {
                     Tier::Working
@@ -206,6 +207,66 @@ mod tests {
             new_tier,
             Tier::Working,
             "Working memory meeting no threshold should stay Working"
+        );
+    }
+
+    #[test]
+    fn test_demotion_by_raw_composite() {
+        let manager = TierManager::with_defaults();
+
+        let mut mem = make_test_memory();
+        mem.tier = Tier::Working;
+        mem.access_count = 0;
+        mem.importance = 0.05;
+        mem.confidence = 0.05;
+        mem.created_at = days_ago_str(120);
+        mem.last_accessed_at = Some(days_ago_str(119));
+
+        let new_tier = manager.evaluate_tier(&mem);
+        assert_eq!(
+            new_tier,
+            Tier::Peripheral,
+            "Working memory with very low raw composite should demote to Peripheral"
+        );
+    }
+
+    #[test]
+    fn test_core_demotion_to_working() {
+        let manager = TierManager::with_defaults();
+
+        let mut mem = make_test_memory();
+        mem.tier = Tier::Core;
+        mem.access_count = 1;
+        mem.importance = 0.01;
+        mem.confidence = 0.01;
+        mem.created_at = days_ago_str(365);
+        mem.last_accessed_at = Some(days_ago_str(360));
+
+        let new_tier = manager.evaluate_tier(&mem);
+        assert_eq!(
+            new_tier,
+            Tier::Working,
+            "Core memory with low raw composite and low access should demote to Working"
+        );
+    }
+
+    #[test]
+    fn test_core_high_access_low_raw_stays_core() {
+        let manager = TierManager::with_defaults();
+
+        let mut mem = make_test_memory();
+        mem.tier = Tier::Core;
+        mem.access_count = 50;
+        mem.importance = 0.01;
+        mem.confidence = 0.01;
+        mem.created_at = days_ago_str(365);
+        mem.last_accessed_at = Some(days_ago_str(360));
+
+        let new_tier = manager.evaluate_tier(&mem);
+        assert_eq!(
+            new_tier,
+            Tier::Core,
+            "Core memory with high access count should stay Core regardless of raw composite"
         );
     }
 }

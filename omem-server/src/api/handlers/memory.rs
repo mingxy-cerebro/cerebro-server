@@ -1891,6 +1891,96 @@ pub async fn session_ingest(
                 Some(new_id)
             }
 
+            /// Create a continuation memory without truncating the parent.
+            /// Used when existing + new content > MAX_SINGLE_MEMORY_CHARS.
+            /// Returns (child_id, child_memory) on success, None on failure.
+            async fn create_continuation(
+                parent: &crate::domain::memory::Memory,
+                child_content: String,
+                state: &crate::api::server::AppState,
+                store: &crate::store::lancedb::LanceStore,
+            ) -> Option<(String, crate::domain::memory::Memory)> {
+                if child_content.trim().is_empty() {
+                    tracing::warn!(
+                        parent_id = %parent.id,
+                        "session_ingest: create_continuation called with empty content, skipping"
+                    );
+                    return None;
+                }
+
+                let now = chrono::Utc::now().to_rfc3339();
+                let child_id = uuid::Uuid::new_v4().to_string();
+                let child = crate::domain::memory::Memory {
+                    id: child_id.clone(),
+                    content: child_content.clone(),
+                    l0_abstract: parent.l0_abstract.clone(),
+                    l1_overview: if parent.l1_overview.chars().count() <= 150 {
+                        parent.l1_overview.clone()
+                    } else {
+                        format!("{}...", parent.l1_overview.chars().take(147).collect::<String>())
+                    },
+                    l2_content: if parent.l2_content.chars().count() <= 500 {
+                        parent.l2_content.clone()
+                    } else {
+                        format!("{}...", parent.l2_content.chars().take(497).collect::<String>())
+                    },
+                    category: parent.category.clone(),
+                    memory_type: parent.memory_type.clone(),
+                    state: parent.state.clone(),
+                    tier: parent.tier.clone(),
+                    importance: parent.importance,
+                    confidence: parent.confidence,
+                    access_count: 0,
+                    tags: parent.tags.clone(),
+                    scope: parent.scope.clone(),
+                    agent_id: parent.agent_id.clone(),
+                    session_id: parent.session_id.clone(),
+                    tenant_id: parent.tenant_id.clone(),
+                    source: Some("auto-split".to_string()),
+                    relations: vec![crate::domain::relation::MemoryRelation {
+                        relation_type: crate::domain::relation::RelationType::Continues,
+                        target_id: parent.id.clone(),
+                        context_label: Some("auto-split on overflow".to_string()),
+                    }],
+                    superseded_by: None,
+                    invalidated_at: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    last_accessed_at: None,
+                    space_id: parent.space_id.clone(),
+                    visibility: parent.visibility.clone(),
+                    owner_agent_id: parent.owner_agent_id.clone(),
+                    provenance: parent.provenance.clone(),
+                    version: parent.version,
+                    tier_history: parent.tier_history.clone(),
+                    cluster_id: parent.cluster_id.clone(),
+                    is_cluster_anchor: false,
+                    metadata: parent.metadata.clone(),
+                    project_path: parent.project_path.clone(),
+                };
+
+                let child_vec = match state.embed.embed(&[child_content]).await {
+                    Ok(vecs) => vecs.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session_ingest: failed to embed continuation WORK memory");
+                        None
+                    }
+                };
+
+                if let Err(e) = store.create(&child, child_vec.as_deref()).await {
+                    tracing::warn!(error = %e, "session_ingest: failed to create continuation WORK memory — parent untouched");
+                    return None;
+                }
+                tracing::info!(
+                    child_id = %child_id,
+                    child_chars = child.content.chars().count(),
+                    parent_id = %parent.id,
+                    "session_ingest: created WORK continuation memory (no parent truncation)"
+                );
+
+                Some((child_id, child))
+            }
+
             if memory_type == "EMOTIONAL" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
@@ -2021,24 +2111,61 @@ pub async fn session_ingest(
                                     "session_ingest: WORK refined successfully"
                                 );
                                 if content_len > crate::ingest::refine_service::MAX_SINGLE_MEMORY_CHARS {
-                                    let head_id = work_original_parent_id.as_deref().unwrap_or(&refined.id).to_string();
                                     let content_for_split = refined.content.clone();
-                                    if let Some(child_id) = split_memory(&mut refined, &content_for_split, &head_id, &state, &store).await {
-                                        if work_original_parent_id.is_none() {
-                                            work_original_parent_id = Some(refined.id.clone());
+                                    let (first_half, second_half) = find_split_point(&content_for_split, 3000);
+                                    if let Some((child_id, child)) = create_continuation(&refined, second_half, &state, &store).await {
+                                        refined.content = first_half.clone();
+                                        if refined.l1_overview.chars().count() > 150 {
+                                            refined.l1_overview = format!("{}...", refined.l1_overview.chars().take(147).collect::<String>());
                                         }
-                                        add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
+                                        if refined.l2_content.chars().count() > 500 {
+                                            refined.l2_content = format!("{}...", refined.l2_content.chars().take(497).collect::<String>());
+                                        }
+                                        let first_half_chars = first_half.chars().count();
+                                        let refined_vec = match state.embed.embed(&[first_half]).await {
+                                            Ok(vecs) => vecs.into_iter().next(),
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "session_ingest: failed to re-embed refined after split");
+                                                None
+                                            }
+                                        };
+                                        // Bake ContinuedBy relation into refined before the vector-path update
+                                        // so it's written atomically (avoids scalar-update-after-delete race in LanceDB)
+                                        if !refined.relations.iter().any(|r|
+                                            r.relation_type == crate::domain::relation::RelationType::ContinuedBy
+                                            && r.target_id == child_id
+                                        ) {
+                                            refined.relations.push(crate::domain::relation::MemoryRelation {
+                                                relation_type: crate::domain::relation::RelationType::ContinuedBy,
+                                                target_id: child_id.clone(),
+                                                context_label: Some("auto-split continuation".to_string()),
+                                            });
+                                        }
+                                        if let Err(e) = store.update(&refined, refined_vec.as_deref()).await {
+                                            tracing::warn!(error = %e, memory_id = %refined.id, "session_ingest: failed to update refined after split");
+                                        }
                                         tracing::info!(
                                             parent_id = %refined.id,
                                             child_id = %child_id,
-                                            "session_ingest: refined content split, created continuation"
+                                            first_chars = first_half_chars,
+                                            "session_ingest: refined split — parent updated to first half, child created for second"
                                         );
+                                        if let Some(ref ancestor_id) = work_original_parent_id {
+                                            add_continued_by_relation(&store, ancestor_id, &child_id, "WORK").await;
+                                        }
+                                        if work_original_parent_id.is_none() {
+                                            work_original_parent_id = Some(refined.id.clone());
+                                        }
+                                        existing_work_memory = Some(child);
+                                        refined_texts.push(content_for_split);
+                                    } else {
+                                        refined_texts.push(refined.content.clone());
+                                        existing_work_memory = Some(refined);
                                     }
-                                    refined_texts.push(content_for_split);
                                 } else {
                                     refined_texts.push(refined.content.clone());
+                                    existing_work_memory = Some(refined);
                                 }
-                                existing_work_memory = Some(refined);
                                 continue;
                             }
                             Ok(Err(e)) => {
@@ -2115,14 +2242,17 @@ pub async fn session_ingest(
                                 appended = true;
                             }
                         } else {
-                            let head_id = work_original_parent_id.as_deref().unwrap_or(&existing.id).to_string();
-                            if let Some(child_id) = split_memory(&mut existing, &new_content, &head_id, &state, &store).await {
+                            let new_section = format!("{}\n{}", section_header, section_body);
+                            if let Some((child_id, child)) = create_continuation(&existing, new_section.clone(), &state, &store).await {
+                                add_continued_by_relation(&store, &existing.id, &child_id, "WORK").await;
+                                if let Some(ref ancestor_id) = work_original_parent_id {
+                                    add_continued_by_relation(&store, ancestor_id, &child_id, "WORK").await;
+                                }
                                 if work_original_parent_id.is_none() {
                                     work_original_parent_id = Some(existing.id.clone());
                                 }
-                                add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
-                                refined_texts.push(new_content.clone());
-                                existing_work_memory = Some(existing);
+                                refined_texts.push(new_section);
+                                existing_work_memory = Some(child);
                                 appended = true;
                             }
                         }
@@ -2163,14 +2293,17 @@ pub async fn session_ingest(
                                 appended = true;
                                 break;
                             } else {
-                                let head_id = work_original_parent_id.as_deref().unwrap_or(&mem.id).to_string();
-                                if let Some(child_id) = split_memory(&mut mem, &new_content, &head_id, &state, &store).await {
+                                let new_section = format!("{}\n{}", section_header, section_body);
+                                if let Some((child_id, child)) = create_continuation(&mem, new_section.clone(), &state, &store).await {
+                                    add_continued_by_relation(&store, &mem.id, &child_id, "WORK").await;
+                                    if let Some(ref ancestor_id) = work_original_parent_id {
+                                        add_continued_by_relation(&store, ancestor_id, &child_id, "WORK").await;
+                                    }
                                     if work_original_parent_id.is_none() {
                                         work_original_parent_id = Some(mem.id.clone());
                                     }
-                                    add_continued_by_relation(&store, &head_id, &child_id, "WORK").await;
-                                    refined_texts.push(new_content.clone());
-                                    existing_work_memory = Some(mem);
+                                    refined_texts.push(new_section);
+                                    existing_work_memory = Some(child);
                                     appended = true;
                                     break;
                                 }

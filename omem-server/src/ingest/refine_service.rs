@@ -48,6 +48,73 @@ pub async fn collect_chain_memories(
     Ok(result)
 }
 
+/// Walk ContinuedBy relations to find the tail of a memory chain.
+/// If the memory has no ContinuedBy relations, returns it as-is.
+/// Follows the most recent child if multiple ContinuedBy exist.
+async fn walk_to_chain_tail(
+    store: &LanceStore,
+    start: &Memory,
+) -> Memory {
+    let mut current = start.clone();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(current.id.clone());
+
+    loop {
+        let continued_by_targets: Vec<String> = current
+            .relations
+            .iter()
+            .filter(|r| r.relation_type == RelationType::ContinuedBy)
+            .map(|r| r.target_id.clone())
+            .collect();
+
+        if continued_by_targets.is_empty() {
+            return current;
+        }
+
+        let next_id = match continued_by_targets.into_iter().next() {
+            Some(id) => id,
+            None => return current,
+        };
+
+        if visited.contains(&next_id) {
+            tracing::warn!(
+                current_id = %current.id,
+                next_id = %next_id,
+                "walk_to_chain_tail: detected cycle, stopping"
+            );
+            return current;
+        }
+        visited.insert(next_id.clone());
+
+        match store.get_by_id(&next_id).await {
+            Ok(Some(next_mem)) => {
+                tracing::debug!(
+                    from_id = %current.id,
+                    to_id = %next_id,
+                    "walk_to_chain_tail: walking to child"
+                );
+                current = next_mem;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    parent_id = %current.id,
+                    child_id = %next_id,
+                    "walk_to_chain_tail: ContinuedBy target not found, using current"
+                );
+                return current;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    parent_id = %current.id,
+                    "walk_to_chain_tail: failed to load child, using current"
+                );
+                return current;
+            }
+        }
+    }
+}
+
 /// 用topic的l0_abstract做embedding，搜索同session_id的WORK记忆
 /// cosine > 0.72 且 session_id匹配 → 返回最相似的
 pub async fn find_similar_work_memory(
@@ -88,7 +155,20 @@ pub async fn find_similar_work_memory(
         }
     }
 
-    Ok(best.map(|(m, _)| m))
+    let best_match = match best {
+        Some((m, score)) => {
+            tracing::info!(
+                best_id = %m.id,
+                score = score,
+                "find_similar_work_memory: best embedding match"
+            );
+            m
+        }
+        None => return Ok(None),
+    };
+
+    let tail = walk_to_chain_tail(store, &best_match).await;
+    Ok(Some(tail))
 }
 
 /// 调LLM精炼，原地update目标记忆（id不变，保留relations）

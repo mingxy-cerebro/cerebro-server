@@ -93,6 +93,17 @@ impl DecayEngine {
         raw.max(self.get_floor(&memory.tier))
     }
 
+    /// Raw composite WITHOUT floor clamping — used for demotion decisions.
+    /// The floored version (compute_composite) is used for search ranking.
+    pub fn compute_raw_composite(&self, memory: &Memory) -> f32 {
+        let recency = self.compute_recency(memory);
+        let frequency = self.compute_frequency(memory);
+        let intrinsic = self.compute_intrinsic(memory);
+        self.config.recency_weight * recency
+            + self.config.frequency_weight * frequency
+            + self.config.intrinsic_weight * intrinsic
+    }
+
     // boosted = score · (min_boost + (1 - min_boost) · composite)
     pub fn apply_search_boost(&self, score: f32, memory: &Memory) -> f32 {
         let composite = self.compute_composite(memory);

@@ -327,6 +327,11 @@ impl LifecycleScheduler {
                     continue;
                 }
 
+                // Private memories are protected from tier demotion
+                if memory.visibility == "private" {
+                    continue;
+                }
+
                 let old_tier = memory.tier.clone();
                 let new_tier = tier_manager.evaluate_tier(&memory);
 
@@ -351,7 +356,15 @@ impl LifecycleScheduler {
         }
 
         if demoted_count > 0 {
-            info!(demoted = demoted_count, "scheduler_tier_evaluation_complete");
+            if demoted_count >= 10 {
+                warn!(
+                    demoted = demoted_count,
+                    note = "Large batch demotion detected — memories previously protected by floor clamping are now being evaluated with raw composite",
+                    "scheduler_tier_evaluation_complete_large_batch"
+                );
+            } else {
+                info!(demoted = demoted_count, "scheduler_tier_evaluation_complete");
+            }
         }
     }
 
