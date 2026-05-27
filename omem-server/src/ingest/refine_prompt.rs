@@ -13,41 +13,22 @@ pub struct RefineOutput {
     pub l2_content: String,
 }
 
-pub const REFINE_SYSTEM_PROMPT: &str = r#"You are a memory refinement engine. Your task is to read one or more existing memory entries about the same topic, plus a new fact, then produce a SINGLE refined, deduplicated memory.
+pub const REFINE_SYSTEM_PROMPT: &str = r#"Memory refinement engine. Input: existing memories + new fact on same topic. Output: ONE deduplicated, compressed memory.
 
-## ABSOLUTE RULES
+## RULES
 
-### Rule 1: Language Preservation (MANDATORY)
-- YOU MUST OUTPUT IN THE SAME LANGUAGE AS THE INPUT. NEVER translate. NEVER mix languages.
-- Tags are ALWAYS in English. Exception: "私密" is system-reserved.
+1. **Language**: Output language = input language. Never translate. Tags in English (except "私密").
+2. **Compress**: Target output = 40-60% of total input length. Minimum 25%. Aggressively deduplicate and rewrite verbosely.
+3. **Preserve**: Keep ALL distinct facts, technical details, key data points, decisions. Remove: filler, process steps, meta-commentary, transitional text, repetitive descriptions.
+4. **Format**: `## YYYY-MM-DD HH:MM Topic` section per distinct event. Chronological. Never drop entire section — compress within.
+5. **Merge**: Same event in multiple sections → merge into one with latest timestamp. State each fact ONCE.
 
-### Rule 2: Deduplication (CORE TASK)
-- Remove duplicate/redundant information across all sections.
-- If multiple sections describe the same event/decision, MERGE into one section using the LATEST timestamp.
-- Keep ONLY: final conclusions, key decisions, important outcomes, critical data points.
-- Remove: intermediate steps, verbose process details, outdated information within the same topic only, repetitive descriptions.
-- CRITICAL: Never remove an entire topic section. Each `## YYYY-MM-DD HH:MM Topic` section represents a distinct subject and MUST be preserved. Only compress content WITHIN each section.
-- CRITICAL: When new information is being added to existing memories, the output length MUST NOT be shorter than the existing memory content. Adding new facts should make the result LONGER, not shorter.
-
-### Rule 3: Format Preservation
-- Maintain `## YYYY-MM-DD HH:MM Topic` section structure for distinct events.
-- Each section covers ONE distinct event/decision/milestone.
-- Chronological order (oldest first).
-
-### Rule 4: Length and Quality
-- Preserve ALL distinct facts, technical details, and key data points. Discard narrative filler, process descriptions, and verbose explanations.
-- Each fact should be stated ONCE in the most concise form possible. Merge redundant phrasing aggressively.
-- LENGTH RULE: Output MUST be at least 60% of existing memory length when adding new facts. Output grows ONLY by the net new unique facts added.
-- HARD MINIMUM: Output MUST be at least 30% of total input length (existing + new). Below this = you deleted important content.
-- Remove ALL: introductory phrases, transitional sentences, meta-commentary, and descriptive padding.
-
-## OUTPUT FORMAT (MANDATORY — ALL FIELDS MUST FOLLOW THESE EXACT FORMATS)
-Return ONLY valid JSON (all fields MUST be in the same language as the input):
+## OUTPUT — valid JSON only
 {
-  "refined_content": "Deduplicated content in ## YYYY-MM-DD HH:MM Topic section format",
-  "l0_abstract": "Short topic label (≤100 chars, e.g. 'PostgreSQL性能优化')",
-  "l1_overview": "MUST be arrow notation: verb→verb→result (≤150 chars, e.g. 'diagnosed→traced→fixed→verified→deployed v1.16.10'). NEVER write paragraphs. NEVER use ## headers.",
-  "l2_content": "Structured key facts only: decisions, conclusions, data points (≤300 chars, e.g. 'Root cause: X. Fix: Y. Result: Z.'). NEVER write paragraphs. NEVER use ## headers."
+  "refined_content": "Deduplicated content in ## YYYY-MM-DD HH:MM Topic format",
+  "l0_abstract": "Topic label ≤100 chars",
+  "l1_overview": "Arrow notation: verb→verb→result, ≤150 chars. No paragraphs.",
+  "l2_content": "Key facts: decisions, data points, conclusions, ≤300 chars. No paragraphs."
 }"#;
 
 pub fn build_refine_prompt(input: &RefineInput) -> (String, String) {
