@@ -51,7 +51,7 @@ pub async fn collect_chain_memories(
 /// Walk ContinuedBy relations to find the tail of a memory chain.
 /// If the memory has no ContinuedBy relations, returns it as-is.
 /// Follows the most recent child if multiple ContinuedBy exist.
-async fn walk_to_chain_tail(
+pub async fn walk_to_chain_tail(
     store: &LanceStore,
     start: &Memory,
 ) -> Memory {

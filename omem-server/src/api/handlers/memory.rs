@@ -1527,6 +1527,20 @@ pub async fn session_ingest(
             None
         };
 
+        // Walk to chain tail — if existing_work_memory has ContinuedBy relations,
+        // follow them to the latest child so we append/refine the tail, not the parent.
+        if let Some(ref ewm) = existing_work_memory {
+            let tail = crate::ingest::refine_service::walk_to_chain_tail(&store, ewm).await;
+            if tail.id != ewm.id {
+                tracing::info!(
+                    from_id = %ewm.id,
+                    tail_id = %tail.id,
+                    "session_ingest: walked from session summary to chain tail"
+                );
+                existing_work_memory = Some(tail);
+            }
+        }
+
         // 构建合并摘要传给LLM，避免重复提取
         let mut combined_summary_parts = Vec::new();
         if let Some(ref es) = emotional_summary {
