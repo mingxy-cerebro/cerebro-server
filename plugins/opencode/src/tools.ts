@@ -1,5 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import type { CerebroClient } from "./client.js";
+import { type CerebroPluginConfig, resolveAgentPolicy } from "./config.js";
 import { isAutoStoreEnabled, setAutoStoreEnabled } from "./index.js";
 
 export interface ToolContext {
@@ -7,9 +8,25 @@ export interface ToolContext {
   getSessionId: () => string | undefined;
   getAgentName?: () => string;
   getProjectPath?: () => string | undefined;
+  config?: Partial<CerebroPluginConfig>;
 }
 
 export function buildTools(client: CerebroClient, containerTags: string[], context: ToolContext) {
+  function checkPermission(required: "read" | "write"): boolean {
+    const agentId = context.getAgentName?.() || context.agentId;
+    if (!agentId || !context.config) return true; // no policy configured → allow
+    const policy = resolveAgentPolicy(agentId, context.config);
+    if (policy === "none") return false;
+    if (policy === "readonly") return required === "read";
+    return true; // readwrite
+  }
+
+  function denyMessage(required: "read" | "write"): string {
+    const agentId = context.getAgentName?.() || context.agentId || "unknown";
+    const policy = (agentId && context.config) ? resolveAgentPolicy(agentId, context.config) : "readwrite";
+    return `Permission denied: agent '${agentId}' has '${policy}' policy, but this operation requires '${required}' access`;
+  }
+
   return {
     memory_store: tool({
       description:
@@ -70,6 +87,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           ),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const allTags = [...containerTags, ...(args.tags ?? [])];
         const effectiveAgentId = context.getAgentName?.() || context.agentId;
         const result = await client.createMemory(
@@ -107,6 +125,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Optional scope filter"),
       },
       async execute(args) {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const results = await client.searchMemories(
           args.query,
           args.limit ?? 10,
@@ -134,6 +153,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         id: tool.schema.string().describe("Memory ID"),
       },
       async execute(args) {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const memory = await client.getMemory(args.id);
         if (!memory) return JSON.stringify({ ok: false, error: "not found" });
         return JSON.stringify({ ok: true, memory });
@@ -153,6 +173,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Replacement tags"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.updateMemory(
           args.id,
           args.content,
@@ -168,6 +189,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "Get the user profile synthesized from stored memories. Shows preferences, patterns, and key information.",
       args: {},
       async execute() {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const preferences = await client.getProfile();
         if (preferences.length === 0) return JSON.stringify({ ok: true, count: 0, preferences: [] });
         return JSON.stringify({ ok: true, count: preferences.length, preferences });
@@ -179,6 +201,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "View user profile statistics — total preferences, slot distribution, induction run counts, etc.",
       args: {},
       async execute() {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const stats = await client.getProfileStats();
         return JSON.stringify({ ok: true, stats });
       },
@@ -194,6 +217,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Max memories to return (default: 20)"),
       },
       async execute(args) {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const memories = await client.listRecent(args.limit ?? 20);
         if (memories.length === 0) return JSON.stringify({ ok: true, count: 0, memories: [] });
         const items = memories.map((m) => ({
@@ -234,6 +258,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Session ID to associate with the ingestion"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const effectiveAgentId = context.getAgentName?.() || context.agentId;
         const result = await client.ingestMessages(args.messages, {
           mode: args.mode ?? "smart",
@@ -252,6 +277,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "Get statistics about stored memories — counts by category, type, tier, and timeline.",
       args: {},
       async execute() {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const stats = await client.getStats();
         if (!stats) return JSON.stringify({ ok: false, error: "Failed to get stats" });
         return JSON.stringify({ ok: true, stats });
@@ -265,6 +291,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         id: tool.schema.string().describe("Memory ID to delete"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         try {
           await client.deleteMemory(args.id);
           return JSON.stringify({ ok: true, id: args.id });
@@ -293,6 +320,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Initial members to add"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.createSpace(
           args.name,
           args.space_type,
@@ -308,6 +336,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         "List all spaces you own or are a member of.",
       args: {},
       async execute() {
+        if (!checkPermission("read")) return JSON.stringify({ ok: false, error: denyMessage("read") });
         const spaces = await client.listSpaces();
         return JSON.stringify({ ok: true, spaces });
       },
@@ -322,6 +351,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         role: tool.schema.string().describe("Role: admin, member, or reader"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.addSpaceMember(
           args.space_id,
           args.user_id,
@@ -340,6 +370,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
         target_space: tool.schema.string().describe("Target space ID"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.shareMemory(
           args.memory_id,
           args.target_space,
@@ -361,6 +392,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Visibility of the pulled copy"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.pullMemory(
           args.memory_id,
           args.source_space,
@@ -382,6 +414,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Target space containing the copy (optional)"),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const result = await client.reshareMemory(
           args.memory_id,
           args.target_space,
@@ -401,6 +434,7 @@ export function buildTools(client: CerebroClient, containerTags: string[], conte
           .describe("Set to 'on' or 'off'. Omit to check current status."),
       },
       async execute(args) {
+        if (!checkPermission("write")) return JSON.stringify({ ok: false, error: denyMessage("write") });
         const sessionId = context.getSessionId();
         if (!sessionId) return JSON.stringify({ ok: false, error: "No active session" });
 

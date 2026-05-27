@@ -1,6 +1,6 @@
 {
   "name": "@mingxy/cerebro",
-  "version": "1.20.5",
+  "version": "1.20.6",
   "description": "Cerebro persistent memory plugin for OpenCode — auto-recall, auto-capture, 9 memory tools with clustering, project-scoped memory isolation",
   "type": "module",
   "main": "src/index.ts",
@@ -20,7 +20,10 @@
   ],
   "scripts": {
     "build:web": "bash ../../scripts/build-plugin-web.sh",
-    "prepublishOnly": "npm run build:web && npx tsc --noEmit"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build:web && npx tsc --noEmit -p tsconfig.publish.json"
   },
   "keywords": [
     "opencode",
@@ -51,6 +54,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.7"
   }
 }

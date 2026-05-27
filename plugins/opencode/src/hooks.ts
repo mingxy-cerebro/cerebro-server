@@ -4,6 +4,13 @@ import { type CerebroPluginConfig, DEFAULTS, resolveAgentPolicy } from "./config
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
 
+/** Sanitize session ID to prevent path traversal */
+function sanitizeSessionId(id: string | undefined): string | undefined {
+  if (!id) return id;
+  // Remove any path separators or traversal attempts
+  return id.replace(/[/\\]/g, "_").replace(/\.\./g, "");
+}
+
 const BOUNDARY_SEARCH_RATIO = 0.6;
 
 const projectNameCache = new Map<string, string>();
@@ -504,7 +511,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       return;
     }
 
-    const effectiveSessionId = (getMainSessionId?.() || input.sessionID);
+    const effectiveSessionId = sanitizeSessionId(getMainSessionId?.() || input.sessionID);
 
     // Resolve project name (shared by ingest + poll)
     let projectName: string | undefined;
@@ -615,7 +622,7 @@ export function autocontinueHook(
         return;
       }
 
-      const effectiveSessionId = getMainSessionId?.() || input.sessionID;
+      const effectiveSessionId = sanitizeSessionId(getMainSessionId?.() || input.sessionID);
 
       if (!sdkClient) {
         logInfo("autocontinueHook skipped: no sdkClient", { sessionId: input.sessionID });
@@ -626,9 +633,21 @@ export function autocontinueHook(
       try {
         const response = await sdkClient.session.messages({ path: { id: input.sessionID } });
         if (response?.data) {
-          const targetMsg = response.data.find(
+          let targetMsg = response.data.find(
             (msg: any) => msg.info?.id === input.message.id,
           );
+
+          if (!targetMsg?.parts) {
+            targetMsg = response.data.find(
+              (msg: any) => msg.info?.role === "assistant" && msg.info?.summary === true,
+            );
+          }
+
+          if (!targetMsg?.parts) {
+            const assistants = response.data.filter((msg: any) => msg.info?.role === "assistant");
+            if (assistants.length > 0) targetMsg = assistants[assistants.length - 1];
+          }
+
           if (targetMsg?.parts) {
             const textParts = (targetMsg.parts as any[])
               .filter((p: any) => p.type === "text" && p.text)
@@ -640,8 +659,8 @@ export function autocontinueHook(
         logErr("autocontinueHook failed to fetch message parts", { error: String(e) });
       }
 
-      if (!summaryText) {
-        logInfo("autocontinueHook skipped: no summary text found", { sessionId: input.sessionID, messageId: input.message.id });
+      if (!summaryText || summaryText.length < 30) {
+        logInfo("autocontinueHook skipped: summary too short", { sessionId: input.sessionID, messageId: input.message.id, summaryLen: summaryText?.length ?? 0 });
         return;
       }
 
@@ -713,10 +732,20 @@ export function sessionIdleHook(
   async function handleSummaryCapture(props: any) {
     const info = props?.info;
     if (!info) return;
-    if (info.role !== "assistant" || !info.summary || !info.finish) return;
+    if (info.role !== "assistant") return;
+    // info.summary may be missing in some SDK versions — handle below
+    // info.finish check: only process on finish, but allow missing field
+    if (info.finish === false) return;
 
-    const sessionID = info.sessionID;
+    const sessionID = sanitizeSessionId(info.sessionID);
     if (!sessionID) return;
+
+    logInfo("handleSummaryCapture checking", {
+      sessionID,
+      role: info?.role,
+      hasSummary: !!info?.summary,
+      finish: info?.finish,
+    });
 
     if (summarizedSessions.has(sessionID)) return;
     summarizedSessions.add(sessionID);
@@ -749,24 +778,31 @@ export function sessionIdleHook(
       const resp = await sdkClient.session.messages({ path: { id: sessionID } });
       const messages = resp?.data ?? resp;
 
-      const summaryMsg = (messages as Array<{ info: any; parts?: Array<{ type: string; text?: string }> }>).find((m) =>
+      let summaryMsg = (messages as Array<{ info: any; parts?: Array<{ type: string; text?: string }> }>).find((m) =>
         m.info?.role === "assistant" && m.info?.summary === true
       );
 
       if (!summaryMsg?.parts) {
-        logInfo("handleSummaryCapture: no summary parts found", { sessionID });
+        logInfo("handleSummaryCapture: no summary-flagged message, trying last assistant message", { sessionID });
+        const assistantMsgs = (messages as Array<{ info: any; parts?: Array<{ type: string; text?: string }> }>)
+          .filter(m => m.info?.role === "assistant");
+        summaryMsg = assistantMsgs.length > 0 ? assistantMsgs[assistantMsgs.length - 1] : undefined;
+      }
+
+      if (!summaryMsg?.parts) {
+        logInfo("handleSummaryCapture: no assistant message parts found", { sessionID });
         return;
       }
 
       const textParts = summaryMsg.parts.filter((p) => p.type === "text" && p.text).map((p) => p.text);
       const summaryContent = textParts.join("\n").trim();
 
-      if (!summaryContent || summaryContent.length < 100) {
+      if (!summaryContent || summaryContent.length < 30) {
         logInfo("handleSummaryCapture: summary too short", { sessionID, length: summaryContent?.length ?? 0 });
         return;
       }
 
-      const effectiveSessionId = getMainSessionId?.() || sessionID;
+      const effectiveSessionId = sanitizeSessionId(getMainSessionId?.() || sessionID);
 
       let projectName: string | undefined;
       let projectPath: string | undefined;
@@ -829,7 +865,7 @@ export function sessionIdleHook(
 
     logDebug("sessionIdleHook event.properties dump", { keys: Object.keys(input.event.properties || {}), raw: JSON.stringify(input.event.properties).substring(0, 2000) });
 
-    const sessionID = input.event.properties?.sessionID;
+    const sessionID = sanitizeSessionId(input.event.properties?.sessionID);
     if (!sessionID) return;
 
     if (isAutoStoreEnabled && !isAutoStoreEnabled(sessionID)) return;

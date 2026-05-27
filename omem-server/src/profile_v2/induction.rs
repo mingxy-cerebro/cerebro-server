@@ -15,20 +15,42 @@ use super::store::ProfileStore;
 const INDUCTION_SYSTEM_PROMPT: &str = "\
 你是偏好归纳引擎。从用户的行为记忆中提取偏好。每条偏好对应一个slot和一个具体值。仅从提供的记忆中提取，不编造。输出JSON数组。
 
-可用slot: communication_style, tone, code_style, error_handling, naming_convention, testing_strategy, workflow_preference, commit_style, emoji_preference, self_reference, address_style, language, framework_preference, preferred_tools, custom:*（自定义slot格式）
+## Slot定义
+- communication_style: 沟通方式偏好（简洁/详细/正式/随意等）
+- tone: 语言风格偏好（冷淡/热情/幽默/严肃等）
+- code_style: 编码风格偏好（卫语句/早返回/命名规范等）
+- error_handling: 错误处理偏好（日志策略/重试策略/降级方案等）
+- naming_convention: 命名规范偏好（驼峰/下划线/前缀规则等）
+- testing_strategy: 测试策略偏好（TDD/BDD/覆盖率要求等）
+- workflow_preference: 工作流程偏好（先规划后执行/先原型后优化等）
+- commit_style: 提交风格偏好（语义化版本/conventional commits等）
+- emoji_preference: emoji使用偏好（是否使用/风格/频率等）
+- self_reference: 自称偏好（我/本座/月儿等）
+- address_style: 称呼他人方式（你/您/师尊等）
+- language: 语言偏好（中文/英文/双语等）
+- framework_preference: 框架/技术栈偏好（React vs Vue等）
+- preferred_tools: 工具偏好（编辑器/终端/构建工具等）
+- custom:* 自定义slot（格式：custom:描述，如custom:deploy_strategy）
 
-输出格式:
+## 输出格式
 [{\"slot\":\"slot_name\",\"value\":\"偏好描述\",\"confidence\":0.0到1.0,\"scope\":\"project或global\"}]
 
-规则:
-- confidence: 0.5-0.9（从单条记忆推断0.5-0.6，多条一致0.7-0.9）
-- scope: 涉及特定项目用project，跨项目通用用global
-- 每条记忆最多提取3条偏好
-- 没有明确偏好的记忆跳过
-- value必须在150字以内，同时保留关键细节（命令模板、文件路径、工具名、配置值等操作性信息），不要泛泛概括也不要啰嗦
-- 好的value示例：「用PowerShell编译：powershell.exe -Command \"& { $env:JAVA_HOME=\\\"C:\\\\Program Files\\\\Java\\\\jdk17\\\"; mvn -f D:\\\\dev\\\\project\\\\nf\\\\pom.xml clean package -DskipTests }\"」
-- 差的value示例：「使用PowerShell调用Maven编译」——太笼统无操作价值
-- 去重：如果多条记忆指向同一偏好，合并为一条输出，取信息最完整的描述，confidence取多条中最高值";
+## 规则
+1. confidence: 0.5-0.9（从单条记忆推断0.5-0.6，多条一致0.7-0.9）
+2. scope: 涉及特定项目用project，跨项目通用用global
+3. 每条记忆最多提取3条偏好
+4. 没有明确偏好的记忆跳过
+5. 偏好边界：只提取反复出现的、稳定的行为模式。以下不属于偏好，必须跳过：
+   - 一次性决策（这次用方案A vs 每次都用方案A）
+   - 具体bug修复步骤
+   - 项目特定配置值（URL、端口、密钥）
+   - 临时workaround
+   - 单次任务执行记录
+   判断标准：如果这个行为在未来新项目中也会重复出现，才是偏好。
+6. value长度硬限制：value必须≤150个字符。超过150字符的value将被系统丢弃。优先保留操作性信息（命令模板、工具名），删除修饰性描述。宁可分拆为多条偏好也不要合并成一条超长的。
+7. 好的value示例：「卫语句优先：先处理错误/边界case→return，正常逻辑放最后」
+8. 差的value示例：「使用卫语句处理错误情况，先检查边界条件然后返回，正常逻辑放在最后面」——啰嗦，无操作价值
+9. 去重：多条记忆指向同一偏好→合并为一条，取信息最完整的描述，confidence取最高值";
 
 pub struct InductionResult {
     pub run_id: String,
@@ -55,6 +77,7 @@ impl InductionEngine {
         tenant_id: &str,
         _trigger_reason: &str,
         candidate_texts: &[String],
+        project_path: Option<&str>,
     ) -> Result<Option<InductionResult>, OmemError> {
         let store = self.service.store();
         let config = self.service.config();
@@ -111,7 +134,7 @@ impl InductionEngine {
 
         // ── Steps 4-10: 核心归纳逻辑（match 保证锁释放） ──
         let result = self
-            .run_induction_inner(tenant_id, &run_id, candidate_texts)
+            .run_induction_inner(tenant_id, &run_id, candidate_texts, project_path)
             .await;
 
         match result {
@@ -139,6 +162,7 @@ impl InductionEngine {
         tenant_id: &str,
         run_id: &str,
         candidate_texts: &[String],
+        project_path: Option<&str>,
     ) -> Result<usize, OmemError> {
         let store = self.service.store();
         let config = self.service.config();
@@ -224,6 +248,16 @@ impl InductionEngine {
                 continue;
             }
 
+            // value超150字符 → 丢弃，让LLM下次生成更短的
+            if item.value.chars().count() > 150 {
+                tracing::warn!(
+                    slot = %item.slot,
+                    char_count = item.value.chars().count(),
+                    "induction value exceeds 150 chars, discarding (LLM should enforce this)"
+                );
+                continue;
+            }
+
             let matching = existing_prefs.iter().find(|p| {
                 if p.slot != item.slot || p.status == PreferenceStatus::Deleted {
                     return false;
@@ -240,7 +274,7 @@ impl InductionEngine {
                     return false;
                 }
                 let overlap_count = kw_existing.intersection(&kw_new).count();
-                overlap_count as f32 / union_count as f32 > 0.4
+                overlap_count as f32 / union_count as f32 > 0.6
             });
 
             if let Some(existing) = matching {
@@ -273,7 +307,7 @@ impl InductionEngine {
                     } else {
                         PreferenceScope::Project
                     },
-                    project_path: None,
+                    project_path: project_path.map(|s| s.to_string()),
                     source: "observed".to_string(),
                     status: PreferenceStatus::Active,
                     last_reinforced_at: now,

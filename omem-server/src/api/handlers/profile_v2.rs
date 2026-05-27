@@ -416,7 +416,7 @@ pub async fn trigger_induction(
 
     let result = state
         .induction_engine
-        .trigger_induction(&auth.tenant_id, "manual", &candidates)
+        .trigger_induction(&auth.tenant_id, "manual", &candidates, body.project_path.as_deref())
         .await?;
 
     match result {

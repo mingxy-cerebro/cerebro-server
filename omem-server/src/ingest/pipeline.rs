@@ -300,8 +300,9 @@ impl IngestPipeline {
                     if let Some(engine) = induction_engine {
                         let candidate_texts: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
                         let ind_tenant = tenant_id.clone();
+                        let ind_project_path = project_path.clone();
                         tokio::spawn(async move {
-                            match engine.trigger_induction(&ind_tenant, "session_end", &candidate_texts).await {
+                            match engine.trigger_induction(&ind_tenant, "session_end", &candidate_texts, ind_project_path.as_deref()).await {
                                 Ok(Some(result)) => info!(run_id = %result.run_id, extracted = result.extracted_count, "profile_induction_triggered"),
                                 Ok(None) => debug!("profile_induction_skipped"),
                                 Err(e) => warn!(error = %e, "profile_induction_failed"),

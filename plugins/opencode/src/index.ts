@@ -33,7 +33,17 @@ function getStateFilePath(sessionId: string): string {
 
 export function isAutoStoreEnabled(sessionId: string | undefined): boolean {
   if (!sessionId) return true;
-  return autoStoreSessions.get(sessionId) ?? true;
+  const cached = autoStoreSessions.get(sessionId);
+  if (cached !== undefined) return cached;
+  // Fallback: read from persisted file (survives restart)
+  try {
+    const data = JSON.parse(readFileSync(getStateFilePath(sessionId), "utf-8"));
+    const enabled = data.enabled ?? true;
+    autoStoreSessions.set(sessionId, enabled); // cache for next time
+    return enabled;
+  } catch {
+    return true; // file doesn't exist → default ON
+  }
 }
 
 export function setAutoStoreEnabled(sessionId: string, enabled: boolean): void {
@@ -204,7 +214,7 @@ const OmemPlugin: Plugin = async (input) => {
     },
     "experimental.session.compacting": compactingHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
     "experimental.compaction.autocontinue": autocontinueHook(cerebroClient, containerTags, tui, config.ingest.ingestMode, isAutoStoreEnabled, () => mainSessionId, client, config, agentId, directory),
-    tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId, getProjectPath: () => directory }),
+    tool: buildTools(cerebroClient, containerTags, { agentId, getSessionId: () => mainSessionId, getAgentName: () => cachedAgentName || agentId, getProjectPath: () => directory, config }),
     event: sessionIdleHook(cerebroClient, containerTags, tui, client, config.ingest.ingestMode, config.ingest.autoCaptureThreshold, () => mainSessionId, isAutoStoreEnabled, agentId, config, (name: string) => { cachedAgentName = name; }, directory),
     "shell.env": async (_input: any, output: any) => {
       if (directory) {

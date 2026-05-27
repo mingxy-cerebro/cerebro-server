@@ -2441,10 +2441,11 @@ pub async fn session_ingest(
         let mut ind_texts: Vec<String> = created_memories.iter().map(|(m, _)| m.content.clone()).collect();
         ind_texts.extend(refined_texts);
         let ind_tenant = tenant_id.clone();
+        let ind_project_path = body.project_path.clone();
         if !ind_texts.is_empty() {
             tracing::debug!(texts_count = ind_texts.len(), "triggering profile induction from session_ingest");
             tokio::spawn(async move {
-                match engine.trigger_induction(&ind_tenant, "session_ingest", &ind_texts).await {
+                match engine.trigger_induction(&ind_tenant, "session_ingest", &ind_texts, ind_project_path.as_deref()).await {
                     Ok(Some(result)) => tracing::info!(run_id = %result.run_id, extracted = result.extracted_count, "session_ingest: profile_induction_triggered"),
                     Ok(None) => tracing::debug!("session_ingest: profile_induction_skipped"),
                     Err(e) => tracing::warn!(error = %e, "session_ingest: profile_induction_failed"),
