@@ -1918,7 +1918,7 @@ impl LanceStore {
                 filter.push_str(" AND ");
             }
             filter.push_str(&format!(
-                "(project_path IS NULL OR project_path = '{}')",
+                "(project_path IS NULL OR project_path = '{}' OR visibility = 'private')",
                 escape_sql(pp)
             ));
         }
@@ -1995,10 +1995,10 @@ impl LanceStore {
             if !filter.is_empty() {
                 filter.push_str(" AND ");
             }
-            filter.push_str(&format!(
-                "(project_path IS NULL OR project_path = '{}')",
-                escape_sql(pp)
-            ));
+                filter.push_str(&format!(
+                    "(project_path IS NULL OR project_path = '{}' OR visibility = 'private')",
+                    escape_sql(pp)
+                ));
         }
         if !filter.is_empty() {
             q = q.postfilter().only_if(filter);
