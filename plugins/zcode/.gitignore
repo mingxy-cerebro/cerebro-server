@@ -1,0 +1,8 @@
+# npm publish artifacts
+*.tgz
+
+# dependencies
+node_modules/
+
+# build output
+dist/

@@ -1,0 +1,23 @@
+{
+  "name": "cerebro",
+  "version": "0.1.0",
+  "description": "Cerebro persistent memory for ZCode — auto-inject user preferences, project memories, and global memories at session start; auto-archive sessions at stop/compact. Powered by Cerebro (omem) backend.",
+  "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
+  "keywords": ["memory", "persistent", "agent-memory", "context", "cerebro"],
+  "skills": "skills",
+  "commands": "commands",
+  "userConfig": {
+    "apiUrl": {
+      "description": "Cerebro backend API URL",
+      "type": "string",
+      "default": "https://www.mengxy.cc"
+    },
+    "apiKey": {
+      "description": "Cerebro tenant API key (X-API-Key). Leave empty to use OMEM_API_KEY env var.",
+      "type": "string",
+      "default": ""
+    }
+  }
+}

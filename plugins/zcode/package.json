@@ -1,0 +1,46 @@
+{
+  "name": "@mingxy/cerebro-zcode",
+  "version": "0.1.0",
+  "description": "Cerebro persistent memory plugin for ZCode — auto-inject user preferences, project memories, and global memories at session start; auto-archive sessions at stop. Bundled 17-tool MCP server. Installed automatically via postinstall hook.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
+  "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mingxy-cerebro/cerebro-server.git",
+    "directory": "plugins/zcode"
+  },
+  "keywords": ["memory", "persistent", "agent-memory", "cerebro", "zcode", "postinstall"],
+  "engines": { "node": ">=20" },
+  "bin": {
+    "cerebro-zcode-install": "./scripts/postinstall.js",
+    "cerebro-zcode-uninstall": "./scripts/preuninstall.js",
+    "cerebro-zcode-web": "./web-server.js"
+  },
+  "files": [
+    ".zcode-plugin/",
+    "hooks/",
+    "mcp/",
+    "skills/",
+    "commands/",
+    "scripts/",
+    "web/",
+    ".mcp.json",
+    "web-server.js",
+    "install.js",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "preuninstall": "node scripts/preuninstall.js",
+    "install:dev": "node install.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  }
+}
