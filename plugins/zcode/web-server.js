@@ -112,10 +112,9 @@ function main() {
   // with no incoming request. While zcode runs, stop.js pings /health at the
   // end of every turn → keeps the daemon alive. Once zcode closes, no pings
   // arrive → daemon exits on its own.
-  const IDLE_TIMEOUT_MS = parseInt(process.env.OMEM_WEB_IDLE_TIMEOUT_MS || "", 10) || 30 * 60 * 1000;
-  // Poll at most every 60s, but never slower than timeout/4 so the watchdog
-  // always gets multiple chances to fire within one idle window.
-  const IDLE_CHECK_MS = Math.min(60 * 1000, Math.max(10 * 1000, Math.floor(IDLE_TIMEOUT_MS / 4)));
+  const IDLE_TIMEOUT_MS = parseInt(process.env.OMEM_WEB_IDLE_TIMEOUT_MS || "", 10) || 20 * 1000;
+  // Poll every timeout/4 (min 2s) so the watchdog fires reliably within the idle window.
+  const IDLE_CHECK_MS = Math.max(2000, Math.floor(IDLE_TIMEOUT_MS / 4));
   let lastActivity = Date.now();
 
   const server = createServer((req, res) => {
@@ -161,17 +160,19 @@ function main() {
     console.log(`[cerebro-web]   Press Ctrl+C to stop.`);
   });
 
-  // Idle watchdog — exit if no traffic for IDLE_TIMEOUT_MS
+  // Idle watchdog — exit if no traffic for IDLE_TIMEOUT_MS.
+  // NOTE: do NOT unref this timer — unref'd timers can be skipped by the event
+  // loop on Windows, causing missed shutdowns. The server handle keeps the
+  // loop alive anyway; this watchdog must fire reliably.
   const watchdog = setInterval(() => {
     const idle = Date.now() - lastActivity;
     if (idle >= IDLE_TIMEOUT_MS) {
-      console.log(`[cerebro-web] Idle for ${Math.round(idle / 60000)}min, self-shutting down.`);
+      console.log(`[cerebro-web] Idle for ${Math.round(idle / 1000)}s, self-shutting down.`);
       clearInterval(watchdog);
       server.close(() => process.exit(0));
       setTimeout(() => process.exit(0), 1000);
     }
   }, IDLE_CHECK_MS);
-  watchdog.unref?.();
 
   const shutdown = () => {
     clearInterval(watchdog);
