@@ -9,7 +9,9 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { loadConfig } from "./lib/config.js";
 import { CerebroClient } from "./lib/cerebro-client.js";
 import { logInfo, logError, logDebug, logWarn } from "./lib/logger.js";
@@ -147,9 +149,28 @@ async function main() {
 
   // Keepalive ping for the detached web-server daemon. The daemon self-shuts
   // down after OMEM_WEB_IDLE_TIMEOUT_MS of inactivity; each Stop turn proves
-  // zcode is still alive and refreshes the daemon's idle timer.
+  // zcode is still alive. If the daemon already died (long idle between turns),
+  // re-spawn it so the web UI stays reachable mid-conversation.
   const webPort = config.web?.port || 5212;
-  fetch(`http://127.0.0.1:${webPort}/health`).catch(() => {});
+  fetch(`http://127.0.0.1:${webPort}/health`)
+    .then((r) => r.json())
+    .then((body) => {
+      if (body?.service !== "cerebro") throw new Error("wrong service");
+    })
+    .catch(() => {
+      try {
+        const webServerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "web-server.js");
+        const child = spawn(process.execPath, [webServerPath], {
+          detached: true,
+          stdio: "ignore",
+          env: { ...process.env, OMEM_LOCAL_PORT: String(webPort) },
+        });
+        child.unref();
+        logInfo("web-server daemon re-spawned", { port: webPort, pid: child.pid });
+      } catch (err) {
+        logError("web-server re-spawn failed", { error: String(err) });
+      }
+    });
 
   const client = new CerebroClient(config.connection.apiUrl, config.connection.apiKey, config);
 
