@@ -108,11 +108,11 @@ function main() {
   // ── Idle self-shutdown ─────────────────────────────────────────────────
   // zcode spawns this as a detached daemon at SessionStart; zcode itself has
   // no Exit/SessionEnd hook, so nothing tears the daemon down on quit.
-  // Instead we self-terminate after OMEM_WEB_IDLE_TIMEOUT_MS (default 50s)
+  // Instead we self-terminate after OMEM_WEB_IDLE_TIMEOUT_MS (default 5min)
   // with no incoming request. While zcode runs, stop.js pings /health at the
   // end of every turn → keeps the daemon alive. Once zcode closes, no pings
   // arrive → daemon exits on its own.
-  const IDLE_TIMEOUT_MS = parseInt(process.env.OMEM_WEB_IDLE_TIMEOUT_MS || "", 10) || 50 * 1000;
+  const IDLE_TIMEOUT_MS = parseInt(process.env.OMEM_WEB_IDLE_TIMEOUT_MS || "", 10) || 5 * 60 * 1000;
   // Poll every timeout/4 (min 2s) so the watchdog fires reliably within the idle window.
   const IDLE_CHECK_MS = Math.max(2000, Math.floor(IDLE_TIMEOUT_MS / 4));
   let lastActivity = Date.now();
