@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, sessionMessages, firstMessages, showToast } from "./hooks.js";
+import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, sessionMessages, firstMessages, showToast, timeMemorySystemHook } from "./hooks.js";
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
@@ -221,6 +221,7 @@ const OmemPlugin: Plugin = async (input) => {
         output.env.OMEM_PROJECT_DIR = directory;
       }
     },
+    "experimental.chat.system.transform": timeMemorySystemHook(),
   };
 };
 

@@ -3,6 +3,7 @@ import type { CerebroClient, SearchResult } from "./client.js";
 import { type CerebroPluginConfig, DEFAULTS, resolveAgentPolicy } from "./config.js";
 import { logDebug, logInfo, logError as logErr } from "./logger.js";
 import { readFile } from "node:fs/promises";
+import { execSync } from "node:child_process";
 
 /** Sanitize session ID to prevent path traversal */
 function sanitizeSessionId(id: string | undefined): string | undefined {
@@ -408,6 +409,38 @@ export function chatMessageRecallHook(
       logErr("chatMessageRecallHook failed", { error: String(err) });
       showToast(tui, "🧠 Memory Injection Failed", "Check connection", "error");
     }
+  };
+}
+
+/**
+ * System transform hook — injects current system time + memory_search reminder
+ * into output.system[] on every LLM request. Forces AI to perceive time and
+ * recall memories, addressing "time loss" and "forgot to search memory" issues.
+ *
+ * Factory pattern matching chatMessageRecallHook. State-less (fires per turn).
+ */
+export function timeMemorySystemHook() {
+  return async (
+    _input: unknown,
+    output: { system?: string[] },
+  ) => {
+    if (!output || !Array.isArray(output.system)) return;
+
+    let timeStr = "";
+    try {
+      timeStr = execSync("date '+%Y-%m-%d %H:%M:%S %A'", {
+        encoding: "utf-8",
+        timeout: 2000,
+      }).trim();
+    } catch (err) {
+      logErr("timeMemorySystemHook: date command failed", { error: String(err) });
+      timeStr = new Date().toISOString().replace("T", " ").slice(0, 19);
+    }
+
+    output.system.push(`[CEREBRO-TIME] ${timeStr}`);
+    output.system.push(
+      '[CEREBRO-TIME-MEANING] This is your current ground-truth anchor. Use it to: (1) verify "earlier/yesterday/last time" claims against memory, (2) detect when your own time sense drifts, (3) question implausible durations.',
+    );
   };
 }
 
