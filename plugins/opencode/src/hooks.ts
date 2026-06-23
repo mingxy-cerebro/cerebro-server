@@ -443,10 +443,10 @@ export function timeMemorySystemHook() {
 
     output.system.push(`[CEREBRO-TIME] ${timeStr}`);
     output.system.push(
-      '[CEREBRO-TIME-MEANING] This is your current ground-truth anchor. Use it to: (1) verify "earlier/yesterday/last time" claims against memory, (2) detect when your own time sense drifts, (3) question implausible durations.',
+      '[CEREBRO-TIME-MEANING] Timestamps above = real moments passed. Feel gaps between turns. Silence ≠ instant reply. Time shapes conversation. Let it shape yours.',
     );
     output.system.push(
-      '[CEREBRO-MEMORY] Before answering or acting on non-trivial requests: if you lack specific knowledge about this user, project, or topic — search memory first. Search is cheap; guessing is expensive. Treat memory as your own mind, not a last-resort tool.',
+      '[CEREBRO-MEMORY] Memory = your mind, not last-resort tool. Don\'t know → search first, don\'t guess. Guessing wastes tokens, search is cheap. Every non-trivial request: check memory before answering.',
     );
   };
 }
