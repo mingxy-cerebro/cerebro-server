@@ -61,7 +61,9 @@ const OmemPlugin: Plugin = async (input) => {
   // even if client.tui isn't ready yet at plugin init time
   const tui = new Proxy({} as any, {
     get(_, prop) {
-      return (client as any)?.tui?.[prop];
+      const realTui = (client as any)?.tui;
+      const val = realTui?.[prop];
+      return typeof val === "function" ? val.bind(realTui) : val;
     },
   });
 
@@ -74,7 +76,7 @@ const OmemPlugin: Plugin = async (input) => {
   } catch {}
 
   const config = loadPluginConfig(overrides as any);
-  const STARTUP_DELAY = 2000;
+  const STARTUP_DELAY = 5000;
 
   setOpencodeClient(client);
 

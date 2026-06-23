@@ -120,13 +120,17 @@ async function detectProjectName(rootPath: string): Promise<string | undefined> 
 }
 
 export function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs?: number) {
-  if (!tui) return;
-  const effectiveDelay = delayMs ?? DEFAULTS.ui.toastDelayMs;
-  setTimeout(() => {
+  if (!tui?.showToast) {
+    logDebug("showToast: tui or tui.showToast unavailable");
+    return;
+  }
+  const defaultDelay = 1000;
+  const effectiveDelay = delayMs ?? defaultDelay;
+  setTimeout(async () => {
     try {
-      tui.showToast({ body: { title, message, variant, duration: 5000 } });
+      await tui.showToast({ body: { title, message, variant, duration: 5000 } });
     } catch (err) {
-      logErr("showToast failed", { error: String(err) });
+      logErr("showToast failed", { error: String(err), title });
     }
   }, effectiveDelay);
 }
