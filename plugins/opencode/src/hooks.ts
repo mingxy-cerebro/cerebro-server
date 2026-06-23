@@ -441,6 +441,9 @@ export function timeMemorySystemHook() {
     output.system.push(
       '[CEREBRO-TIME-MEANING] This is your current ground-truth anchor. Use it to: (1) verify "earlier/yesterday/last time" claims against memory, (2) detect when your own time sense drifts, (3) question implausible durations.',
     );
+    output.system.push(
+      '[CEREBRO-MEMORY] Before answering or acting on non-trivial requests: if you lack specific knowledge about this user, project, or topic — search memory first. Search is cheap; guessing is expensive. Treat memory as your own mind, not a last-resort tool.',
+    );
   };
 }
 
