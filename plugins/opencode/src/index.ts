@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CerebroClient } from "./client.js";
-import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, sessionMessages, firstMessages, showToast, timeMemorySystemHook } from "./hooks.js";
+import { chatMessageRecallHook, autocontinueHook, compactingHook, sessionIdleHook, sessionMessages, firstMessages, timeMemorySystemHook } from "./hooks.js";
 import { detectSaveKeyword, detectRecallKeyword, KEYWORD_NUDGE, RECALL_NUDGE } from "./keywords.js";
 import { getUserTag, getProjectTag } from "./tags.js";
 import { buildTools } from "./tools.js";
@@ -76,35 +76,24 @@ const OmemPlugin: Plugin = async (input) => {
   } catch {}
 
   const config = loadPluginConfig(overrides as any);
-  const STARTUP_DELAY = 5000;
 
   setOpencodeClient(client);
 
   const cerebroClient = new CerebroClient(config.connection.apiUrl, config.connection.apiKey, config);
 
+  let connectionStatus: "success" | "error" = "success";
+  let statusMessage = "";
   try {
     await cerebroClient.getStats();
     logInfo(`Connected to ${config.connection.apiUrl}`);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logError(`Connection failed: ${errMsg}`);
+    connectionStatus = "error";
     if (errMsg.includes("[cerebro]")) {
-      const cleanMsg = errMsg.replace(/^\[cerebro\]\s*/, "");
-      showToast(
-        tui,
-        `🧠 Cerebro v${pluginVersion} · Server Error`,
-        cleanMsg.substring(0, 150),
-        "error",
-        STARTUP_DELAY
-      );
+      statusMessage = errMsg.replace(/^\[cerebro]\s*/, "").substring(0, 150);
     } else {
-      showToast(
-        tui,
-        `🧠 Cerebro v${pluginVersion} · Connection Failed`,
-        `Unable to reach ${config.connection.apiUrl}`,
-        "error",
-        STARTUP_DELAY
-      );
+      statusMessage = `Unable to reach ${config.connection.apiUrl}`;
     }
   }
 
@@ -138,11 +127,15 @@ const OmemPlugin: Plugin = async (input) => {
     }
   }
 
-  if (webPort) {
-    showToast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, `🌐 Open in browser http://localhost:${webPort}`, "success", STARTUP_DELAY);
-  } else {
-    showToast(tui, `🧠 Cerebro Connected · v${pluginVersion}`, "No web server", "success", STARTUP_DELAY);
-  }
+  const startupToast = connectionStatus === "error"
+    ? { variant: "error" as const, title: `🧠 Cerebro v${pluginVersion} · Connection Failed`, message: statusMessage }
+    : webPort
+      ? { variant: "success" as const, title: `🧠 Cerebro Connected · v${pluginVersion}`, message: `🌐 Open in browser http://localhost:${webPort}` }
+      : { variant: "success" as const, title: `🧠 Cerebro Connected · v${pluginVersion}`, message: "No web server" };
+
+  try {
+    writeFileSync(join(tmpdir(), "cerebro_startup_toast.json"), JSON.stringify(startupToast));
+  } catch {}
 
   // Auto-update check (fire-and-forget, non-blocking)
   checkAndUpdate(tui, pluginVersion).catch(() => {});

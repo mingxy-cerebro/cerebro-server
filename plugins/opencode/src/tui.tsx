@@ -2,7 +2,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import { createEffect, createSignal, onCleanup } from "solid-js";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -83,6 +83,15 @@ const tui: TuiPlugin = async (api) => {
       },
     },
   });
+
+  try {
+    const raw = readFileSync(join(tmpdir(), "cerebro_startup_toast.json"), "utf-8");
+    const toast = JSON.parse(raw);
+    setTimeout(() => {
+      try { api.ui.toast(toast); } catch {}
+      try { unlinkSync(join(tmpdir(), "cerebro_startup_toast.json")); } catch {}
+    }, 2000);
+  } catch {}
 };
 
 const pluginModule: TuiPluginModule & { id: string } = {
