@@ -75,15 +75,6 @@ function SidebarContentView(props: {
 }
 
 const tui: TuiPlugin = async (api) => {
-  api.slots.register({
-    order: SIDEBAR_ORDER,
-    slots: {
-      sidebar_content(_ctx, props: { session_id: string }) {
-        return <SidebarContentView api={api} sessionID={props.session_id} />;
-      },
-    },
-  });
-
   try {
     const raw = readFileSync(join(tmpdir(), "cerebro_startup_toast.json"), "utf-8");
     const toast = JSON.parse(raw);
