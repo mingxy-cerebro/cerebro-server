@@ -154,13 +154,7 @@ const OmemPlugin: Plugin = async (input) => {
   process.on("disconnect", shutdown);  // OpenCode 窗口关闭时触发
 
   return {
-    config: async (cfg: any) => {
-      cfg.command ??= {};
-      cfg.command["memory-toggle"] = {
-        template: "Use the memory_toggle tool with state='$ARGUMENTS' to toggle Cerebro auto-store for this session. You MUST call the memory_toggle tool, do not just acknowledge.",
-        description: "Toggle Cerebro auto-store ON or OFF for current session",
-      };
-    },
+    config: async (_cfg: any) => {},
     "chat.message": async (input: any, output: any) => {
       if (input.sessionID && !mainSessionLocked) {
         mainSessionId = input.sessionID;
