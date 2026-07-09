@@ -1917,9 +1917,13 @@ impl LanceStore {
             if !filter.is_empty() {
                 filter.push_str(" AND ");
             }
+            // Prefix match: parent dir sees child dir memories.
+            // Same git repo already normalized to same root; this covers
+            // non-git parent seeing git-root child (e.g. /nf → /nf/project).
+            let escaped = escape_sql(pp);
             filter.push_str(&format!(
-                "(project_path IS NULL OR project_path = '{}' OR visibility = 'private')",
-                escape_sql(pp)
+                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR visibility = 'private')",
+                escaped, escaped
             ));
         }
         if !filter.is_empty() {
@@ -1995,10 +1999,11 @@ impl LanceStore {
             if !filter.is_empty() {
                 filter.push_str(" AND ");
             }
-                filter.push_str(&format!(
-                    "(project_path IS NULL OR project_path = '{}' OR visibility = 'private')",
-                    escape_sql(pp)
-                ));
+            let escaped = escape_sql(pp);
+            filter.push_str(&format!(
+                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR visibility = 'private')",
+                escaped, escaped
+            ));
         }
         if !filter.is_empty() {
             q = q.postfilter().only_if(filter);
