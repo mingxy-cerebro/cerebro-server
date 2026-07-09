@@ -1,8 +1,35 @@
 // Shared utilities — ported from plugins/opencode/src/hooks.ts + client.ts
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const BOUNDARY_SEARCH_RATIO = 0.6;
+
+// ── Git root detection ────────────────────────────────────────────────
+// Normalize cwd to git root so project_path stays stable regardless of
+// where inside the repo the agent was launched. Falls back to cwd when
+// not in a git repo or git is unavailable.
+const gitRootCache = new Map();
+export function detectProjectRoot(cwd) {
+  const dir = cwd || process.cwd();
+  if (!dir) return "";
+  const cached = gitRootCache.get(dir);
+  if (cached !== undefined) return cached;
+  let root = dir;
+  try {
+    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      encoding: "utf-8",
+      timeout: 3000,
+      windowsHide: true,
+    });
+    if (result.status === 0 && result.stdout) {
+      root = result.stdout.trim();
+    }
+  } catch {}
+  gitRootCache.set(dir, root);
+  return root;
+}
 
 // ── Content sanitization ──────────────────────────────────────────────
 // Strip XML/HTML tags, compress whitespace, truncate (port of client.ts:4-10)

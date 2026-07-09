@@ -445,9 +445,6 @@ export function timeMemorySystemHook() {
     output.system.push(
       '[CEREBRO-TIME-MEANING] Timestamps above = real moments passed. Feel gaps between turns. Silence ≠ instant reply. Time shapes conversation. Let it shape yours.',
     );
-    output.system.push(
-      '[CEREBRO-MEMORY] Memory = your mind, not last-resort tool. Don\'t know → search first, don\'t guess. Guessing wastes tokens, search is cheap. Every non-trivial request: check memory before answering.',
-    );
   };
 }
 
@@ -560,7 +557,7 @@ export function compactingHook(client: CerebroClient, containerTags: string[], t
       if (sdkClient && input.sessionID) {
         const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
         logDebug("compactingHook project.rootPath", { rootPath: sessionInfo?.data?.directory });
-        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
+        projectPath = directory || sessionInfo?.data?.directory || process.env.OMEM_PROJECT_DIR;
         projectName = sessionInfo?.data?.directory
           ? await detectProjectName(sessionInfo.data.directory)
           : undefined;
@@ -708,7 +705,7 @@ export function autocontinueHook(
       let projectPath: string | undefined;
       try {
         const sessionInfo = await sdkClient.session.get({ path: { id: input.sessionID } });
-        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
+        projectPath = directory || sessionInfo?.data?.directory || process.env.OMEM_PROJECT_DIR;
         projectName = sessionInfo?.data?.directory
           ? await detectProjectName(sessionInfo.data.directory)
           : undefined;
@@ -848,7 +845,7 @@ export function sessionIdleHook(
       let projectPath: string | undefined;
       try {
         const sessionInfo = await sdkClient.session.get({ path: { id: sessionID } });
-        projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
+        projectPath = directory || sessionInfo?.data?.directory || process.env.OMEM_PROJECT_DIR;
         projectName = sessionInfo?.data?.directory
           ? await detectProjectName(sessionInfo.data.directory)
           : undefined;
@@ -975,7 +972,7 @@ export function sessionIdleHook(
             onAgentResolved?.(effectiveAgentId);
           }
           sessionTitle = sessionInfo?.data?.title;
-          projectPath = sessionInfo?.data?.directory || directory || process.env.OMEM_PROJECT_DIR;
+          projectPath = directory || sessionInfo?.data?.directory || process.env.OMEM_PROJECT_DIR;
           projectName = sessionInfo?.data?.directory
             ? await detectProjectName(sessionInfo.data.directory)
             : undefined;

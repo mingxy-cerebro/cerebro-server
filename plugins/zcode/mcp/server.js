@@ -18,6 +18,7 @@ import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { detectProjectRoot } from "../hooks/lib/util.js";
 
 // ── Startup probe (diagnostic: confirm zcode actually spawns this process) ──
 try {
@@ -50,7 +51,7 @@ const CEREBRO_CFG = loadCerebroConfig();
 const API_URL = (process.env.OMEM_API_URL || CEREBRO_CFG.apiUrl || "https://www.mengxy.cc").replace(/\/+$/, "");
 const API_KEY = process.env.OMEM_API_KEY || CEREBRO_CFG.apiKey || "";
 const AGENT_ID = process.env.OMEM_AGENT_ID || "zcode";
-const PROJECT_PATH = process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
+const PROJECT_PATH = detectProjectRoot(process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || process.cwd());
 const MAX_QUERY_LENGTH = 200;
 const MAX_CONTENT_CHARS = 30000;
 const STATE_DIR = process.env.ZCODE_PLUGIN_DATA || join(homedir(), ".config", "cerebro", "zcode-state");

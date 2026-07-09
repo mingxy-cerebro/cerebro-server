@@ -15,7 +15,7 @@ import { spawn } from "node:child_process";
 import { loadConfig } from "./lib/config.js";
 import { CerebroClient } from "./lib/cerebro-client.js";
 import { logInfo, logError, logDebug, logWarn } from "./lib/logger.js";
-import { getUserTag, getProjectTag, detectProjectName } from "./lib/util.js";
+import { getUserTag, getProjectTag, detectProjectName, detectProjectRoot } from "./lib/util.js";
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -139,7 +139,8 @@ async function main() {
 
   // ZCode Stop input uses camelCase: sessionId, turnId, cwd
   const sessionId = input?.sessionId || input?.session_id || "";
-  const cwd = input?.cwd || process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
+  const rawCwd = input?.cwd || process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
+  const cwd = rawCwd ? detectProjectRoot(rawCwd) : "";
 
   if (!sessionId) {
     logDebug("Stop: no sessionId, skipping", { inputKeys: Object.keys(input || {}) });

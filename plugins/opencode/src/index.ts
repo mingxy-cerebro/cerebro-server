@@ -56,7 +56,10 @@ export function setAutoStoreEnabled(sessionId: string, enabled: boolean): void {
 (globalThis as any).__cerebro_autoStoreMap = autoStoreSessions;
 
 const OmemPlugin: Plugin = async (input) => {
-  const { directory, client } = input;
+  // Normalize to git root: worktree=git root, directory=cwd.
+  // project_path must be git root so parent/child dirs share memories.
+  const { directory: _directory, worktree, client } = input;
+  const directory = worktree || _directory;
   // Proxy: dynamically resolve client.tui on each access so toast works
   // even if client.tui isn't ready yet at plugin init time
   const tui = new Proxy({} as any, {

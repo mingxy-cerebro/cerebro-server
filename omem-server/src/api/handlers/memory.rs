@@ -21,7 +21,7 @@ use crate::lifecycle::tier::TierManager;
 use crate::retrieve::pipeline::SearchRequest;
 use crate::retrieve::RetrievalPipeline;
 
-use crate::store::lancedb::ListFilter;
+use crate::store::lancedb::{escape_sql, ListFilter};
 use crate::store::StoreManager;
 
 // ── Request / Response DTOs ──────────────────────────────────────────
@@ -1103,6 +1103,9 @@ pub async fn delete_all_memories(
 #[derive(Deserialize)]
 pub struct BackfillProjectPathBody {
     pub project_path: String,
+    /// Remap mode: update only rows whose project_path == from_path. Absent = legacy NULL backfill.
+    #[serde(default)]
+    pub from_path: Option<String>,
 }
 
 pub async fn backfill_project_path(
@@ -1123,9 +1126,20 @@ pub async fn backfill_project_path(
         .get_store(&personal_space_id(&auth.tenant_id))
         .await?;
 
-    // Skip private (global by design) and preferences (cross-project by nature)
-    let filter = "project_path IS NULL AND visibility != 'private' AND category != 'preferences'";
-    let updated_count = store.batch_update_project_path(&sanitized, filter).await?;
+    // from_path = exact-match remap; absent = legacy NULL backfill. Both skip private + preferences.
+    let filter = match &body.from_path {
+        Some(from) if !from.is_empty() => {
+            let from_sanitized = sanitize_project_path(from).map_err(|e| {
+                OmemError::Validation(format!("invalid from_path: {e}"))
+            })?;
+            format!(
+                "project_path = '{}' AND visibility != 'private' AND category != 'preferences'",
+                escape_sql(&from_sanitized)
+            )
+        }
+        _ => "project_path IS NULL AND visibility != 'private' AND category != 'preferences'".to_string(),
+    };
+    let updated_count = store.batch_update_project_path(&sanitized, &filter).await?;
 
     Ok(Json(serde_json::json!({ "updated_count": updated_count })))
 }

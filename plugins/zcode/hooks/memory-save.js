@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { loadConfig } from "./lib/config.js";
 import { CerebroClient } from "./lib/cerebro-client.js";
 import { logInfo, logError } from "./lib/logger.js";
-import { getUserTag, getProjectTag, detectProjectName } from "./lib/util.js";
+import { getUserTag, getProjectTag, detectProjectName, detectProjectRoot } from "./lib/util.js";
 
 function stripSystemNoise(text) {
   if (!text) return "";
@@ -69,7 +69,8 @@ async function main() {
 
   // sessionId comes from env (set by command) or first arg
   const sessionId = process.env.ZCODE_SESSION_ID || process.argv[2] || "";
-  const cwd = process.env.ZCODE_CWD || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const rawCwd = process.env.ZCODE_CWD || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const cwd = detectProjectRoot(rawCwd);
 
   if (!sessionId) {
     console.error("[cerebro] No sessionId. Usage: memory-save.js <sessionId>");

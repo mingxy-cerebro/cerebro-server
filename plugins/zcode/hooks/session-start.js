@@ -21,6 +21,7 @@ import {
   getUserTag,
   getProjectTag,
   detectProjectName,
+  detectProjectRoot,
   extractUserRequest,
   formatRelativeAge,
   truncateAtBoundary,
@@ -248,7 +249,8 @@ async function main() {
   }
 
   // Resolve project path: prefer cwd from hook input, fallback to CLAUDE_PROJECT_DIR env
-  const projectPath = input?.cwd || process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
+  const rawPath = input?.cwd || process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
+  const projectPath = rawPath ? detectProjectRoot(rawPath) : "";
   const query = await deriveQuery(input, projectPath);
 
   logInfo("SessionStart building injection", {
