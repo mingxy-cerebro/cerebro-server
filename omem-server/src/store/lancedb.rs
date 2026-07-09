@@ -2419,7 +2419,11 @@ impl LanceStore {
             conditions.push(format!("visibility = '{}'", escape_sql(v)));
         }
         if let Some(ref pp) = filter.project_path {
-            conditions.push(format!("project_path = '{}'", escape_sql(pp)));
+            let escaped = escape_sql(pp);
+            conditions.push(format!(
+                "(project_path = '{}' OR project_path LIKE '{}/%')"
+                , escaped, escaped
+            ));
         }
 
         if conditions.is_empty() {
