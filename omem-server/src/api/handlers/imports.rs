@@ -10,8 +10,10 @@ use uuid::Uuid;
 
 use crate::api::server::{personal_space_id, AppState};
 use crate::domain::error::OmemError;
+use crate::domain::memory::Memory;
 use crate::domain::relation::{MemoryRelation, RelationType};
 use crate::domain::tenant::AuthInfo;
+use crate::embed::EmbedService;
 use crate::ingest::intelligence::IntelligenceTask;
 use crate::ingest::session::SessionMessage;
 use crate::store::spaces::ImportTaskRecord;
@@ -125,10 +127,10 @@ pub async fn create_import(
     let content = String::from_utf8(data)
         .map_err(|_| OmemError::Validation("not valid UTF-8".to_string()))?;
 
-    let valid_types = ["memory", "session", "markdown", "jsonl"];
+    let valid_types = ["memory", "session", "markdown", "jsonl", "json"];
     if !valid_types.contains(&file_type.as_str()) {
         return Err(OmemError::Validation(format!(
-            "unsupported file_type: {file_type}. Use: memory, session, markdown, jsonl"
+            "unsupported file_type: {file_type}. Use: memory, session, markdown, jsonl, json"
         )));
     }
 
@@ -156,6 +158,25 @@ pub async fn create_import(
         return Err(OmemError::Validation(
             "file already imported (duplicate content)".to_string(),
         ));
+    }
+
+    // JSON 原样导入分支：不走 LLM 提取，每条 Memory 直接 store.create()
+    if file_type == "json" {
+        return import_json_verbatim(
+            content,
+            &store,
+            &state.embed,
+            &state.space_store,
+            &auth.tenant_id,
+            &target_space,
+            task_id,
+            filename,
+            file_type,
+            agent_id,
+            now,
+        )
+        .await
+        .map(Json);
     }
 
     let import_session_id = format!("import-{}", task_id);
@@ -500,4 +521,98 @@ pub async fn rollback_import(
         "deleted_sessions": sessions_deleted,
         "import_status": "rolled_back"
     })))
+}
+
+#[derive(Deserialize)]
+struct JsonExport {
+    #[serde(default)]
+    memories: Vec<Memory>,
+}
+
+/// JSON verbatim import: parse `{memories: [...]}` or top-level array, override tenant/space, create each.
+async fn import_json_verbatim(
+    content: String,
+    store: &Arc<crate::store::LanceStore>,
+    embed: &Arc<dyn EmbedService>,
+    space_store: &Arc<crate::store::spaces::SpaceStore>,
+    tenant_id: &str,
+    target_space: &str,
+    task_id: String,
+    filename: String,
+    file_type: String,
+    agent_id: Option<String>,
+    now: String,
+) -> Result<ImportTaskRecord, OmemError> {
+    let memories: Vec<Memory> = if content.trim_start().starts_with('[') {
+        serde_json::from_str(&content)
+            .map_err(|e| OmemError::Validation(format!("invalid JSON array: {e}")))?
+    } else {
+        let export: JsonExport = serde_json::from_str(&content)
+            .map_err(|e| OmemError::Validation(format!("invalid JSON export: {e}")))?;
+        export.memories
+    };
+
+    if memories.is_empty() {
+        return Err(OmemError::Validation("JSON contains no memories".to_string()));
+    }
+
+    let total = memories.len();
+    let mut stored = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    let texts: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+    let vectors = embed.embed(&texts).await.unwrap_or_else(|_| Vec::new());
+
+    for (i, mut mem) in memories.into_iter().enumerate() {
+        mem.tenant_id = tenant_id.to_string();
+        mem.space_id = target_space.to_string();
+        if mem.agent_id.is_none() {
+            mem.agent_id = agent_id.clone();
+        }
+        let vec = vectors.get(i).cloned();
+        match store.create(&mem, vec.as_deref()).await {
+            Ok(_) => stored += 1,
+            Err(e) => {
+                let msg = format!("id={} err={}", mem.id, e);
+                errors.push(msg);
+                skipped += 1;
+            }
+        }
+    }
+
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    let task = ImportTaskRecord {
+        id: task_id.clone(),
+        status: "completed".to_string(),
+        file_type,
+        filename,
+        agent_id,
+        space_id: target_space.to_string(),
+        post_process: false,
+        strategy: "json-verbatim".to_string(),
+        storage_total: total,
+        storage_stored: stored,
+        storage_skipped: skipped,
+        extraction_status: "skipped".to_string(),
+        extraction_chunks: 0,
+        extraction_facts: stored,
+        extraction_progress: 100,
+        reconcile_status: "skipped".to_string(),
+        reconcile_relations: 0,
+        reconcile_merged: stored,
+        reconcile_progress: 100,
+        errors,
+        created_at: now,
+        completed_at: Some(completed_at),
+    };
+    space_store.create_import_task(&task).await?;
+
+    info!(
+        task_id = %task.id,
+        total, stored, skipped,
+        "json_verbatim_import_complete"
+    );
+
+    Ok(task)
 }

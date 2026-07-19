@@ -24,6 +24,7 @@ interface ImportTask {
 
 const POLL_INTERVAL_MS = 2000
 const POLL_MAX_ATTEMPTS = 150
+const TASK_STORAGE_KEY = "omem-import-task"
 
 const STATUS_ICON: Record<string, string> = {
   completed: "✓",
@@ -49,19 +50,72 @@ function ProgressRow({ label, status, detail }: { label: string; status: string;
   )
 }
 
+function fileTypeFor(filename: string): string {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith(".json")) return "json"
+  if (lower.endsWith(".csv")) return "memory"
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown"
+  return "memory"
+}
+
 export function ImportPage() {
   const navigate = useNavigate()
   const [file, setFile] = useState<File | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [forceImport, setForceImport] = useState(false)
-  const [task, setTask] = useState<ImportTask | null>(null)
+  const [task, setTaskState] = useState<ImportTask | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const setTask = useCallback((t: ImportTask | null) => {
+    setTaskState(t)
+    if (t) {
+      sessionStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(t))
+    } else {
+      sessionStorage.removeItem(TASK_STORAGE_KEY)
+    }
+  }, [])
+
+  const clearTask = useCallback(() => {
+    setTaskState(null)
+    sessionStorage.removeItem(TASK_STORAGE_KEY)
+  }, [])
+
   useEffect(() => {
-    return () => {
-      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    const saved = sessionStorage.getItem(TASK_STORAGE_KEY)
+    if (!saved) return
+    try {
+      const t: ImportTask = JSON.parse(saved)
+      setTaskState(t)
+      if (t.status === "completed" || t.status === "failed") return
+      setIsUploading(true)
+      let cancelled = false
+      let attempt = 0
+      const tick = async () => {
+        if (cancelled || attempt >= POLL_MAX_ATTEMPTS) return
+        attempt += 1
+        try {
+          const fresh = await apiClient.get<ImportTask>(`/v1/imports/${t.id}`)
+          if (cancelled) return
+          setTaskState(fresh)
+          sessionStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(fresh))
+          if (fresh.status === "completed" || fresh.status === "failed") {
+            setIsUploading(false)
+            return
+          }
+        } catch {
+          // keep last state, retry next tick
+        }
+        pollTimerRef.current = setTimeout(tick, POLL_INTERVAL_MS)
+      }
+      pollTimerRef.current = setTimeout(tick, POLL_INTERVAL_MS)
+      return () => {
+        cancelled = true
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+      }
+    } catch {
+      sessionStorage.removeItem(TASK_STORAGE_KEY)
     }
   }, [])
 
@@ -81,15 +135,15 @@ export function ImportPage() {
     setDragActive(false)
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       setFile(e.dataTransfer.files[0])
-      setTask(null)
+      clearTask()
       setErrorMsg(null)
     }
-  }, [])
+  }, [clearTask])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0])
-      setTask(null)
+      clearTask()
       setErrorMsg(null)
     }
   }
@@ -125,7 +179,7 @@ export function ImportPage() {
       setErrorMsg(e.message || "查询导入状态失败")
       setIsUploading(false)
     }
-  }, [])
+  }, [setTask])
 
   const handleImport = async () => {
     if (!file) {
@@ -135,6 +189,7 @@ export function ImportPage() {
 
     const formData = new FormData()
     formData.append("file", file)
+    formData.append("file_type", fileTypeFor(file.name))
     formData.append("force", forceImport ? "true" : "false")
 
     setIsUploading(true)
