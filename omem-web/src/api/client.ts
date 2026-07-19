@@ -31,6 +31,10 @@ apiClient.interceptors.request.use((config) => {
     config.headers["X-API-Key"] = currentUser.apiKey
     config.headers["X-Agent-ID"] = "omem-web"
   }
+  // FormData: clear default Content-Type so axios auto-sets multipart boundary
+  if (config.data instanceof FormData) {
+    delete config.headers["Content-Type"]
+  }
   return config
 })
 

@@ -1,24 +1,69 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
-import { ArrowLeft, Upload, FileJson, FileSpreadsheet, FileText, CheckCircle, XCircle } from "lucide-react"
+import { ArrowLeft, Upload, FileJson, FileSpreadsheet, FileText, CheckCircle, XCircle, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { toast } from "sonner"
 import apiClient from "@/api/client"
 
-interface ImportResult {
-  success: boolean
-  imported: number
-  failed: number
-  errors?: string[]
+interface ImportTask {
+  id: string
+  status: string
+  filename: string
+  storage_stored: number
+  storage_skipped: number
+  extraction_status: string
+  extraction_facts: number
+  extraction_progress: number
+  reconcile_status: string
+  reconcile_merged: number
+  reconcile_progress: number
+  errors: string[]
+}
+
+const POLL_INTERVAL_MS = 2000
+const POLL_MAX_ATTEMPTS = 150
+
+const STATUS_ICON: Record<string, string> = {
+  completed: "✓",
+  failed: "✗",
+  pending: "⋯",
+  processing: "⋯",
+  skipped: "–",
+}
+
+function ProgressRow({ label, status, detail }: { label: string; status: string; detail: string }) {
+  const icon = STATUS_ICON[status] ?? "·"
+  const tone =
+    status === "completed" ? "text-green-500" :
+    status === "failed" ? "text-red-500" :
+    status === "processing" || status === "pending" ? "text-blue-500 animate-pulse" :
+    "text-muted-foreground"
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className={`font-mono w-4 ${tone}`}>{icon}</span>
+      <span className="font-medium w-24 shrink-0">{label}</span>
+      <span className="text-xs text-muted-foreground flex-1">{detail}</span>
+    </div>
+  )
 }
 
 export function ImportPage() {
   const navigate = useNavigate()
   const [file, setFile] = useState<File | null>(null)
   const [isUploading, setIsUploading] = useState(false)
-  const [result, setResult] = useState<ImportResult | null>(null)
+  const [forceImport, setForceImport] = useState(false)
+  const [task, setTask] = useState<ImportTask | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    }
+  }, [])
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -36,14 +81,16 @@ export function ImportPage() {
     setDragActive(false)
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       setFile(e.dataTransfer.files[0])
-      setResult(null)
+      setTask(null)
+      setErrorMsg(null)
     }
   }, [])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0])
-      setResult(null)
+      setTask(null)
+      setErrorMsg(null)
     }
   }
 
@@ -54,6 +101,32 @@ export function ImportPage() {
     return <FileText className="h-8 w-8 text-muted-foreground" />
   }
 
+  const pollTask = useCallback(async (taskId: string, attempt: number) => {
+    if (attempt >= POLL_MAX_ATTEMPTS) {
+      setErrorMsg("导入超时（5分钟未完成），请稍后在记忆列表查看结果")
+      setIsUploading(false)
+      return
+    }
+    try {
+      const t = await apiClient.get<ImportTask>(`/v1/imports/${taskId}`)
+      setTask(t)
+      if (t.status === "completed" || t.status === "failed") {
+        setIsUploading(false)
+        if (t.status === "completed") {
+          toast.success(`导入完成：提取 ${t.extraction_facts} 条，合并 ${t.reconcile_merged} 条`)
+        } else {
+          setErrorMsg(t.errors?.join("\n") || "导入失败")
+          toast.error("导入失败")
+        }
+        return
+      }
+      pollTimerRef.current = setTimeout(() => pollTask(taskId, attempt + 1), POLL_INTERVAL_MS)
+    } catch (e: any) {
+      setErrorMsg(e.message || "查询导入状态失败")
+      setIsUploading(false)
+    }
+  }, [])
+
   const handleImport = async () => {
     if (!file) {
       toast.error("请先选择文件")
@@ -62,35 +135,31 @@ export function ImportPage() {
 
     const formData = new FormData()
     formData.append("file", file)
-
-    const format = file.name.endsWith('.json') ? 'json' : 
-                   file.name.endsWith('.csv') ? 'csv' : 'md'
-    formData.append("format", format)
+    formData.append("force", forceImport ? "true" : "false")
 
     setIsUploading(true)
+    setErrorMsg(null)
+    setTask(null)
     try {
-      const response = await apiClient.post("/v1/imports", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
+      const resp = await apiClient.post<ImportTask>("/v1/imports", formData, {
+        timeout: 120000,
       })
-      setResult({
-        success: true,
-        imported: response.imported || 0,
-        failed: response.failed || 0,
-        errors: response.errors,
-      })
-      toast.success(`成功导入 ${response.imported || 0} 条记忆`)
+      setTask(resp)
+      if (resp.status === "completed") {
+        setIsUploading(false)
+        toast.success(`导入完成：提取 ${resp.extraction_facts} 条，合并 ${resp.reconcile_merged} 条`)
+      } else {
+        pollTask(resp.id, 0)
+      }
     } catch (error: any) {
-      const message = error.response?.data?.error || error.message || "导入失败"
-      setResult({
-        success: false,
-        imported: 0,
-        failed: 0,
-        errors: [message],
-      })
-      toast.error(message)
-    } finally {
+      const errData = error.response?.data
+      const message = typeof errData === 'string' ? errData
+        : errData?.error?.message || errData?.error
+        || errData?.message
+        || error.message || "导入失败"
+      const msgText = typeof message === 'string' ? message : JSON.stringify(message)
+      setErrorMsg(msgText)
+      toast.error(msgText)
       setIsUploading(false)
     }
   }
@@ -146,53 +215,97 @@ export function ImportPage() {
       </Card>
 
       {file && (
-        <div className="flex items-center gap-3 rounded-lg border border-border bg-card p-4">
-          {getFileIcon(file.name)}
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate">{file.name}</p>
-            <p className="text-xs text-muted-foreground">
-              {(file.size / 1024).toFixed(1)} KB
-            </p>
+        <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+          <div className="flex items-center gap-3">
+            {getFileIcon(file.name)}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate">{file.name}</p>
+              <p className="text-xs text-muted-foreground">
+                {(file.size / 1024).toFixed(1)} KB
+              </p>
+            </div>
+            <Button
+              onClick={handleImport}
+              disabled={isUploading}
+              size="sm"
+            >
+              {isUploading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  处理中
+                </>
+              ) : "开始导入"}
+            </Button>
           </div>
-          <Button
-            onClick={handleImport}
-            disabled={isUploading}
-            size="sm"
-          >
-            {isUploading ? "导入中..." : "开始导入"}
-          </Button>
+          <label htmlFor="force-import" className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+            <Checkbox
+              id="force-import"
+              checked={forceImport}
+              onCheckedChange={(v) => setForceImport(v === true)}
+            />
+            <span>强制导入（忽略 SHA256 重复检查）</span>
+          </label>
         </div>
       )}
 
-      {result && (
+      {errorMsg && (
+        <Card className="p-6 border-red-500/30">
+          <div className="flex items-center gap-2 mb-3">
+            <XCircle className="h-5 w-5 text-red-500" />
+            <h3 className="font-semibold text-red-500">导入失败</h3>
+          </div>
+          <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-all">{errorMsg}</pre>
+        </Card>
+      )}
+
+      {task && (
         <Card className="p-6">
           <div className="flex items-center gap-2 mb-4">
-            {result.success ? (
+            {task.status === "completed" ? (
               <CheckCircle className="h-5 w-5 text-green-500" />
-            ) : (
+            ) : task.status === "failed" ? (
               <XCircle className="h-5 w-5 text-red-500" />
+            ) : (
+              <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />
             )}
             <h3 className="font-semibold">
-              {result.success ? "导入成功" : "导入失败"}
+              {task.status === "completed" ? "导入完成" :
+               task.status === "failed" ? "导入失败" : "后台处理中"}
             </h3>
+            <span className="ml-auto text-xs text-muted-foreground font-mono">
+              task: {task.id.slice(0, 8)}…
+            </span>
           </div>
-          {result.success && (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="rounded-lg bg-green-500/10 p-4 text-center">
-                <p className="text-2xl font-bold text-green-500">{result.imported}</p>
-                <p className="text-xs text-muted-foreground">成功导入</p>
-              </div>
-              <div className="rounded-lg bg-red-500/10 p-4 text-center">
-                <p className="text-2xl font-bold text-red-500">{result.failed}</p>
-                <p className="text-xs text-muted-foreground">导入失败</p>
-              </div>
+
+          <div className="space-y-3">
+            <ProgressRow
+              label="存储阶段"
+              status={task.storage_stored > 0 ? "completed" : "skipped"}
+              detail={`${task.storage_stored} 已存 / ${task.storage_skipped} 跳过`}
+            />
+            <ProgressRow
+              label="LLM 提取"
+              status={task.extraction_status}
+              detail={`${task.extraction_facts} 条 facts（${task.extraction_progress}%）`}
+            />
+            <ProgressRow
+              label="Reconcile 合并"
+              status={task.reconcile_status}
+              detail={`${task.reconcile_merged} 条合并到记忆库（${task.reconcile_progress}%）`}
+            />
+          </div>
+
+          {task.status === "completed" && (
+            <div className="mt-4 rounded-lg bg-blue-500/10 p-3 text-xs text-blue-600">
+              导入流程已完成。新记忆会在 <button type="button" onClick={() => navigate("/memories")} className="underline font-medium">记忆列表</button> 中显示。
             </div>
           )}
-          {result.errors && result.errors.length > 0 && (
-            <div className="mt-4 space-y-2">
-              <p className="text-sm font-medium text-red-500">错误信息：</p>
-              {result.errors.map((error) => (
-                <p key={error} className="text-xs text-muted-foreground">{error}</p>
+
+          {task.errors.length > 0 && (
+            <div className="mt-4 space-y-1">
+              <p className="text-sm font-medium text-red-500">错误：</p>
+              {task.errors.map((e) => (
+                <p key={e.slice(0, 40)} className="text-xs text-muted-foreground">{e}</p>
               ))}
             </div>
           )}
