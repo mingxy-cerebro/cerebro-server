@@ -62,7 +62,7 @@ impl Reconciler {
             return Ok(Vec::new());
         }
 
-        let (existing, all_searches_failed) = self.gather_existing(facts, session_id.clone()).await;
+        let (existing, all_searches_failed) = self.gather_existing(facts, session_id.clone(), project_path.as_deref()).await;
 
         if existing.is_empty() && all_searches_failed {
             return Err(OmemError::Internal(
@@ -518,6 +518,7 @@ impl Reconciler {
         &self,
         facts: &[ExtractedFact],
         session_id: Option<String>,
+        project_path: Option<&str>,
     ) -> (Vec<Memory>, bool) {
         let mut seen_ids: HashMap<String, Memory> = HashMap::new();
         let mut any_search_succeeded = false;
@@ -567,7 +568,7 @@ impl Reconciler {
                             None,
                             None,
                             None,
-                            None,
+                            project_path,
                         )
                         .await
                     {
@@ -600,7 +601,7 @@ impl Reconciler {
 
             match self
                 .store
-                .fts_search(&fts_query, self.max_per_fact, None, None, None, None)
+                .fts_search(&fts_query, self.max_per_fact, None, None, None, project_path)
                 .await
             {
                 Ok(results) => {
