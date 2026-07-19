@@ -12,7 +12,6 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::{sanitize_project_path, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
-use crate::ingest::refine_service::{collect_chain_memories, refine_and_replace};
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
 use crate::ingest::IngestPipeline;
 
@@ -2100,113 +2099,6 @@ pub async fn session_ingest(
             }
 
             if memory_type == "WORK" {
-                // ── 精炼路径：非private → 尝试LLM精炼 ──
-                if topic.scope != "private" {
-                    // B1: If no existing_work_memory tracked, search for similar WORK memory in same session
-                    if existing_work_memory.is_none() {
-                        let sid = session_id.as_deref().unwrap_or("default");
-                        let tid = &tenant_id;
-                        match crate::ingest::refine_service::find_similar_work_memory(
-                            &store, &state.embed, &topic.topic, sid, tid,
-                        ).await {
-                            Ok(Some(similar)) => {
-                                tracing::info!(
-                                    similar_id = %similar.id,
-                                    score_topic = %topic.topic,
-                                    "session_ingest: found similar WORK memory via embedding search"
-                                );
-                                existing_work_memory = Some(similar);
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "session_ingest: embedding search failed, skipping refine");
-                            }
-                        }
-                    }
-
-                    if let Some(ref existing) = existing_work_memory {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(30),
-                            async {
-                                let chain = collect_chain_memories(&store, existing).await?;
-                                refine_and_replace(&store, &state.llm, &state.embed, existing, &chain, &summary, &topic.topic).await
-                            }
-                        ).await {
-                            Ok(Ok(mut refined)) => {
-                                let content_len = refined.content.chars().count();
-                                tracing::info!(
-                                    memory_id = %refined.id,
-                                    new_len = content_len,
-                                    "session_ingest: WORK refined successfully"
-                                );
-                                if content_len > crate::ingest::refine_service::MAX_SINGLE_MEMORY_CHARS {
-                                    let content_for_split = refined.content.clone();
-                                    let (first_half, second_half) = find_split_point(&content_for_split, 3000);
-                                    if let Some((child_id, child)) = create_continuation(&refined, second_half, &state, &store).await {
-                                        refined.content = first_half.clone();
-                                        if refined.l1_overview.chars().count() > 150 {
-                                            refined.l1_overview = format!("{}...", refined.l1_overview.chars().take(147).collect::<String>());
-                                        }
-                                        if refined.l2_content.chars().count() > 500 {
-                                            refined.l2_content = format!("{}...", refined.l2_content.chars().take(497).collect::<String>());
-                                        }
-                                        let first_half_chars = first_half.chars().count();
-                                        let refined_vec = match state.embed.embed(&[first_half]).await {
-                                            Ok(vecs) => vecs.into_iter().next(),
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "session_ingest: failed to re-embed refined after split");
-                                                None
-                                            }
-                                        };
-                                        // Bake ContinuedBy relation into refined before the vector-path update
-                                        // so it's written atomically (avoids scalar-update-after-delete race in LanceDB)
-                                        if !refined.relations.iter().any(|r|
-                                            r.relation_type == crate::domain::relation::RelationType::ContinuedBy
-                                            && r.target_id == child_id
-                                        ) {
-                                            refined.relations.push(crate::domain::relation::MemoryRelation {
-                                                relation_type: crate::domain::relation::RelationType::ContinuedBy,
-                                                target_id: child_id.clone(),
-                                                context_label: Some("auto-split continuation".to_string()),
-                                            });
-                                        }
-                                        if let Err(e) = store.update(&refined, refined_vec.as_deref()).await {
-                                            tracing::warn!(error = %e, memory_id = %refined.id, "session_ingest: failed to update refined after split");
-                                        }
-                                        tracing::info!(
-                                            parent_id = %refined.id,
-                                            child_id = %child_id,
-                                            first_chars = first_half_chars,
-                                            "session_ingest: refined split — parent updated to first half, child created for second"
-                                        );
-                                        if let Some(ref ancestor_id) = work_original_parent_id {
-                                            add_continued_by_relation(&store, ancestor_id, &child_id, "WORK").await;
-                                        }
-                                        if work_original_parent_id.is_none() {
-                                            work_original_parent_id = Some(refined.id.clone());
-                                        }
-                                        existing_work_memory = Some(child);
-                                        refined_texts.push(content_for_split);
-                                    } else {
-                                        refined_texts.push(refined.content.clone());
-                                        existing_work_memory = Some(refined);
-                                    }
-                                } else {
-                                    refined_texts.push(refined.content.clone());
-                                    existing_work_memory = Some(refined);
-                                }
-                                continue;
-                            }
-                            Ok(Err(e)) => {
-                                tracing::warn!(error = %e, "session_ingest: refine failed, falling back to append");
-                            }
-                            Err(_) => {
-                                tracing::warn!("session_ingest: refine timed out (30s), falling back to append");
-                            }
-                        }
-                    }
-                }
-
                 // ── 原有追加逻辑（fallback + 首次创建路径）──
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let section_header = format!("## {} {}", today, topic.topic);

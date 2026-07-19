@@ -327,11 +327,6 @@ impl LifecycleScheduler {
                     continue;
                 }
 
-                // Private memories are protected from tier demotion
-                if memory.visibility == "private" {
-                    continue;
-                }
-
                 let old_tier = memory.tier.clone();
                 let new_tier = tier_manager.evaluate_tier(&memory);
 

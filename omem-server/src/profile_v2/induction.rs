@@ -30,27 +30,64 @@ const INDUCTION_SYSTEM_PROMPT: &str = "\
 - language: 语言偏好（中文/英文/双语等）
 - framework_preference: 框架/技术栈偏好（React vs Vue等）
 - preferred_tools: 工具偏好（编辑器/终端/构建工具等）
-- custom:* 自定义slot（格式：custom:描述，如custom:deploy_strategy）
+- custom:* 自定义slot（格式：custom:描述，如custom:deploy_strategy、custom:rust_lint_rule）
 
 ## 输出格式
 [{\"slot\":\"slot_name\",\"value\":\"偏好描述\",\"confidence\":0.0到1.0,\"scope\":\"project或global\"}]
 
+转义所有双引号和换行符。value内不要出现未转义的\"。
+
 ## 规则
-1. confidence: 0.5-0.9（从单条记忆推断0.5-0.6，多条一致0.7-0.9）
-2. scope: 涉及特定项目用project，跨项目通用用global
-3. 每条记忆最多提取3条偏好
-4. 没有明确偏好的记忆跳过
-5. 偏好边界：只提取反复出现的、稳定的行为模式。以下不属于偏好，必须跳过：
-   - 一次性决策（这次用方案A vs 每次都用方案A）
-   - 具体bug修复步骤
-   - 项目特定配置值（URL、端口、密钥）
-   - 临时workaround
-   - 单次任务执行记录
-   判断标准：如果这个行为在未来新项目中也会重复出现，才是偏好。
-6. value长度硬限制：value必须≤150个字符。超过150字符的value将被系统丢弃。优先保留操作性信息（命令模板、工具名），删除修饰性描述。宁可分拆为多条偏好也不要合并成一条超长的。
-7. 好的value示例：「卫语句优先：先处理错误/边界case→return，正常逻辑放最后」
-8. 差的value示例：「使用卫语句处理错误情况，先检查边界条件然后返回，正常逻辑放在最后面」——啰嗦，无操作价值
-9. 去重：多条记忆指向同一偏好→合并为一条，取信息最完整的描述，confidence取最高值";
+
+### Rule 1: 去重（最重要）
+输入会列出已有偏好。**严禁生成与已有偏好语义重复的新偏好**。
+- 语义重复判定：意思相同即重复，与措辞、长短、关键词无关。例：「卫语句优先」与「偏好卫语句风格，先return」语义重复。
+- 遇到语义重复 → **跳过，不输出该条**。已有偏好会被自动reinforce，不需要重复生成。
+- 遇到与已有偏好**部分重叠但新增了信息** → 跳过，新增信息不够形成独立偏好的不算新偏好。
+- 遇到与已有偏好**矛盾**（如旧：用React，新：用Vue）→ 输出新的，标confidence 0.7+，让系统替换旧的。
+- 单批候选记忆中，多条指向同一偏好 → 合并为一条输出，取最完整的描述。
+
+### Rule 2: confidence 判断（综合4维度）
+- 时效性：最近1个月0.7-0.9，1-6个月0.5-0.7，6个月以上0.3-0.5
+- 明确程度：用户原话表态0.8-0.9，行为推断0.5-0.7，间接暗示0.3-0.5
+- 一致性：多条记忆一致0.7-0.9，单条0.5-0.7
+- 取四项最低值作为baseline，其余向上微调
+
+### Rule 3: scope
+- 涉及特定项目用project
+- 跨项目通用用global
+- 跨项目但不通用（如Rust用tabs/JS用spaces），用custom:* slot
+
+### Rule 4: 提取数量
+每条记忆最多提取3条偏好。没有明确偏好的记忆跳过。
+
+### Rule 5: 偏好边界
+只提取反复出现的、稳定的行为模式。以下不属于偏好，必须跳过：
+- 一次性决策（这次用方案A vs 每次都用方案A）
+- 具体bug修复步骤
+- 项目特定配置值（URL、端口、密钥）
+- 临时workaround
+- 单次任务执行记录
+判断标准：如果这个行为在未来新项目中也会重复出现，才是偏好。
+
+### Rule 6: value长度硬限制
+value必须≤150个字符。超过150字符的value将被系统丢弃。优先保留操作性信息（命令模板、工具名），删除修饰性描述。宁可分拆为多条偏好也不要合并成一条超长的。
+
+### Rule 7: value 标准化（避免同义异表的重复）
+- 用最精简的操作性表述，不写过程描述
+- 主语省略（不说\"用户偏好...\"，直接写\"卫语句优先：...\")
+- 同一slot内，措辞要能与已有偏好清晰区分（如果意思相近就跳过，见Rule 1）
+
+### Rule 8: 否决偏好
+用户明确反对的也算偏好（\"不要用var\"/\"拒绝Tailwind\"）。value格式：\"禁用X：原因/替代方案\"
+
+### Rule 9: value 示例（覆盖编码+非编码slot）
+- 编码：\"卫语句优先：先处理错误/边界case→return，正常逻辑放最后\"
+- 沟通：\"caveman terse：drop articles/filler，fragments OK，code unchanged\"
+- 语言：\"中文thinking+回复，技术术语可用英文\"
+- emoji：\"每句1-2个，禁止连续两句同emoji\"
+- 否决：\"禁用var：用let/const替代，原因var有变量提升bug\"
+差示例：「使用卫语句处理错误情况，先检查边界条件然后返回，正常逻辑放在最后面」——啰嗦，无操作价值";
 
 pub struct InductionResult {
     pub run_id: String,
@@ -84,6 +121,7 @@ impl InductionEngine {
 
         // ── Step 1: 检查启用 + 归纳锁 ──
         if !self.service.is_enabled() {
+            tracing::debug!(tenant_id, "induction skipped: profile disabled");
             return Ok(None);
         }
 
@@ -91,12 +129,12 @@ impl InductionEngine {
             tracing::debug!(
                 tenant_id,
                 lock_id = %lock.id,
-                "induction lock exists, skipping"
+                "induction skipped: lock exists"
             );
             return Ok(None);
         }
 
-        // ── Step 2: 检查冷却期 ──
+        // ── Step 2: 检查冷却期（仅 completed/failed run 计入冷却，skipped 不算）──
         let recent_runs = store.get_induction_runs(tenant_id, 1)?;
         if let Some(last_run) = recent_runs.first() {
             let elapsed = Utc::now()
@@ -106,7 +144,8 @@ impl InductionEngine {
                 tracing::debug!(
                     tenant_id,
                     elapsed_secs = elapsed,
-                    "induction cooldown, skipping"
+                    cooldown_secs = config.induction_cooldown_secs,
+                    "induction skipped: cooldown"
                 );
                 return Ok(None);
             }
@@ -115,7 +154,7 @@ impl InductionEngine {
         // ── Step 3: 获取锁 + 创建 run ──
         let acquired = store.acquire_induction_lock(tenant_id, 600)?;
         if !acquired {
-            tracing::debug!(tenant_id, "failed to acquire induction lock");
+            tracing::debug!(tenant_id, "induction skipped: failed to acquire lock");
             return Ok(None);
         }
 
@@ -190,16 +229,43 @@ impl InductionEngine {
             }
         };
 
-        let user_prompt = format!(
-            "以下是从用户行为中提取的{}条记忆：\n\n{}\n\n请从中提取用户偏好，输出JSON数组。",
-            candidate_texts.len(),
-            candidate_texts
+        // ── Step 4.5: 提前加载已有偏好（供 user_prompt 注入 + 后续去重判断）──
+        let existing_prefs = store.get_preferences(tenant_id, None)?;
+
+        let user_prompt = {
+            // 注入已有偏好，让 LLM 知道哪些已经存在，避免重复提取
+            let existing_block = if existing_prefs.is_empty() {
+                "（暂无已有偏好）".to_string()
+            } else {
+                existing_prefs
+                    .iter()
+                    .filter(|p| p.status != PreferenceStatus::Deleted)
+                    .map(|p| {
+                        let scope_tag = if p.scope == PreferenceScope::Project {
+                            format!("[project:{}]", p.project_path.as_deref().unwrap_or("?"))
+                        } else {
+                            "[global]".to_string()
+                        };
+                        format!("- {} {} {}: {}", scope_tag, p.slot, format!("({:.2})", p.confidence), p.value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+
+            let candidate_block = candidate_texts
                 .iter()
                 .enumerate()
                 .map(|(i, t)| format!("{}. {}", i + 1, t))
                 .collect::<Vec<_>>()
-                .join("\n")
-        );
+                .join("\n");
+
+            format!(
+                "## 已有偏好（严禁重复提取，见 Rule 1）\n{existing_block}\n\n\
+                 ## 新提取的候选记忆（{}条）\n{candidate_block}\n\n\
+                 从候选记忆中提取新偏好。严格遵守 Rule 1 去重规则：与已有偏好语义重复的必须跳过。输出JSON数组。",
+                candidate_texts.len()
+            )
+        };
 
         let llm_future =
             complete_json::<Vec<InductedPreference>>(llm.as_ref(), INDUCTION_SYSTEM_PROMPT, &user_prompt);
@@ -224,7 +290,6 @@ impl InductionEngine {
         };
 
         // ── Step 6-8: 验证 + 冲突解决 + 写入 ──
-        let existing_prefs = store.get_preferences(tenant_id, None)?;
         let mut extracted_count = 0usize;
 
         for item in inducted {

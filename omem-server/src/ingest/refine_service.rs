@@ -12,6 +12,7 @@ use std::sync::Arc;
 /// 单条旧记忆最大字符数（超过截断或触发split）
 pub const MAX_SINGLE_MEMORY_CHARS: usize = 3000;
 /// BFS遍历Continues/ContinuedBy relation链，收集链上所有Memory实体（含root）
+#[deprecated(note = "session_ingest REFINE path removed; chain collection no longer needed. Kept for reference.")]
 pub async fn collect_chain_memories(
     store: &LanceStore,
     root_memory: &Memory,
@@ -117,6 +118,7 @@ pub async fn walk_to_chain_tail(
 
 /// 用topic的l0_abstract做embedding，搜索同session_id的WORK记忆
 /// cosine > 0.72 且 session_id匹配 → 返回最相似的
+#[deprecated(note = "session_ingest REFINE path removed; similar-work lookup no longer needed. Kept for reference.")]
 pub async fn find_similar_work_memory(
     store: &LanceStore,
     embed: &Arc<dyn EmbedService>,
@@ -175,6 +177,7 @@ pub async fn find_similar_work_memory(
 /// 
 /// 只精炼链尾（root_memory自身），不合并整条链。
 /// 精炼后直接update原记忆，不删旧建新，保留所有关联。
+#[deprecated(note = "session_ingest REFINE path removed; in-place refine no longer needed. Kept for reference.")]
 pub async fn refine_and_replace(
     store: &LanceStore,
     llm: &Arc<dyn LlmService>,

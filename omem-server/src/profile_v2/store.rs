@@ -297,8 +297,8 @@ impl ProfileStore {
             OmemError::Storage("sqlite lock poisoned".to_string())
         })?;
 
-        let mut stmt = prepare_stmt(&conn, 
-            "SELECT id, tenant_id, status, candidate_count, extracted_count, error, started_at, completed_at FROM induction_runs WHERE tenant_id=?1 ORDER BY started_at DESC LIMIT ?2"
+        let mut stmt = prepare_stmt(&conn,
+            "SELECT id, tenant_id, status, candidate_count, extracted_count, error, started_at, completed_at FROM induction_runs WHERE tenant_id=?1 AND status!='skipped' ORDER BY started_at DESC LIMIT ?2"
         )?;
 
         let rows: Vec<Result<InductionRun, _>> = stmt.query_map(params![tenant_id, limit], |row: &rusqlite::Row<'_>| {
