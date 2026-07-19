@@ -1917,13 +1917,15 @@ impl LanceStore {
             if !filter.is_empty() {
                 filter.push_str(" AND ");
             }
-            // Prefix match: parent dir sees child dir memories.
-            // Same git repo already normalized to same root; this covers
-            // non-git parent seeing git-root child (e.g. /nf → /nf/project).
+            // 双向前缀匹配：父查子 + 子查父。
+            // - 父查子: project_path LIKE '{cwd}/%' 命中更深子目录的记忆
+            // - 子查父: '{cwd}' LIKE project_path || '/%' 命中更浅父目录的记忆
+            //   场景：在 git root（如 /nf/project）启动，查到非 git 父目录（如 /nf）的记忆
+            // private 记忆不按 project_path 过滤（走 visibility filter）
             let escaped = escape_sql(pp);
             filter.push_str(&format!(
-                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR visibility = 'private')",
-                escaped, escaped
+                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR '{}' LIKE project_path || '/%' OR visibility = 'private')",
+                escaped, escaped, escaped
             ));
         }
         if !filter.is_empty() {
@@ -2001,8 +2003,8 @@ impl LanceStore {
             }
             let escaped = escape_sql(pp);
             filter.push_str(&format!(
-                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR visibility = 'private')",
-                escaped, escaped
+                "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR '{}' LIKE project_path || '/%' OR visibility = 'private')",
+                escaped, escaped, escaped
             ));
         }
         if !filter.is_empty() {
@@ -2421,8 +2423,8 @@ impl LanceStore {
         if let Some(ref pp) = filter.project_path {
             let escaped = escape_sql(pp);
             conditions.push(format!(
-                "(project_path = '{}' OR project_path LIKE '{}/%')"
-                , escaped, escaped
+                "(project_path = '{}' OR project_path LIKE '{}/%' OR '{}' LIKE project_path || '/%')",
+                escaped, escaped, escaped
             ));
         }
 
