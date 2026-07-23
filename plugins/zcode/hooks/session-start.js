@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { loadConfig } from "./lib/config.js";
+import { loadConfig, DEFAULTS } from "./lib/config.js";
 import { CerebroClient } from "./lib/cerebro-client.js";
 import { logInfo, logError, logDebug, logWarn } from "./lib/logger.js";
 import {
@@ -73,6 +73,9 @@ async function buildInjection(client, projectPath, query, config) {
   const searchCount = ic.searchCount || 10;
   const recentTruncate = ic.recentTruncateChars || 0; // 0 = no truncation
   const searchTruncate = ic.searchTruncateChars || 0;
+  const profileTimeout = ic.profileTimeoutMs || DEFAULTS.injection.profileTimeoutMs;
+  const recentTimeout = ic.recentTimeoutMs || DEFAULTS.injection.recentTimeoutMs;
+  const searchTimeout = ic.searchTimeoutMs || DEFAULTS.injection.searchTimeoutMs;
 
   const withTimeout = (p, ms, fallback) =>
     Promise.race([
@@ -82,10 +85,10 @@ async function buildInjection(client, projectPath, query, config) {
 
   // Three concurrent fetches with degraded timeouts — must never block session
   const [profile, projectMemories, searchResults] = await Promise.all([
-    withTimeout(client.getInjection(projectPath), 1000, null),
-    withTimeout(client.listRecent(recentCount, projectPath), 1000, []),
+    withTimeout(client.getInjection(projectPath), profileTimeout, null),
+    withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, []),
     query
-      ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath), 1500, [])
+      ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath), searchTimeout, [])
       : Promise.resolve([]),
   ]);
 

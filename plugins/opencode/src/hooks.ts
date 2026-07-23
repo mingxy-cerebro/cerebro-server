@@ -120,15 +120,16 @@ async function detectProjectName(rootPath: string): Promise<string | undefined> 
 }
 
 export function showToast(tui: any, title: string, message: string, variant: string = "info", delayMs?: number) {
-  if (!tui?.showToast) {
-    logDebug("showToast: tui or tui.showToast unavailable");
-    return;
-  }
   const defaultDelay = 1000;
   const effectiveDelay = delayMs ?? defaultDelay;
   setTimeout(async () => {
+    if (!tui?.showToast) {
+      logInfo("showToast: tui.showToast unavailable after delay", { delay: effectiveDelay, title });
+      return;
+    }
     try {
       await tui.showToast({ body: { title, message, variant, duration: 5000 } });
+      logInfo("showToast: success", { title });
     } catch (err) {
       logErr("showToast failed", { error: String(err), title });
     }
@@ -254,20 +255,23 @@ export async function buildMemoryInjection(
   const searchCount = ic.searchCount || DEFAULTS.injection.searchCount;
   const recentTruncate = ic.recentTruncateChars || 0;   // 0 = 不截断
   const searchTruncate = ic.searchTruncateChars || 0;    // 0 = 不截断
+  const profileTimeout = ic.profileTimeoutMs || DEFAULTS.injection.profileTimeoutMs;
+  const recentTimeout = ic.recentTimeoutMs || DEFAULTS.injection.recentTimeoutMs;
+  const searchTimeout = ic.searchTimeoutMs || DEFAULTS.injection.searchTimeoutMs;
 
   const [profile, projectMemories, searchResults] = await Promise.all([
     Promise.race([
       client.getInjection(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), profileTimeout)),
     ]).catch(() => null),
     Promise.race([
       client.listRecent(recentCount, projectPath),
-      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 1000)),
+      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), recentTimeout)),
     ]).catch(() => []),
     query
       ? Promise.race([
           client.searchMemories(query, searchCount, undefined, undefined, projectPath),
-          new Promise<never[]>((resolve) => setTimeout(() => resolve([]), 1500)),
+          new Promise<never[]>((resolve) => setTimeout(() => resolve([]), searchTimeout)),
         ]).catch(() => [])
       : Promise.resolve([]),
   ]);

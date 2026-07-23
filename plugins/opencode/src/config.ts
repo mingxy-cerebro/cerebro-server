@@ -20,6 +20,9 @@ export interface CerebroPluginConfig {
     searchCount: number;
     recentTruncateChars: number;
     searchTruncateChars: number;
+    recentTimeoutMs: number;
+    searchTimeoutMs: number;
+    profileTimeoutMs: number;
   };
   ingest: {
     autoCaptureThreshold: number;
@@ -60,6 +63,9 @@ const DEFAULTS: CerebroPluginConfig = {
     searchCount: 10,
     recentTruncateChars: 0,   // 0 = 不截断
     searchTruncateChars: 0,   // 0 = 不截断
+    recentTimeoutMs: 3000,
+    searchTimeoutMs: 5000,
+    profileTimeoutMs: 2000,
   },
   ingest: {
     autoCaptureThreshold: 5,

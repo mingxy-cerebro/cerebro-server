@@ -90,6 +90,27 @@
           "default": 0,
           "minimum": 0,
           "maximum": 5000
+        },
+        "profileTimeoutMs": {
+          "type": "number",
+          "description": "Timeout for profile injection fetch (ms). Blocks first-message response if exceeded.",
+          "default": 2000,
+          "minimum": 500,
+          "maximum": 30000
+        },
+        "recentTimeoutMs": {
+          "type": "number",
+          "description": "Timeout for recent project memories fetch (ms). Blocks first-message response if exceeded.",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 30000
+        },
+        "searchTimeoutMs": {
+          "type": "number",
+          "description": "Timeout for semantic search fetch (ms). Blocks first-message response if exceeded.",
+          "default": 5000,
+          "minimum": 500,
+          "maximum": 60000
         }
       },
       "additionalProperties": false

@@ -20,6 +20,9 @@ export const DEFAULTS = {
     searchCount: 10,
     recentTruncateChars: 0, // 0 = no truncation
     searchTruncateChars: 0,
+    recentTimeoutMs: 3000,
+    searchTimeoutMs: 5000,
+    profileTimeoutMs: 2000,
   },
   ingest: {
     autoCaptureThreshold: 5,
