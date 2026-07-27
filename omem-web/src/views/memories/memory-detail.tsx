@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import ForceGraph2D from "react-force-graph-2d"
@@ -318,14 +318,6 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
     return { nodes, links }
   }, [memoryId, relations])
 
-  useLayoutEffect(() => {
-    if (fgRef.current) {
-      fgRef.current.zoomToFit(0, 30)
-      fgRef.current.zoom(fgRef.current.zoom() * 0.65, 0)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   return (
     <div ref={graphRef} className="h-[300px] w-full">
       <ForceGraph2D
@@ -338,7 +330,6 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
           const isCenter = (node as Record<string, unknown>).isCenter as boolean
           const radius = isCenter ? 8 : 5
 
-          // Glow for center node
           if (isCenter) {
             const glow = ctx.createRadialGradient(x, y, radius * 0.5, x, y, radius * 2.5)
             glow.addColorStop(0, 'rgba(245,158,11,0.25)')
@@ -349,7 +340,6 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
             ctx.fill()
           }
 
-          // Node body
           if (isCenter) {
             const grad = ctx.createRadialGradient(x - radius * 0.3, y - radius * 0.3, 0, x, y, radius)
             grad.addColorStop(0, '#fbbf24')
@@ -368,7 +358,6 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
           ctx.fill()
           ctx.stroke()
 
-          // Label
           const name = (node as Record<string, unknown>).name as string
           const fontSize = Math.max(8 / globalScale, 6)
           ctx.font = `${fontSize}px sans-serif`
@@ -411,7 +400,7 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
         enableZoomInteraction={true}
         enablePanInteraction={true}
         nodeRelSize={0}
-        cooldownTime={2000}
+        cooldownTime={300}
         onEngineStop={() => {
           if (fgRef.current) {
             fgRef.current.zoomToFit(0, 30)
