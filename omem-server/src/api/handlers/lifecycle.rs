@@ -128,11 +128,7 @@ async fn evaluate_tiers(
             continue;
         }
 
-        // Private memories are protected from tier demotion
-        if memory.visibility == "private" {
-            continue;
-        }
-
+        // Private protection lives in evaluate_tier (allows promotion, blocks demotion)
         let old_tier = memory.tier.clone();
         let new_tier = tier_manager.evaluate_tier(&memory);
 

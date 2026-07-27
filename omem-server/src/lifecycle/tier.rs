@@ -72,7 +72,17 @@ impl TierManager {
     }
 
     pub fn evaluate_tier(&self, memory: &Memory) -> Tier {
-        let composite = self.decay.compute_composite(memory);
+        let effective_importance = memory
+            .importance
+            .max(0.5 + memory.access_count as f32 * 0.05)
+            .min(1.0);
+
+        // 升级判断用effective_importance：高频访问=更重要=衰减更慢=composite更高
+        let mut mem = memory.clone();
+        mem.importance = effective_importance;
+        let composite = self.decay.compute_composite(&mem);
+
+        // 降级判断用原始值：看记忆的真实衰退程度，不被access_count掩盖
         let raw_composite = self.decay.compute_raw_composite(memory);
         let last_ref = memory
             .last_accessed_at
@@ -80,14 +90,6 @@ impl TierManager {
             .unwrap_or(&memory.created_at);
         let days_since_access = parse_days_ago(last_ref);
 
-        // ponytail: importance随access_count渐进提升，打通Core升级路径
-        // access_count=6→0.8（够Core门槛），=10→1.0封顶。纯函数不碰DB，13个caller全局生效
-        let effective_importance = memory
-            .importance
-            .max(0.5 + memory.access_count as f32 * 0.05)
-            .min(1.0);
-
-        // 私密记忆不降级——敏感信息不应因长期未访问而遗忘
         let is_private = memory.visibility == "private";
 
         match memory.tier {
