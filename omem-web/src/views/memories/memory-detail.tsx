@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from "react"
+import { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import ForceGraph2D from "react-force-graph-2d"
@@ -317,6 +317,14 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
 
     return { nodes, links }
   }, [memoryId, relations])
+
+  useLayoutEffect(() => {
+    if (fgRef.current) {
+      fgRef.current.zoomToFit(0, 30)
+      fgRef.current.zoom(fgRef.current.zoom() * 0.65, 0)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div ref={graphRef} className="h-[300px] w-full">
@@ -863,8 +871,8 @@ export function MemoryDetailPage() {
           </div>
 
           {memory.relations && memory.relations.length > 0 && (
-            <div className="w-80 shrink-0 sticky top-4 self-start h-fit">
-              <Card>
+            <div className="w-80 shrink-0">
+              <Card className="h-full">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-1.5 text-base">
                     <Link2 className="size-4 text-muted-foreground" />
