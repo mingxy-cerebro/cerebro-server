@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import apiClient from "@/api/client"
-import { Search, ChevronLeft, ChevronRight, Lock, Unlock, Plus, Trash2, SlidersHorizontal, ArrowUpDown, RotateCcw, X, Inbox, Calendar, Clock, FolderOpen } from "lucide-react"
+import { Search, ChevronLeft, ChevronRight, Lock, Unlock, Trash2, SlidersHorizontal, ArrowUpDown, RotateCcw, X, Inbox, Calendar, Clock, FolderOpen } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useVaultStore } from "@/stores/vault"
 import {
@@ -429,11 +429,6 @@ export function MemoryListPage() {
             </Button>
           )}
         </div>
-
-        <Button size="sm" onClick={() => navigate("/memories/new")}>
-          <Plus className="size-3.5 mr-1.5" />
-          新建
-        </Button>
 
         <Button
           variant={batchMode ? "default" : "outline"}

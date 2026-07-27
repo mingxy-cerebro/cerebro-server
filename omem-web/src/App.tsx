@@ -44,7 +44,6 @@ function App() {
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="memories" element={<MemoryListPage />} />
           <Route path="memories/:id" element={<MemoryDetailPage />} />
-          <Route path="memories/new" element={<MemoryFormPage />} />
           <Route path="memories/:id/edit" element={<MemoryFormPage />} />
           <Route path="memories/:id/edit-insight" element={<MemoryInsightFormPage />} />
           <Route path="vault" element={<VaultMemoriesPage />} />

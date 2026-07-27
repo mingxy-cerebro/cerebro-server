@@ -27,10 +27,18 @@ export interface PromotionConfig {
   working_to_core: TierThreshold
 }
 
+/** 降级配置 */
+export interface DemotionConfig {
+  core_to_working: { max_composite: number }
+  working_to_peripheral: { max_composite: number }
+}
+
 /** 生命周期完整配置 */
 export interface LifecycleConfig {
   decay: DecayConfig
   promotion: PromotionConfig
+  demotion?: DemotionConfig
+  retrieval?: { default_min_score?: number }
 }
 
 /** 衰减曲线数据点 */
@@ -69,4 +77,5 @@ export interface SchedulerStatus {
   interval_secs: number
   last_run_at: string | null
   next_run_eta: string | null
+  run_on_start: boolean
 }

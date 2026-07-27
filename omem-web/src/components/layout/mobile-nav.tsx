@@ -28,7 +28,7 @@ export function MobileNav() {
         <div className="flex h-14 items-center px-4 border-b border-border">
           <Link to="/" className="flex items-center gap-2 font-semibold text-sm" onClick={() => setOpen(false)}>
             <Brain className="h-5 w-5" />
-            <span>omem</span>
+            <span>Cerebro</span>
           </Link>
         </div>
         <nav className="flex-1 space-y-0.5 p-2">

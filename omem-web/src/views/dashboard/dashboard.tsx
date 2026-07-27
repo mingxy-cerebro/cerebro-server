@@ -29,7 +29,6 @@ import {
   CheckCircle,
   Star,
   Activity,
-  Plus,
   Upload,
   FileText,
   type LucideIcon,
@@ -241,10 +240,6 @@ export function DashboardPage() {
       )}
 
       <div className="flex flex-wrap gap-3">
-        <Button size="sm" onClick={() => navigate("/memories/new")}>
-          <Plus className="size-4 mr-1.5" />
-          新建记忆
-        </Button>
         <Button variant="outline" size="sm" onClick={() => navigate("/import")}>
           <Upload className="size-4 mr-1.5" />
           批量导入

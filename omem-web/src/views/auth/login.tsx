@@ -279,7 +279,7 @@ export function LoginPage() {
             <Brain className="h-5 w-5 text-[#c9a227]" />
           </div>
           <span className="text-xl font-bold tracking-tight text-white">
-            omem
+            Cerebro
           </span>
         </div>
 
@@ -323,7 +323,7 @@ export function LoginPage() {
                 <Brain className="h-7 w-7 text-[#c9a227]" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-white">omem</h1>
+                <h1 className="text-2xl font-bold text-white">Cerebro</h1>
                 <p className="text-sm text-white/40 mt-1">
                   让 AI 记住你的一切
                 </p>
@@ -350,7 +350,7 @@ export function LoginPage() {
                     <Input
                       id="apiKey"
                       type={showPassword ? "text" : "password"}
-                      placeholder="输入您的 omem API Key"
+                      placeholder="输入您的 Cerebro API Key"
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
                       className="pl-9 pr-10 bg-white/[0.05] border-white/10 text-white placeholder:text-white/25 focus:border-[#c9a227]/50 focus:ring-[#c9a227]/20"

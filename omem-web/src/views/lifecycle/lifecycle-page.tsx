@@ -49,12 +49,20 @@ function formatInterval(secs: number): string {
   return `每 ${Math.round(secs / 60)} 分钟`
 }
 
-function generateDecayCurvePreview(beta: number, halfLife: number) {
+function generateDecayCurvePreview(config: LifecycleConfig) {
+  const { half_life_days, tiers } = config.decay
+  const lambda = Math.log(2) / half_life_days
   const points = []
   for (let day = 0; day <= 120; day += 2) {
-    const lambda = Math.log(2) / halfLife
-    const score = Math.exp(-lambda * Math.pow(day, beta))
-    points.push({ day: `D${day}`, Core: beta < 1 ? Math.max(score, 0.9) : score * 0.95, Working: score, Peripheral: score * 0.85 })
+    const entry: Record<string, number | string> = { day: `D${day}` }
+    for (const [tierName, tierLabel] of [["core", "Core"], ["working", "Working"], ["peripheral", "Peripheral"]] as const) {
+      const tier = tiers?.[tierName]
+      if (tier) {
+        const raw = Math.exp(-lambda * Math.pow(day, tier.beta))
+        entry[tierLabel] = Math.max(raw, tier.floor)
+      }
+    }
+    points.push(entry)
   }
   return points
 }
@@ -165,9 +173,7 @@ export function LifecyclePage() {
     }
   }
 
-  const decayPreviewData = config
-    ? generateDecayCurvePreview(config.decay.tiers?.working?.beta ?? 1.0, config.decay.half_life_days)
-    : []
+  const decayPreviewData = config ? generateDecayCurvePreview(config) : []
 
   const promoteCount = changes.filter((c) => (tierOrder[c.from] ?? 0) < (tierOrder[c.to] ?? 0)).length
   const demoteCount = changes.filter((c) => (tierOrder[c.from] ?? 0) >= (tierOrder[c.to] ?? 0)).length
@@ -230,9 +236,19 @@ export function LifecyclePage() {
             <div className="p-3 rounded-lg border">
               <span className="text-xs text-muted-foreground">启动时运行</span>
               <div className="mt-1">
-                <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/30">
-                  已启用
-                </Badge>
+                {schedulerStatus ? (
+                  schedulerStatus.run_on_start ? (
+                    <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/30">
+                      已启用
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="bg-muted text-muted-foreground border-border">
+                      已禁用
+                    </Badge>
+                  )
+                ) : (
+                  <span className="text-sm text-muted-foreground">—</span>
+                )}
               </div>
             </div>
           </div>
@@ -268,7 +284,7 @@ export function LifecyclePage() {
                   </div>
                   <div>
                     <span className="text-muted-foreground">Stale 阈值</span>
-                    <p className="font-semibold">0.3</p>
+                    <p className="font-semibold">{config.retrieval?.default_min_score ?? 0.3}</p>
                   </div>
                 </div>
 
@@ -372,10 +388,14 @@ export function LifecyclePage() {
                   </div>
                 </div>
 
-                <div className="p-3 rounded-lg border border-dashed space-y-1 text-xs text-muted-foreground">
-                  <div className="flex items-center gap-2">
+                <div className="p-3 rounded-lg border border-dashed space-y-2 text-xs">
+                  <div className="flex items-center gap-2 font-medium text-muted-foreground">
                     <ArrowDownRight className="size-3.5 text-red-400" />
-                    <span>不满足条件时自动降级至低等级</span>
+                    <span>降级条件（需同时满足）</span>
+                  </div>
+                  <div className="ml-5 space-y-1 text-muted-foreground">
+                    <div>• 综合分数 &lt; {config.demotion?.working_to_peripheral?.max_composite ?? 0.2}</div>
+                    <div>• 超过 90 天未访问</div>
                   </div>
                 </div>
               </CardContent>

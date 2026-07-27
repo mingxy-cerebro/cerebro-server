@@ -16,6 +16,7 @@ pub async fn get_scheduler_status(
         "interval_secs": ctrl.interval_secs(),
         "last_run_at": ctrl.last_run_at().map(|dt| dt.to_rfc3339()),
         "next_run_eta": ctrl.next_run_eta().map(|dt| dt.to_rfc3339()),
+        "run_on_start": ctrl.run_on_start(),
     }))
 }
 

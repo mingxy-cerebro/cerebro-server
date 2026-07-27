@@ -7,6 +7,7 @@ pub struct SchedulerControl {
     pub lifecycle_running: AtomicBool,
     pub last_run_at: AtomicI64,
     pub interval_secs: AtomicU64,
+    pub run_on_start: AtomicBool,
 }
 
 impl Default for SchedulerControl {
@@ -22,11 +23,17 @@ impl SchedulerControl {
             lifecycle_running: AtomicBool::new(false),
             last_run_at: AtomicI64::new(0),
             interval_secs: AtomicU64::new(0),
+            run_on_start: AtomicBool::new(false),
         }
     }
 
     pub fn with_interval(self, secs: u64) -> Self {
         self.interval_secs.store(secs, Ordering::Relaxed);
+        self
+    }
+
+    pub fn with_run_on_start(self, run: bool) -> Self {
+        self.run_on_start.store(run, Ordering::Relaxed);
         self
     }
 
@@ -71,6 +78,10 @@ impl SchedulerControl {
             return None;
         }
         Some(last + chrono::Duration::seconds(interval as i64))
+    }
+
+    pub fn run_on_start(&self) -> bool {
+        self.run_on_start.load(Ordering::Relaxed)
     }
 }
 

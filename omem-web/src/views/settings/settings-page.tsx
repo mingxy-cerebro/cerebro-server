@@ -261,10 +261,10 @@ export function SettingsPage() {
         <div className="space-y-2 text-sm">
           <div className="flex items-center gap-2">
             <Info className="h-4 w-4 text-muted-foreground" />
-            <span>omem-web v0.1.0</span>
+            <span>Cerebro Web v0.1.0</span>
           </div>
           <p className="text-xs text-muted-foreground">
-            omem 自部署版 Web 管理端
+            Cerebro 自部署版 Web 管理端
           </p>
           <p className="text-xs text-muted-foreground">
             备案号：<a href="https://beian.miit.gov.cn" target="_blank" rel="noopener noreferrer" className="underline">吉ICP备2026003061号</a>

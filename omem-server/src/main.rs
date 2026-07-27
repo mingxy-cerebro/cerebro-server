@@ -147,8 +147,9 @@ async fn main() {
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         event_bus: Arc::new(omem_server::api::event_bus::EventBus::new()),
         scheduler_control: Arc::new(
-            omem_server::api::scheduler_control::SchedulerControl::new()
-                .with_interval(config.scheduler_interval_secs),
+    omem_server::api::scheduler_control::SchedulerControl::new()
+        .with_interval(config.scheduler_interval_secs)
+        .with_run_on_start(config.scheduler_run_on_start),
         ),
         session_locks: Arc::new(dashmap::DashMap::new()),
         reranker: omem_server::retrieve::reranker::Reranker::from_env(),

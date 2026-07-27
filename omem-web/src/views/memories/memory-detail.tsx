@@ -863,8 +863,8 @@ export function MemoryDetailPage() {
           </div>
 
           {memory.relations && memory.relations.length > 0 && (
-            <div className="w-80 shrink-0">
-              <Card className="h-full">
+            <div className="w-80 shrink-0 sticky top-4 self-start h-fit">
+              <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-1.5 text-base">
                     <Link2 className="size-4 text-muted-foreground" />
