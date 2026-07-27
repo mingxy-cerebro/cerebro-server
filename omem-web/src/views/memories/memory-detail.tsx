@@ -318,6 +318,14 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
     return { nodes, links }
   }, [memoryId, relations])
 
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fgRef.current?.zoomToFit(0, 30)
+    }, 200)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return (
     <div ref={graphRef} className="h-[300px] w-full">
       <ForceGraph2D
@@ -401,12 +409,6 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
         enablePanInteraction={true}
         nodeRelSize={0}
         cooldownTime={300}
-        onEngineStop={() => {
-          if (fgRef.current) {
-            fgRef.current.zoomToFit(0, 30)
-            fgRef.current.zoom(fgRef.current.zoom() * 0.65, 0)
-          }
-        }}
         onNodeClick={(node) => {
           const n = node as Record<string, unknown>
           if (!n.isCenter && n.id) {
