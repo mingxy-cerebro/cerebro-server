@@ -203,6 +203,7 @@ impl LifecycleScheduler {
         let result = self.run_once_inner().await;
         if let Some(ctrl) = &self.scheduler_control {
             ctrl.set_lifecycle_running(false);
+            ctrl.record_run();
         }
         result
     }

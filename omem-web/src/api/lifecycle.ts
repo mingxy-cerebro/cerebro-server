@@ -1,8 +1,12 @@
 import apiClient from "./client"
-import type { LifecycleConfig, DecayCurveResponse, TierChangesResponse } from "@/types/lifecycle"
+import type { LifecycleConfig, DecayCurveResponse, TierChangesResponse, SchedulerStatus } from "@/types/lifecycle"
 
 export async function getLifecycleConfig(): Promise<LifecycleConfig> {
   return apiClient.get("/v1/stats/config")
+}
+
+export async function getSchedulerStatus(): Promise<SchedulerStatus> {
+  return apiClient.get("/v1/scheduler/status")
 }
 
 export async function getDecayCurve(memoryId: string): Promise<DecayCurveResponse> {

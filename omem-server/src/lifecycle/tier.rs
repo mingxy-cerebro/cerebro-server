@@ -17,13 +17,13 @@ pub struct TierConfig {
 impl Default for TierConfig {
     fn default() -> Self {
         Self {
-            working_access_threshold: 3,
+            working_access_threshold: 6,
             working_composite_threshold: 0.4,
             core_access_threshold: 10,
             core_composite_threshold: 0.7,
             core_importance_threshold: 0.8,
-            peripheral_composite_threshold: 0.15,
-            peripheral_age_days: 60.0,
+            peripheral_composite_threshold: 0.2,
+            peripheral_age_days: 90.0,
         }
     }
 }
@@ -80,6 +80,16 @@ impl TierManager {
             .unwrap_or(&memory.created_at);
         let days_since_access = parse_days_ago(last_ref);
 
+        // ponytail: importance随access_count渐进提升，打通Core升级路径
+        // access_count=6→0.8（够Core门槛），=10→1.0封顶。纯函数不碰DB，13个caller全局生效
+        let effective_importance = memory
+            .importance
+            .max(0.5 + memory.access_count as f32 * 0.05)
+            .min(1.0);
+
+        // 私密记忆不降级——敏感信息不应因长期未访问而遗忘
+        let is_private = memory.visibility == "private";
+
         match memory.tier {
             Tier::Peripheral => {
                 if memory.access_count >= self.config.working_access_threshold
@@ -93,11 +103,12 @@ impl TierManager {
             Tier::Working => {
                 if memory.access_count >= self.config.core_access_threshold
                     && composite >= self.config.core_composite_threshold
-                    && memory.importance >= self.config.core_importance_threshold
+                    && effective_importance >= self.config.core_importance_threshold
                 {
                     Tier::Core
-                } else if raw_composite < self.config.peripheral_composite_threshold
-                    || days_since_access > self.config.peripheral_age_days
+                } else if !is_private
+                    && raw_composite < self.config.peripheral_composite_threshold
+                    && days_since_access > self.config.peripheral_age_days
                 {
                     Tier::Peripheral
                 } else {
@@ -105,8 +116,9 @@ impl TierManager {
                 }
             }
             Tier::Core => {
-                if raw_composite < self.config.peripheral_composite_threshold
-                    || days_since_access > self.config.peripheral_age_days
+                if !is_private
+                    && raw_composite < self.config.peripheral_composite_threshold
+                    && days_since_access > self.config.peripheral_age_days
                 {
                     Tier::Working
                 } else {
@@ -147,7 +159,7 @@ mod tests {
 
         let mut mem = make_test_memory();
         mem.tier = Tier::Peripheral;
-        mem.access_count = 3;
+        mem.access_count = 6;
         mem.importance = 0.5;
         mem.confidence = 0.5;
         mem.created_at = days_ago_str(1);
@@ -174,6 +186,27 @@ mod tests {
     }
 
     #[test]
+    fn test_promotion_to_core_via_access_count() {
+        // importance默认0.5但access_count高时，effective_importance应够Core门槛
+        let manager = TierManager::with_defaults();
+
+        let mut mem = make_test_memory();
+        mem.tier = Tier::Working;
+        mem.access_count = 10;
+        mem.importance = 0.5; // 默认值，但access_count=10→effective=1.0
+        mem.confidence = 0.9;
+        mem.created_at = days_ago_str(1);
+        mem.last_accessed_at = Some(days_ago_str(0));
+
+        let new_tier = manager.evaluate_tier(&mem);
+        assert_eq!(
+            new_tier,
+            Tier::Core,
+            "access_count=10 should push effective_importance to 1.0, clearing Core threshold"
+        );
+    }
+
+    #[test]
     fn test_demotion_to_peripheral() {
         let manager = TierManager::with_defaults();
 
@@ -182,14 +215,14 @@ mod tests {
         mem.access_count = 1;
         mem.importance = 0.2;
         mem.confidence = 0.2;
-        mem.created_at = days_ago_str(90);
-        mem.last_accessed_at = None;
+        mem.created_at = days_ago_str(100);
+        mem.last_accessed_at = Some(days_ago_str(95));
 
         let new_tier = manager.evaluate_tier(&mem);
         assert_eq!(
             new_tier,
             Tier::Peripheral,
-            "Old Working memory with low access should demote"
+            "Old Working memory with low access AND long inactive should demote"
         );
     }
 
@@ -275,6 +308,7 @@ mod tests {
 
     #[test]
     fn test_core_demotes_when_long_inactive() {
+        // 高importance+长期不访问：新AND逻辑下不降级（raw不会低）
         let manager = TierManager::with_defaults();
 
         let mut mem = make_test_memory();
@@ -288,8 +322,29 @@ mod tests {
         let new_tier = manager.evaluate_tier(&mem);
         assert_eq!(
             new_tier,
+            Tier::Core,
+            "High-importance Core memory should not demote just by age (AND logic)"
+        );
+    }
+
+    #[test]
+    fn test_core_demotes_when_low_raw_and_long_inactive() {
+        // 低importance+长期不访问：两个条件都满足才降级
+        let manager = TierManager::with_defaults();
+
+        let mut mem = make_test_memory();
+        mem.tier = Tier::Core;
+        mem.access_count = 0;
+        mem.importance = 0.05;
+        mem.confidence = 0.05;
+        mem.created_at = days_ago_str(365);
+        mem.last_accessed_at = Some(days_ago_str(120));
+
+        let new_tier = manager.evaluate_tier(&mem);
+        assert_eq!(
+            new_tier,
             Tier::Working,
-            "Core memory not accessed for >60 days should demote to Working"
+            "Low-raw Core memory not accessed for >90 days should demote to Working"
         );
     }
 
@@ -299,22 +354,22 @@ mod tests {
 
         let mut mem = make_test_memory();
         mem.tier = Tier::Working;
-        mem.access_count = 5;
-        mem.importance = 0.5;
-        mem.confidence = 0.5;
-        mem.created_at = days_ago_str(90);
-        mem.last_accessed_at = Some(days_ago_str(70));
+        mem.access_count = 0;
+        mem.importance = 0.1;
+        mem.confidence = 0.1;
+        mem.created_at = days_ago_str(120);
+        mem.last_accessed_at = Some(days_ago_str(95));
 
         let new_tier = manager.evaluate_tier(&mem);
         assert_eq!(
             new_tier,
             Tier::Peripheral,
-            "Working memory not accessed for >60 days should demote to Peripheral"
+            "Working memory with low raw and >90 days inactive should demote to Peripheral"
         );
     }
 
     #[test]
-    fn test_private_memory_can_demote() {
+    fn test_private_memory_never_demotes() {
         let manager = TierManager::with_defaults();
 
         let mut mem = make_test_memory();
@@ -324,13 +379,13 @@ mod tests {
         mem.importance = 0.5;
         mem.confidence = 0.5;
         mem.created_at = days_ago_str(120);
-        mem.last_accessed_at = Some(days_ago_str(90));
+        mem.last_accessed_at = Some(days_ago_str(95));
 
         let new_tier = manager.evaluate_tier(&mem);
         assert_eq!(
             new_tier,
-            Tier::Peripheral,
-            "Private memory should also be subject to tier demotion"
+            Tier::Working,
+            "Private memory should never demote regardless of access pattern"
         );
     }
 }

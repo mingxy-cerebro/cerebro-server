@@ -12,7 +12,10 @@ pub async fn get_scheduler_status(
         "lifecycle": {
             "paused": ctrl.is_lifecycle_paused(),
             "running": ctrl.lifecycle_running.load(std::sync::atomic::Ordering::Relaxed),
-        }
+        },
+        "interval_secs": ctrl.interval_secs(),
+        "last_run_at": ctrl.last_run_at().map(|dt| dt.to_rfc3339()),
+        "next_run_eta": ctrl.next_run_eta().map(|dt| dt.to_rfc3339()),
     }))
 }
 

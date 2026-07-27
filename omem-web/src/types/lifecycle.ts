@@ -60,3 +60,13 @@ export interface TierChangesResponse {
   changes: TierChange[]
   totalCount: number
 }
+
+export interface SchedulerStatus {
+  lifecycle: {
+    paused: boolean
+    running: boolean
+  }
+  interval_secs: number
+  last_run_at: string | null
+  next_run_eta: string | null
+}

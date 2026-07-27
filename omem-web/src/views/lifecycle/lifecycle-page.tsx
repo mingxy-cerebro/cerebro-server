@@ -4,8 +4,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
-import { getLifecycleConfig, getTierChanges, triggerLifecycle } from "@/api/lifecycle"
-import type { LifecycleConfig, TierChange } from "@/types/lifecycle"
+import { getLifecycleConfig, getTierChanges, triggerLifecycle, getSchedulerStatus } from "@/api/lifecycle"
+import type { LifecycleConfig, TierChange, SchedulerStatus } from "@/types/lifecycle"
 import { getTierLabel, getTierBadgeClass } from "@/lib/tag-utils"
 import {
   Timer,
@@ -30,7 +30,7 @@ import {
   Legend,
 } from "recharts"
 
-const SCHEDULER_INTERVAL_HOURS = 6
+const tierOrder: Record<string, number> = { peripheral: 0, working: 1, core: 2 }
 
 const reasonMap: Record<string, string> = {
   access_via_get: "访问触发",
@@ -40,14 +40,13 @@ const reasonMap: Record<string, string> = {
   scheduled_evaluation: "定时评估",
 }
 
-const tierOrder: Record<string, number> = { peripheral: 0, working: 1, core: 2 }
-
-function formatNextRun(): string {
-  const now = new Date()
-  const nextHours = SCHEDULER_INTERVAL_HOURS - (now.getHours() % SCHEDULER_INTERVAL_HOURS)
-  const next = new Date(now.getTime() + nextHours * 3600000)
-  next.setMinutes(0, 0, 0)
-  return next.toLocaleString("zh-CN")
+function formatInterval(secs: number): string {
+  if (secs <= 0) return "每天 0:00"
+  if (secs >= 3600) {
+    const h = secs / 3600
+    return Number.isInteger(h) ? `每 ${h} 小时` : `每 ${h.toFixed(1)} 小时`
+  }
+  return `每 ${Math.round(secs / 60)} 分钟`
 }
 
 function generateDecayCurvePreview(beta: number, halfLife: number) {
@@ -98,6 +97,7 @@ function TierChangesSkeleton() {
 
 export function LifecyclePage() {
   const [config, setConfig] = useState<LifecycleConfig | null>(null)
+  const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null)
   const [changes, setChanges] = useState<TierChange[]>([])
   const [totalCount, setTotalCount] = useState(0)
   const [loadingConfig, setLoadingConfig] = useState(true)
@@ -108,8 +108,12 @@ export function LifecyclePage() {
   const loadConfig = async () => {
     try {
       setLoadingConfig(true)
-      const res = await getLifecycleConfig()
-      setConfig(res)
+      const [cfg, sched] = await Promise.all([
+        getLifecycleConfig(),
+        getSchedulerStatus().catch(() => null),
+      ])
+      setConfig(cfg)
+      if (sched) setSchedulerStatus(sched)
     } catch (err) {
       console.error("Failed to load lifecycle config:", err)
       toast.error("加载生命周期配置失败")
@@ -209,11 +213,19 @@ export function LifecyclePage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="p-3 rounded-lg border">
               <span className="text-xs text-muted-foreground">调度间隔</span>
-              <p className="text-lg font-semibold mt-1">每 {SCHEDULER_INTERVAL_HOURS} 小时</p>
+              <p className="text-lg font-semibold mt-1">
+                {schedulerStatus ? formatInterval(schedulerStatus.interval_secs) : "—"}
+              </p>
             </div>
             <div className="p-3 rounded-lg border">
               <span className="text-xs text-muted-foreground">预计下次运行</span>
-              <p className="text-sm font-semibold mt-1">{formatNextRun()}</p>
+              <p className="text-sm font-semibold mt-1">
+                {schedulerStatus?.next_run_eta
+                  ? new Date(schedulerStatus.next_run_eta).toLocaleString("zh-CN")
+                  : schedulerStatus?.last_run_at
+                    ? `${formatInterval(schedulerStatus.interval_secs)}后`
+                    : "等待首次运行"}
+              </p>
             </div>
             <div className="p-3 rounded-lg border">
               <span className="text-xs text-muted-foreground">启动时运行</span>
