@@ -1,0 +1,20 @@
+{
+  "name": "cerebro",
+  "owner": {
+    "name": "mingxy-cerebro",
+    "email": "hi@cerebro.dev"
+  },
+  "metadata": {
+    "description": "Persistent memory for Claude Code — profile injection, auto-save, reasoned recall",
+    "version": "0.3.0"
+  },
+  "plugins": [
+    {
+      "name": "cerebro",
+      "source": "./",
+      "description": "Persistent memory plugin — SessionStart profile injection, Stop auto-ingest (incremental cursor), UserPromptSubmit reasoned recall, memory-search/save skills. Survives across sessions, projects, machines.",
+      "category": "memory",
+      "tags": ["memory", "persistent", "context", "agent-memory", "recall", "profile"]
+    }
+  ]
+}

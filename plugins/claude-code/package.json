@@ -1,0 +1,28 @@
+{
+  "name": "@mingxy/cerebro-claude-code",
+  "version": "0.3.0",
+  "description": "Persistent memory for Claude Code — memories survive across sessions, projects, and machines",
+  "author": {
+    "name": "mingxy-cerebro",
+    "email": "hi@cerebro.dev"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mingxy-cerebro/cerebro-server",
+    "directory": "plugins/claude-code"
+  },
+  "keywords": [
+    "claude-code",
+    "memory",
+    "persistent",
+    "agent-memory",
+    "context",
+    "recall",
+    "profile"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

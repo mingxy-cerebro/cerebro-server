@@ -18,16 +18,28 @@ claude --plugin-dir ./plugins/claude-code
 
 ## Setup
 
-Configure credentials in `~/.claude/settings.json` (Claude Code's native config):
+Configure credentials the same way opencode/zcode do — via the shared config file
+`~/.config/cerebro/config.json` (single source of truth across all cerebro plugins):
+
+```json
+{
+  "connection": { "apiUrl": "https://www.mengxy.cc", "apiKey": "your-api-key" }
+}
+```
+
+Or set env vars (they override the config file), e.g. in `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
     "OMEM_API_KEY": "your-api-key",
-    "OMEM_API_URL": "http://localhost:8080"
+    "OMEM_API_URL": "https://www.mengxy.cc"
   }
 }
 ```
+
+Priority: env var  >  `~/.config/cerebro/config.json`  >  builtin default
+(`https://www.mengxy.cc`). Matches `plugins/opencode/src/config.ts`.
 
 Claude Code auto-injects `env` fields into the process environment.
 
@@ -67,8 +79,11 @@ The plugin bundles the `@ourmem/mcp` server, giving Claude these tools:
 
 | Skill | Trigger |
 |-------|---------|
-| `/ourmem:memory-recall` | Search memories by query |
-| `/ourmem:memory-store` | Manually save a memory |
+| `/cerebro:memory-search` | Semantic search of memories by natural-language query |
+| `/cerebro:memory-save` | Manually save a memory (atomic fact / decision / preference) |
+| `/cerebro:memory-profile` | View the induced user-preference profile |
+
+> Legacy `/cerebro:memory-recall` and `/cerebro:memory-store` were removed in favor of the three skills above (they now route through `hooks/common.sh` with proper URL-encoding, sanitization, and project scoping).
 
 ## API Endpoints Used
 
@@ -76,8 +91,9 @@ The plugin bundles the `@ourmem/mcp` server, giving Claude these tools:
 |----------|--------|---------|
 | `/v1/memories?limit=20` | GET | SessionStart hook |
 | `/v1/memories` | POST | Stop + PreCompact hooks (smart-ingest) |
-| `/v1/memories/search?q=...` | GET | memory-recall skill |
-| `/v1/memories` | POST | memory-store skill |
+| `/v1/memories/search?q=...` | GET | memory-search skill |
+| `/v1/memories` | POST | memory-save skill |
+| `/v2/profile?project_path=...` | GET | memory-profile skill |
 
 ## Requirements
 
@@ -99,10 +115,16 @@ plugins/claude-code/
 │   ├── session-start.sh     # SessionStart hook
 │   ├── stop.sh              # Stop hook (smart-ingest)
 │   └── pre-compact.sh       # PreCompact hook
+├── scripts/
+│   ├── memory-search.sh
+│   ├── memory-save.sh
+│   └── memory-profile.sh
 ├── skills/
-│   ├── memory-recall/
+│   ├── memory-search/
 │   │   └── SKILL.md
-│   └── memory-store/
+│   ├── memory-save/
+│   │   └── SKILL.md
+│   └── memory-profile/
 │       └── SKILL.md
 └── README.md
 ```

@@ -1,13 +1,36 @@
 {
-  "description": "ourmem — persistent memory hooks for Claude Code",
+  "description": "cerebro — persistent memory hooks for Claude Code",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/session-start.mjs",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Skill|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/recall-approve.mjs",
+            "timeout": 10
           }
         ]
       }
@@ -17,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/stop.mjs",
             "timeout": 30
           }
         ]
@@ -28,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.sh",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.mjs",
             "timeout": 30
           }
         ]
