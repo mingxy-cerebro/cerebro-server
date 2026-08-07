@@ -6,6 +6,9 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileSync, unlinkSync } from "node:fs";
+
+const PID_FILE = path.join(process.env.HOME || process.env.USERPROFILE || "", ".config/cerebro/web-server.pid");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.OMEM_LOCAL_PORT || "", 10) || 5212;
@@ -121,8 +124,9 @@ server.on("error", (err) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[cerebro web-server] serving ${WEB_DIR} at http://localhost:${PORT}`);
+  try { writeFileSync(PID_FILE, String(process.pid)); } catch {}
+  console.log(`[cerebro web-server] serving ${WEB_DIR} at http://localhost:${PORT} (pid=${process.pid})`);
 });
 
-process.on("SIGTERM", () => server.close(() => process.exit(0)));
-process.on("SIGINT", () => server.close(() => process.exit(0)));
+process.on("SIGTERM", () => server.close(() => { try { unlinkSync(PID_FILE); } catch {} process.exit(0); }));
+process.on("SIGINT", () => server.close(() => { try { unlinkSync(PID_FILE); } catch {} process.exit(0); }));

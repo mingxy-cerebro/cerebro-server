@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc,
 } from "./common.mjs";
 
 const input = parseStdinJSON();
@@ -26,6 +26,7 @@ try {
     child.unref();
   } catch {}
 }
+refCountInc();
 
 // ─── API key 检查 ────────────────────────────────────────────────────────────
 if (!config.apiKey) {

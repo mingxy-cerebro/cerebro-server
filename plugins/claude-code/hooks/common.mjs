@@ -184,6 +184,34 @@ function _log(level, msg) {
   } catch {}
 }
 
+// ─── Web server refcount (multi-session lifecycle) ───────────────────────────
+const REFCOUNT_FILE = join(HOME, ".config/cerebro/web-server.refcount");
+const WEB_PID_FILE = join(HOME, ".config/cerebro/web-server.pid");
+
+export function refCountInc() {
+  try {
+    const n = existsSync(REFCOUNT_FILE) ? parseInt(readFileSync(REFCOUNT_FILE, "utf-8").trim(), 10) || 0 : 0;
+    writeFileSync(REFCOUNT_FILE, String(n + 1));
+  } catch {}
+}
+
+export function refCountDec() {
+  try {
+    let n = existsSync(REFCOUNT_FILE) ? parseInt(readFileSync(REFCOUNT_FILE, "utf-8").trim(), 10) || 0 : 0;
+    n = Math.max(0, n - 1);
+    if (n === 0) {
+      try {
+        const pid = parseInt(readFileSync(WEB_PID_FILE, "utf-8").trim(), 10);
+        if (pid) process.kill(pid, "SIGTERM");
+      } catch {}
+      try { unlinkSync(WEB_PID_FILE); } catch {}
+      try { unlinkSync(REFCOUNT_FILE); } catch {}
+    } else {
+      writeFileSync(REFCOUNT_FILE, String(n));
+    }
+  } catch {}
+}
+
 // ─── Cursor (session ingest dedup) ───────────────────────────────────────────
 const TRACKER_DIR = join(HOME, ".config/cerebro/trackers");
 
@@ -313,7 +341,7 @@ function contentText(content) {
 }
 
 export async function flushSessionIngest(transcriptPath, sessionId) {
-  if (!transcriptPath || !existsSync(transcriptPath) || !sessionId || !config.apiKey) return false;
+  if (!transcriptPath || !existsSync(transcriptPath) || !sessionId || !config.apiKey) return { ok: false, count: 0 };
 
   const cursor = cursorGet(sessionId);
   const pn = detectProjectName();
@@ -352,7 +380,7 @@ export async function flushSessionIngest(transcriptPath, sessionId) {
   }
 
   const delta = entries.slice(start);
-  if (delta.length === 0) return true; // nothing new
+  if (delta.length === 0) return { ok: true, count: 0 }; // nothing new
 
   const lastUid = delta[delta.length - 1].uid;
   const messages = [];
@@ -374,16 +402,16 @@ export async function flushSessionIngest(transcriptPath, sessionId) {
     if (result.status >= 200 && result.status < 300) {
       cursorSet(sessionId, lastUid);
       logDebug(`flush_session_ingest: ok http=${result.status} cursor=${lastUid}`);
-      return true;
+      return { ok: true, count: messages.length };
     } else {
       logError(`flush_session_ingest: http=${result.status} (cursor NOT advanced, will retry next run)`);
-      return false;
+      return { ok: false, count: 0 };
     }
   } else {
     // All fragments — advance cursor anyway
     cursorSet(sessionId, lastUid);
     logDebug(`flush_session_ingest: 0 msgs kept (fragments), advancing cursor=${lastUid}`);
-    return true;
+    return { ok: true, count: 0 };
   }
 }
 

@@ -16,7 +16,11 @@ if (!tp || !sid) {
   process.exit(0);
 }
 
-const ok = await flushSessionIngest(tp, sid).catch(() => false);
-if (!ok) logError(`pre-compact: flush_session_ingest failed for sid=${sid} (will retry at SessionEnd)`);
+const result = await flushSessionIngest(tp, sid).catch(() => ({ ok: false, count: 0 }));
+if (!result.ok) logError(`pre-compact: flush_session_ingest failed for sid=${sid} (will retry at SessionEnd)`);
 
-emit({});
+emit({
+  systemMessage: result.ok
+    ? `🧠 Cerebro · Pre-compact flush · ${result.count} messages ingested`
+    : `🧠 Cerebro · Pre-compact flush failed (will retry at SessionEnd)`,
+});
