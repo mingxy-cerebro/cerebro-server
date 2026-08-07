@@ -266,7 +266,7 @@ const INJECT_TAG_RE = /<(system-reminder|cerebro-[a-z0-9_-]+|supermemory-[a-z0-9
 const INJECT_SELF_RE = /<(system-reminder|cerebro-[a-z0-9_-]+|supermemory-[a-z0-9_-]+)\b[^>]*\/>/gi;
 const WS_RE = /\s+/g;
 
-function cleanText(s) {
+export function cleanText(s) {
   if (typeof s !== "string") s = String(s);
   return s.replace(INJECT_TAG_RE, "").replace(INJECT_SELF_RE, "").replace(WS_RE, " ").trim();
 }
