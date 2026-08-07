@@ -3,9 +3,9 @@
 // Q4=A: 移除阻塞式 API 语义搜索（20s+ 延迟），改为纯本地文本注入。
 // Claude 按需通过 memory-search skill 主动搜索。
 // 保留 postRecallEvent 让 web Sessions 页面显示用户实际 prompt。
-import { readStdin, emit, postRecallEvent } from "./common.mjs";
+import { parseStdinJSON, emit, postRecallEvent } from "./common.mjs";
 
-const input = JSON.parse(readStdin() || "{}");
+const input = parseStdinJSON();
 const prompt = typeof input === "object" ? input.prompt || input.message || "" : "";
 const sid = input.session_id || "";
 

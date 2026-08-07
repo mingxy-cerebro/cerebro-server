@@ -3,10 +3,10 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, readStdin, emit, buildMemoryInjection, postRecallEvent,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, logDebug,
 } from "./common.mjs";
 
-const input = JSON.parse(readStdin() || "{}");
+const input = parseStdinJSON();
 const sid = input.session_id || "";
 
 // ─── web server 拉起（probe + detached spawn，跨平台）─────────────────────────
@@ -52,7 +52,9 @@ function cerebroTime() {
 
 // ─── buildMemoryInjection（对标 opencode buildMemoryInjection）──────────────────
 const pp = detectProjectPath();
+logDebug(`session-start: cwd=${process.cwd()} projectPath=${pp} apiKey=${config.apiKey ? "set" : "unset"} apiUrl=${config.apiUrl}`);
 const injection = await buildMemoryInjection("", pp); // SessionStart 无 query → 只 profile + recent
+logDebug(`session-start: injection profileCount=${injection.profileCount} projectMemoryCount=${injection.projectMemoryCount} searchCount=${injection.searchCount} textLen=${injection.text.length}`);
 
 // CEREBRO-TIME 注入 Claude 上下文（Claude 需要时间感知）
 let out = injection.text;

@@ -248,7 +248,14 @@ export function readStdin() {
 export function parseStdinJSON() {
   try {
     const raw = readStdin();
-    return raw ? JSON.parse(raw) : {};
+    const parsed = raw ? JSON.parse(raw) : {};
+    // CC hook 可能以 CLAUDE_PLUGIN_ROOT（缓存目录）为 cwd 运行，
+    // 导致 detectProjectPath() 返回错误路径。
+    // CC stdin 提供 cwd 字段（用户项目目录），chdir 到正确位置。
+    if (parsed.cwd && parsed.cwd !== process.cwd()) {
+      try { process.chdir(parsed.cwd); } catch {}
+    }
+    return parsed;
   } catch {
     return {};
   }
