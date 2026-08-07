@@ -3,11 +3,12 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult,
 } from "./common.mjs";
 
 const input = parseStdinJSON();
 const sid = input.session_id || "";
+const startSource = input.source || ""; // "startup" | "resume" | "clear" | "compact"
 
 // ─── web server 拉起（probe + detached spawn，跨平台）─────────────────────────
 const webPort = process.env.OMEM_LOCAL_PORT || "5212";
@@ -62,7 +63,16 @@ out = out.replace("[CEREBRO-MEMORY]", `[CEREBRO-MEMORY]\n${timeLine}`);
 
 // CEREBRO-STATUS 通过 systemMessage 显示给用户（Q2: toast 替代方案）
 const memCount = injection.projectMemoryCount + injection.searchCount;
-const statusMsg = `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
+let statusMsg = `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
+
+// After compact, PostCompact toast gets overridden by SessionStart:compact toast.
+// Merge PostCompact ingest result into this toast so user sees it.
+if (startSource === "compact") {
+  const cr = readCompactResult();
+  if (cr) {
+    statusMsg += ` · Post-compact ingest ${cr.ok ? "✓" : "✗"} ${cr.count} items`;
+  }
+}
 
 // ─── POST recall event（让 web sessions 页面看到 CC session + 完整注入内容）─────
 await postRecallEvent({

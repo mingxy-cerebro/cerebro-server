@@ -2,7 +2,7 @@
 // cerebro PostCompact hook — flush + ingest compact_summary + toast
 // PostCompact 在 CC 完成上下文压缩后触发，stdin 包含 compact_summary。
 import {
-  config, flushSessionIngest, omPost, detectProjectName, detectProjectPath, parseStdinJSON, emit, logWarn, logError,
+  config, flushSessionIngest, omPost, detectProjectName, detectProjectPath, parseStdinJSON, emit, logWarn, logError, writeCompactResult,
 } from "./common.mjs";
 
 if (!config.apiKey) { emit({}); process.exit(0); }
@@ -29,6 +29,7 @@ if (summary.length > 100) {
     messages: [{ role: "assistant", content: `[compact_summary] ${summary.slice(0, 8000)}` }],
     agent_id: process.env.OMEM_AGENT_ID || "claude-code",
     session_id: sid,
+    source: "compact_summary",
   };
   const pn = detectProjectName();
   const pp = detectProjectPath();
@@ -39,6 +40,10 @@ if (summary.length > 100) {
 }
 
 const totalCount = result.count + (summaryOk ? 1 : 0);
+
+// Write result for SessionStart:compact to pick up and merge into its toast
+writeCompactResult({ ok: result.ok || summaryOk, count: totalCount });
+
 emit({
   systemMessage: `🧠 Cerebro · Post-compact · ${totalCount} items ingested`,
 });

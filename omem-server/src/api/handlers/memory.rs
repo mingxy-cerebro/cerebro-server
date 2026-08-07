@@ -1411,6 +1411,8 @@ pub struct SessionIngestBody {
     pub project_name: Option<String>,
     #[serde(default)]
     pub project_path: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1480,6 +1482,7 @@ pub async fn session_ingest(
         })?),
         _ => None,
     };
+    let ingest_source = body.source.unwrap_or_else(|| "session_ingest".to_string());
 
     // Fire-and-forget: process in background, return 202 immediately
     tokio::spawn(async move {
@@ -1681,8 +1684,8 @@ pub async fn session_ingest(
                 let mut t = topic.tags.clone();
                 t.dedup();
                 t.truncate(3); // preserve semantic tags, leave room for system tags
-                if !t.contains(&"session_ingest".to_string()) {
-                    t.push("session_ingest".to_string());
+                if !t.contains(&ingest_source) {
+                    t.push(ingest_source.clone());
                 }
                 t
             };
@@ -1696,7 +1699,7 @@ pub async fn session_ingest(
             memory.l0_abstract = topic.topic.clone();
             memory.l1_overview = l1_overview;
             memory.l2_content = l2_content;
-            memory.source = Some("session_ingest".to_string());
+            memory.source = Some(ingest_source.clone());
             memory.session_id = session_id.clone();
             memory.agent_id = agent_id.clone();
             memory.tags = tags.clone();

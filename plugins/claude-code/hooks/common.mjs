@@ -2,7 +2,7 @@
 // Ported from common.sh — no bash/curl/python3 dependency. Pure Node.
 // Config cascade: env > ~/.config/cerebro/config.json > builtin defaults
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -210,6 +210,28 @@ export function refCountDec() {
       writeFileSync(REFCOUNT_FILE, String(n));
     }
   } catch {}
+}
+
+// ─── Compact result handoff (PostCompact → SessionStart:compact) ─────────────
+const COMPACT_RESULT_FILE = join(HOME, ".config/cerebro/last-compact-result.json");
+
+export function writeCompactResult(result) {
+  try {
+    mkdirSync(dirname(COMPACT_RESULT_FILE), { recursive: true });
+    writeFileSync(COMPACT_RESULT_FILE, JSON.stringify({ ...result, ts: Date.now() }));
+  } catch {}
+}
+
+export function readCompactResult() {
+  try {
+    if (!existsSync(COMPACT_RESULT_FILE)) return null;
+    const data = JSON.parse(readFileSync(COMPACT_RESULT_FILE, "utf-8"));
+    // Stale after 60s
+    if (Date.now() - (data.ts || 0) > 60_000) return null;
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Cursor (session ingest dedup) ───────────────────────────────────────────
