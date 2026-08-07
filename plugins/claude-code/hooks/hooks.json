@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs",
-            "timeout": 10
+            "timeout": 5
           }
         ]
       }
@@ -35,12 +35,12 @@
         ]
       }
     ],
-    "Stop": [
+    "SessionEnd": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/stop.mjs",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/session-end.mjs",
             "timeout": 30
           }
         ]

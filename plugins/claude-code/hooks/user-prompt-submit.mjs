@@ -1,28 +1,15 @@
 #!/usr/bin/env node
-// cerebro UserPromptSubmit hook — reasoned recall instruction + 语义搜索注入
-// 对标 opencode buildMemoryInjection 的 search 路：每轮用 prompt 做语义搜索。
-// POST recall-event 让 web Sessions 页面看到每轮注入（对标 opencode chatMessageRecallHook createRecallEvent）。
-import { readStdin, emit, searchMemories, detectProjectPath, formatRelativeAge, postRecallEvent } from "./common.mjs";
+// cerebro UserPromptSubmit hook — reasoned recall instruction + keyword nudge
+// Q4=A: 移除阻塞式 API 语义搜索（20s+ 延迟），改为纯本地文本注入。
+// Claude 按需通过 memory-search skill 主动搜索。
+// 保留 postRecallEvent 让 web Sessions 页面显示用户实际 prompt。
+import { readStdin, emit, postRecallEvent } from "./common.mjs";
 
 const input = JSON.parse(readStdin() || "{}");
 const prompt = typeof input === "object" ? input.prompt || input.message || "" : "";
 const sid = input.session_id || "";
 
-// ─── 语义搜索（对标 opencode searchMemories 路）─────────────────────────────────
-const pp = detectProjectPath();
-const results = await searchMemories(prompt, undefined, pp);
-
-let searchBlock = "";
-if (results.length > 0) {
-  const lines = ["## Relevant Memories"];
-  for (const r of results) {
-    const age = formatRelativeAge(r.memory?.created_at);
-    lines.push(`- (${age}) ${r.memory?.content || ""}`);
-  }
-  searchBlock = lines.join("\n");
-}
-
-// ─── reasoned recall 指令（保留，补充主动搜索）──────────────────────────────────
+// ─── reasoned recall 指令（让 Claude 按需搜索，不做每轮自动搜索）──────────────
 const instruction = `<cerebro-recall>
 在回复前默默判断：召回长期记忆对回答这条消息是否有实质帮助。先推理再决定——不要条件反射式搜索，也不要把判断过程说出来。
 
@@ -52,24 +39,20 @@ if (RECALL_KW.some((kw) => pLow.includes(kw))) {
   nudges.push("<cerebro-nudge>这条消息可能需要历史上下文。若 reasoned recall 判断相关，果断用 memory-search skill 召回。</cerebro-nudge>");
 }
 
-// 组装：搜索结果在前，指令在后
-const parts = [];
-if (searchBlock) parts.push(searchBlock);
-parts.push(instruction);
+// 组装：指令在前，nudge 在后
+const parts = [instruction];
 if (nudges.length) parts.push(nudges.join("\n"));
-
 const injectionText = parts.join("\n\n");
 
-// ─── POST recall-event（对标 opencode chatMessageRecallHook createRecallEvent）──────
-// 让 web Sessions 页面显示用户实际 prompt + 注入内容，而非只有 SessionStart 一条。
+// ─── POST recall-event（让 web Sessions 页面显示用户实际 prompt）─────────────────
 await postRecallEvent({
   sessionId: sid,
   recallType: "auto",
   queryText: prompt,
   profileInjected: false,
-  keptCount: results.length,
+  keptCount: 0,
   injectedContent: injectionText,
-  maxScore: results.length > 0 ? (results[0]?.score || 0) : 0,
+  maxScore: 0,
 });
 
 emit({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: injectionText } });

@@ -38,7 +38,7 @@ Get a free key:
   curl -X POST ${config.apiUrl}/v1/tenants -H "Content-Type: application/json" -d "{}"
 
 Then restart Claude Code.`;
-  emit({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: msg } });
+  emit({ systemMessage: "🧠 Cerebro: API key not set — memory disabled", hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: msg } });
   process.exit(0);
 }
 
@@ -54,12 +54,14 @@ function cerebroTime() {
 const pp = detectProjectPath();
 const injection = await buildMemoryInjection("", pp); // SessionStart 无 query → 只 profile + recent
 
-// 拼入 [CEREBRO-TIME] + 版本状态行（toast 替代：让用户和 Claude 感知连接状态）
+// CEREBRO-TIME 注入 Claude 上下文（Claude 需要时间感知）
 let out = injection.text;
 const timeLine = cerebroTime();
+out = out.replace("[CEREBRO-MEMORY]", `[CEREBRO-MEMORY]\n${timeLine}`);
+
+// CEREBRO-STATUS 通过 systemMessage 显示给用户（Q2: toast 替代方案）
 const memCount = injection.projectMemoryCount + injection.searchCount;
-const statusLine = `[CEREBRO-STATUS] 🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
-out = out.replace("[CEREBRO-MEMORY]", `[CEREBRO-MEMORY]\n${timeLine}\n${statusLine}`);
+const statusMsg = `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
 
 // ─── POST recall event（让 web sessions 页面看到 CC session + 完整注入内容）─────
 await postRecallEvent({
@@ -71,4 +73,7 @@ await postRecallEvent({
   injectedContent: out,
 });
 
-emit({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out } });
+emit({
+  systemMessage: statusMsg,
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: out },
+});
