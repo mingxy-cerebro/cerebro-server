@@ -769,6 +769,7 @@ When in doubt about classification:
 - **MERGE**: You MUST group ALL work from the SAME debugging/development session into one entry. "Same session" = same bug investigation, same feature implementation, or same architectural decision chain (diagnose → locate → fix → test → deploy). Do NOT split these into separate entries.
 - **UPSERT**: When "## Existing Memories" section contains a memory about the SAME topic, produce ONE updated entry that merges old + new information. Do NOT create a duplicate.
 - **TIMELINE**: For merged WORK entries, preserve chronological order using `## YYYY-MM-DD HH:MM Title` section headers within the summary.
+- **L1 COVERAGE (MANDATORY)**: `overview` (L1) MUST cover ALL topics in this entry, not just the latest section. When merging or updating, extend the existing arrow timeline to include the new topic. Format: `old_topic→old_topic→new_topic→result`. NEVER overwrite L1 with only the newest section's timeline — the previous topics must remain in the arrow chain. Same rule applies to `l2_content`: must aggregate key facts from ALL sections.
 - **TAG**: Include project name + sub-topic as tags from the ALLOWED_TAGS list (e.g., "programming", "architecture").
 - **SECTION TITLE REUSE**: When updating an existing memory, if the Existing Memories above already contain a `## YYYY-MM-DD HH:MM [topic]` section about the SAME technical topic, you MUST reuse that exact section title (including the project prefix) as your `topic` field. Do NOT invent a new title for the same topic.
 

@@ -336,7 +336,8 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
           const y = node.y ?? 0
           if (!isFinite(x) || !isFinite(y)) return
           const isCenter = (node as Record<string, unknown>).isCenter as boolean
-          const radius = isCenter ? 8 : 5
+          const baseR = isCenter ? 8 : 5
+          const radius = baseR / globalScale
 
           if (isCenter) {
             const glow = ctx.createRadialGradient(x, y, radius * 0.5, x, y, radius * 2.5)
@@ -354,11 +355,11 @@ function RelationGraph({ memoryId, relations }: { memoryId: string; relations: M
             grad.addColorStop(1, '#f97316')
             ctx.fillStyle = grad
             ctx.strokeStyle = '#f59e0b'
-            ctx.lineWidth = 2
+            ctx.lineWidth = 2 / globalScale
           } else {
             ctx.fillStyle = '#3b82f6'
             ctx.strokeStyle = '#60a5fa'
-            ctx.lineWidth = 1.5
+            ctx.lineWidth = 1.5 / globalScale
           }
 
           ctx.beginPath()
