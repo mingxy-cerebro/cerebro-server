@@ -59,16 +59,13 @@ const OmemPlugin: Plugin = async (input) => {
   // Normalize to git root: worktree=git root, directory=cwd.
   // project_path must be git root so parent/child dirs share memories.
   const { directory: _directory, worktree, client } = input;
-  const directory = worktree || _directory;
-  // Proxy: dynamically resolve client.tui on each access so toast works
-  // even if client.tui isn't ready yet at plugin init time
-  const tui = new Proxy({} as any, {
-    get(_, prop) {
-      const realTui = (client as any)?.tui;
-      const val = realTui?.[prop];
-      return typeof val === "function" ? val.bind(realTui) : val;
-    },
-  });
+  // opencode 在非git目录启动时给 worktree="/"（global project，见 opencode 源码
+  // database-migration.test.ts:448 `SELECT worktree FROM project WHERE id='global' → '/'`）。
+  // 这种情况直接用 `/` 会让服务端 SQL `LIKE '/%'` 命中所有绝对路径记忆，污染注入。
+  // fallback 到 cwd（_directory），让前缀匹配只命中 cwd 子树。
+  const isWorktreeValid = worktree && worktree !== "/" && worktree !== "." && worktree !== "";
+  const directory = isWorktreeValid ? worktree! : _directory;
+  const tui = (client as any)?.tui;
 
   // Load overrides from opencode.json plugin_config
   let overrides: Record<string, unknown> = {};
@@ -136,9 +133,17 @@ const OmemPlugin: Plugin = async (input) => {
       ? { variant: "success" as const, title: `🧠 Cerebro Connected · v${pluginVersion}`, message: `🌐 Open in browser http://localhost:${webPort}` }
       : { variant: "success" as const, title: `🧠 Cerebro Connected · v${pluginVersion}`, message: "No web server" };
 
-  try {
-    writeFileSync(join(tmpdir(), "cerebro_startup_toast.json"), JSON.stringify(startupToast));
-  } catch {}
+  // Direct toast — same pattern as opencode-acp (client.tui.showToast, fire-and-forget, 5s delay)
+  setTimeout(() => {
+    (client as any)?.tui?.showToast({
+      body: {
+        title: startupToast.title,
+        message: startupToast.message,
+        variant: startupToast.variant,
+        duration: 7000,
+      },
+    });
+  }, 5000);
 
   // Auto-update check (fire-and-forget, non-blocking)
   checkAndUpdate(tui, pluginVersion).catch(() => {});

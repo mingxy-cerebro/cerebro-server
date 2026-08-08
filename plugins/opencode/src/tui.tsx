@@ -78,10 +78,19 @@ const tui: TuiPlugin = async (api) => {
   try {
     const raw = readFileSync(join(tmpdir(), "cerebro_startup_toast.json"), "utf-8");
     const toast = JSON.parse(raw);
-    setTimeout(() => {
-      try { api.ui.toast(toast); } catch {}
-      try { unlinkSync(join(tmpdir(), "cerebro_startup_toast.json")); } catch {}
-    }, 2000);
+    // Retry: opencode 1.17.14+ delays TUI init; fixed timeout may fire before endpoint is ready
+    let attempts = 0;
+    const maxAttempts = 16;
+    const tryToast = () => {
+      attempts++;
+      try {
+        api.ui.toast(toast);
+        try { unlinkSync(join(tmpdir(), "cerebro_startup_toast.json")); } catch {}
+      } catch {
+        if (attempts < maxAttempts) setTimeout(tryToast, 500);
+      }
+    };
+    setTimeout(tryToast, 1000);
   } catch {}
 };
 

@@ -1,11 +1,11 @@
 {
-  "name": "@ourmem/mcp",
-  "version": "0.3.0",
-  "description": "ourmem MCP Server — persistent memory for Cursor, VS Code, Claude Desktop, and any MCP client",
+  "name": "@mingxy/cerebro-mcp",
+  "version": "0.4.1",
+  "description": "Cerebro MCP Server — persistent memory for Cursor, VS Code, Claude Desktop, and any MCP client",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ourmem-mcp": "dist/index.js"
+    "cerebro-mcp": "dist/index.js"
   },
   "files": [
     "dist"
@@ -19,10 +19,10 @@
     "memory",
     "ai-agent",
     "persistent-memory",
-    "ourmem",
+    "cerebro",
     "model-context-protocol"
   ],
-  "author": "ourmem",
+  "author": "mingxy",
   "license": "Apache-2.0",
   "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
   "repository": {

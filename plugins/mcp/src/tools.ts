@@ -24,14 +24,31 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           .string()
           .optional()
           .describe("Source identifier (e.g. 'chat', 'code-review')"),
+        scope: z
+          .string()
+          .optional()
+          .describe("'project' (default) or 'global' for cross-project visibility"),
+        visibility: z
+          .string()
+          .optional()
+          .describe("'global' (default) or 'private' (only current agent)"),
+        category: z
+          .enum(["cases", "preferences", "entities", "events", "profile", "patterns"])
+          .optional()
+          .describe("Memory category"),
       },
     },
-    async ({ content, tags, source }) => {
+    async ({ content, tags, source, scope, visibility, category }) => {
       try {
         const memory = await client.createMemory(
           content,
           tags ?? [],
           source ?? "mcp",
+          scope,
+          undefined,
+          undefined,
+          visibility,
+          category,
         );
         return {
           content: [
@@ -277,6 +294,39 @@ export function registerTools(server: McpServer, client: OmemClient): void {
             {
               type: "text" as const,
               text: shortError("Failed to get profile", err),
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "memory_profile_stats",
+    {
+      title: "Profile Statistics",
+      description:
+        "View user profile statistics — total preferences, slot distribution, induction run counts, etc.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const stats = await client.getProfileStats();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(stats, null, 2),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: shortError("Failed to get profile stats", err),
             },
           ],
           isError: true,

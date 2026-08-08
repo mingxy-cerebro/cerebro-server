@@ -1,4 +1,4 @@
-const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 // ── Safety limits (Qwen3-Embedding-0.6B max context ~32K tokens) ──
 // NOTE: CJK chars URL-encode ~9x, so 200 chars → ~1800 bytes (safe under nginx 4K buffer)
@@ -99,11 +99,27 @@ export class OmemClient {
     content: string,
     tags?: string[],
     source?: string,
+    scope?: string,
+    agentId?: string,
+    sessionId?: string,
+    visibility?: string,
+    category?: string,
+    projectPath?: string,
   ): Promise<MemoryDto> {
     const safeContent = sanitizeContent(content, MAX_CONTENT_CHARS);
     const result = await this.request<MemoryDto>("/v1/memories", {
       method: "POST",
-      body: JSON.stringify({ content: safeContent, tags, source }),
+      body: JSON.stringify({
+        content: safeContent,
+        tags,
+        source,
+        scope,
+        agent_id: agentId,
+        session_id: sessionId,
+        visibility,
+        category,
+        project_path: projectPath,
+      }),
     });
     if (!result) throw new Error("Failed to create memory");
     return result;
@@ -151,8 +167,13 @@ export class OmemClient {
     );
   }
 
-  async getProfile(): Promise<unknown> {
-    return this.request("/v1/profile");
+  async getProfile(projectPath?: string): Promise<unknown> {
+    const params = projectPath ? `?project_path=${encodeURIComponent(projectPath)}` : "";
+    return this.request(`/v2/profile${params}`);
+  }
+
+  async getProfileStats(): Promise<unknown> {
+    return this.request("/v2/profile/stats");
   }
 
   async listRecent(limit = 20): Promise<MemoryDto[]> {
