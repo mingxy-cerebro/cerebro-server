@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult, injectionConfig,
 } from "./common.mjs";
 
 const input = parseStdinJSON();
@@ -54,7 +54,11 @@ function cerebroTime() {
 
 // ─── buildMemoryInjection（对标 opencode buildMemoryInjection）──────────────────
 const pp = detectProjectPath();
-const injection = await buildMemoryInjection("", pp); // SessionStart 无 query → 只 profile + recent
+const ss = injectionConfig.sessionStart || {};
+const injection = await buildMemoryInjection("", pp, {
+  profileEnabled: ss.profileEnabled !== false,
+  recentEnabled: ss.recentActivityEnabled !== false,
+});
 
 // CEREBRO-TIME 注入 Claude 上下文（Claude 需要时间感知）
 let out = injection.text;

@@ -2,7 +2,7 @@
 // Ported from common.sh — no bash/curl/python3 dependency. Pure Node.
 // Config cascade: env > ~/.config/cerebro/config.json > builtin defaults
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -89,6 +89,40 @@ function loadConfig() {
 }
 
 export const config = loadConfig();
+
+// ─── Injection config (Claude Code specific, independent from opencode) ──────
+// Three-level fallback: ~/.claude/cerebro.json > auto-init from bundled > bundled default
+const CC_CONFIG_DIR = join(HOME, ".claude");
+const CC_USER_CONFIG = join(CC_CONFIG_DIR, "cerebro.json");
+const CC_BUNDLED_CONFIG = join(PLUGIN_ROOT, "config.json");
+
+function loadInjectionConfig() {
+  // 1. User config exists → read it
+  if (existsSync(CC_USER_CONFIG)) {
+    try {
+      return JSON.parse(readFileSync(CC_USER_CONFIG, "utf-8"));
+    } catch {}
+  } else {
+    // 2. First run → auto-initialize by copying bundled default
+    try {
+      mkdirSync(CC_CONFIG_DIR, { recursive: true });
+      copyFileSync(CC_BUNDLED_CONFIG, CC_USER_CONFIG);
+    } catch {}
+  }
+  // 3. Fallback → read bundled default
+  try {
+    return JSON.parse(readFileSync(CC_BUNDLED_CONFIG, "utf-8"));
+  } catch {
+    return {
+      language: "en",
+      recall: { enabled: true },
+      nudge: { enabled: true },
+      sessionStart: { profileEnabled: true, recentActivityEnabled: true },
+    };
+  }
+}
+
+export const injectionConfig = loadInjectionConfig();
 
 // ─── HTTP (fetch-based, cross-platform) ──────────────────────────────────────
 function headers(extra = {}) {
@@ -506,7 +540,9 @@ export async function searchMemories(query, limit, projectPath) {
 
 // buildMemoryInjection — 对标 opencode hooks.ts:246-329
 // 三路并发：profile + recent + search(query)。query 为空跳过 search。
-export async function buildMemoryInjection(query, projectPath) {
+export async function buildMemoryInjection(query, projectPath, options = {}) {
+  const profileEnabled = options.profileEnabled !== false;
+  const recentEnabled = options.recentEnabled !== false;
   const hdrs = { "X-API-Key": config.apiKey, Accept: "application/json" };
   const recentCount = config.recentCount;
   const searchCount = config.searchCount;
@@ -515,10 +551,14 @@ export async function buildMemoryInjection(query, projectPath) {
   const safeQ = truncateQuery(query);
 
   const [profileResp, recentResp, searchResp] = await Promise.all([
-    fetch(`${config.apiUrl}/v2/profile/inject${profileQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.profileTimeoutMs) })
-      .then((r) => r.text()).catch(() => ""),
-    fetch(`${config.apiUrl}/v1/memories${recentQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.recentTimeoutMs) })
-      .then((r) => r.text()).catch(() => ""),
+    profileEnabled
+      ? fetch(`${config.apiUrl}/v2/profile/inject${profileQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.profileTimeoutMs) })
+        .then((r) => r.text()).catch(() => "")
+      : Promise.resolve(""),
+    recentEnabled
+      ? fetch(`${config.apiUrl}/v1/memories${recentQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.recentTimeoutMs) })
+        .then((r) => r.text()).catch(() => "")
+      : Promise.resolve(""),
     safeQ
       ? fetch(`${config.apiUrl}/v1/memories/search?q=${encodeURIComponent(safeQ)}&limit=${searchCount}${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`, { headers: hdrs, signal: AbortSignal.timeout(5000) })
         .then((r) => r.text()).catch(() => "")
