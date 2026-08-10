@@ -130,11 +130,13 @@ export class OmemClient {
     limit = 10,
     scope?: string,
     tags?: string[],
+    projectPath?: string,
   ): Promise<SearchResult[]> {
     const safeQ = truncateQuery(query);
     const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
     if (scope) params.set("scope", scope);
     if (tags && tags.length > 0) params.set("tags", tags.join(","));
+    if (projectPath) params.set("project_path", projectPath);
     const res = await this.request<SearchResponse>(
       `/v1/memories/search?${params}`,
     );

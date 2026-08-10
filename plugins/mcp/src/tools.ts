@@ -95,15 +95,22 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           .array(z.string())
           .optional()
           .describe("Filter by tags"),
+        project_path: z
+          .string()
+          .optional()
+          .describe(
+            "Project path filter — pass the current working directory to scope results. Global memories are always included.",
+          ),
       },
     },
-    async ({ query, limit, scope, tags }) => {
+    async ({ query, limit, scope, tags, project_path }) => {
       try {
         const results = await client.searchMemories(
           query,
           limit ?? 10,
           scope,
           tags,
+          project_path,
         );
 
         if (results.length === 0) {
