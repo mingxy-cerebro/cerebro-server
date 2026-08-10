@@ -42,6 +42,8 @@ __pycache__/
 # === 工作状态 ===
 .sisyphus/
 .mcp.json
+# 例外：cerebro 插件的 .mcp.json 使用环境变量占位符，无密钥
+!plugins/claude-code/.mcp.json
 .playwright-mcp/
 
 # === 发布产物 ===
