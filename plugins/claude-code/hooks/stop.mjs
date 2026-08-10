@@ -16,7 +16,7 @@ if (stopCfg.enabled === false || !tp || !sid) {
 
 const interval = stopCfg.interval || 5;
 const counter = stopCounterGet(sid);
-const newCount = counter.count + 1;
+const newCount = counter + 1;
 
 if (newCount < interval) {
   stopCounterSet(sid, newCount);

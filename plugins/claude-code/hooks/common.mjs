@@ -272,23 +272,24 @@ export function readCompactResult() {
 const TRACKER_DIR = join(HOME, ".config/cerebro/trackers");
 
 // ─── Stop counter (controls flush frequency in Stop hook) ────────────────────
-const STOP_COUNTER_FILE = join(TRACKER_DIR, "stop-counter.json");
+// Per-session file to avoid multi-session race condition
 
 export function stopCounterGet(sessionId) {
+  const f = join(TRACKER_DIR, `stop-counter-${sessionId}.json`);
   try {
-    if (!existsSync(STOP_COUNTER_FILE)) return { sid: sessionId, count: 0 };
-    const data = JSON.parse(readFileSync(STOP_COUNTER_FILE, "utf-8"));
-    if (data.sid !== sessionId) return { sid: sessionId, count: 0 };
-    return data;
+    if (!existsSync(f)) return 0;
+    const data = JSON.parse(readFileSync(f, "utf-8"));
+    return data.count || 0;
   } catch {
-    return { sid: sessionId, count: 0 };
+    return 0;
   }
 }
 
 export function stopCounterSet(sessionId, count) {
+  const f = join(TRACKER_DIR, `stop-counter-${sessionId}.json`);
   try {
     mkdirSync(TRACKER_DIR, { recursive: true });
-    writeFileSync(STOP_COUNTER_FILE, JSON.stringify({ sid: sessionId, count }));
+    writeFileSync(f, JSON.stringify({ count }));
   } catch {}
 }
 

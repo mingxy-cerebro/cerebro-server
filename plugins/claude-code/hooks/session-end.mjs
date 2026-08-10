@@ -5,13 +5,15 @@
 // Fix: spawn detached child process, parent exits immediately.
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { config, PLUGIN_ROOT, refCountDec, parseStdinJSON, emit } from "./common.mjs";
+import { config, PLUGIN_ROOT, refCountDec, parseStdinJSON, emit, logDebug } from "./common.mjs";
 
 if (!config.apiKey) { emit({}); process.exit(0); }
 
 const input = parseStdinJSON();
 const tp = input.transcript_path || "";
 const sid = input.session_id || input.sessionId || "";
+
+logDebug(`session-end: sid=${sid} tp=${tp ? tp.slice(-40) : "EMPTY"}`);
 
 // Spawn detached flush script — survives parent exit
 if (tp && sid) {
