@@ -36,9 +36,13 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           .enum(["cases", "preferences", "entities", "events", "profile", "patterns"])
           .optional()
           .describe("Memory category"),
+        project_path: z
+          .string()
+          .optional()
+          .describe("Project path — pass current working directory to scope the memory."),
       },
     },
-    async ({ content, tags, source, scope, visibility, category }) => {
+    async ({ content, tags, source, scope, visibility, category, project_path }) => {
       try {
         const memory = await client.createMemory(
           content,
@@ -49,6 +53,7 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           undefined,
           visibility,
           category,
+          project_path,
         );
         return {
           content: [
@@ -282,11 +287,16 @@ export function registerTools(server: McpServer, client: OmemClient): void {
       title: "User Profile",
       description:
         "Get the user profile synthesized from stored memories. Shows preferences, patterns, and key information.",
-      inputSchema: {},
+      inputSchema: {
+        project_path: z
+          .string()
+          .optional()
+          .describe("Project path filter — pass current working directory for project-specific preferences."),
+      },
     },
-    async () => {
+    async ({ project_path }) => {
       try {
-        const profile = await client.getProfile();
+        const profile = await client.getProfile(project_path);
         return {
           content: [
             {
@@ -356,11 +366,15 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           .max(100)
           .optional()
           .describe("Max memories to return (default: 20)"),
+        project_path: z
+          .string()
+          .optional()
+          .describe("Project path filter — pass current working directory to scope results."),
       },
     },
-    async ({ limit }) => {
+    async ({ limit, project_path }) => {
       try {
-        const memories = await client.listRecent(limit ?? 20);
+        const memories = await client.listRecent(limit ?? 20, project_path);
         if (memories.length === 0) {
           return {
             content: [
@@ -419,13 +433,18 @@ export function registerTools(server: McpServer, client: OmemClient): void {
           .array(z.string())
           .optional()
           .describe("Tags to apply to extracted memories"),
+        project_path: z
+          .string()
+          .optional()
+          .describe("Project path — pass current working directory to scope extracted memories."),
       },
     },
-    async ({ messages, mode, tags }) => {
+    async ({ messages, mode, tags, project_path }) => {
       try {
         const result = await client.ingestMessages(messages, {
           mode: mode ?? "smart",
           tags,
+          projectPath: project_path,
         });
         return {
           content: [

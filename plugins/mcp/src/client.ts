@@ -178,16 +178,18 @@ export class OmemClient {
     return this.request("/v2/profile/stats");
   }
 
-  async listRecent(limit = 20): Promise<MemoryDto[]> {
+  async listRecent(limit = 20, projectPath?: string): Promise<MemoryDto[]> {
+    const params = new URLSearchParams({ limit: String(limit), offset: "0" });
+    if (projectPath) params.set("project_path", projectPath);
     const res = await this.request<{ memories: MemoryDto[] }>(
-      `/v1/memories?limit=${limit}&offset=0`,
+      `/v1/memories?${params}`,
     );
     return res?.memories ?? [];
   }
 
   async ingestMessages(
     messages: Array<{ role: string; content: string }>,
-    opts: { mode?: string; agentId?: string; sessionId?: string; tags?: string[] } = {},
+    opts: { mode?: string; agentId?: string; sessionId?: string; tags?: string[]; projectPath?: string } = {},
   ): Promise<unknown> {
     const safeMessages = messages.map(m => ({
       role: m.role,
@@ -201,6 +203,7 @@ export class OmemClient {
         agent_id: opts.agentId,
         session_id: opts.sessionId,
         tags: opts.tags,
+        project_path: opts.projectPath,
       }),
     });
   }
