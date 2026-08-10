@@ -14,5 +14,9 @@
   "sessionStart": {
     "profileEnabled": true,
     "recentActivityEnabled": true
+  },
+  "stopFlush": {
+    "enabled": true,
+    "interval": 5
   }
 }

@@ -271,6 +271,27 @@ export function readCompactResult() {
 // ─── Cursor (session ingest dedup) ───────────────────────────────────────────
 const TRACKER_DIR = join(HOME, ".config/cerebro/trackers");
 
+// ─── Stop counter (controls flush frequency in Stop hook) ────────────────────
+const STOP_COUNTER_FILE = join(TRACKER_DIR, "stop-counter.json");
+
+export function stopCounterGet(sessionId) {
+  try {
+    if (!existsSync(STOP_COUNTER_FILE)) return { sid: sessionId, count: 0 };
+    const data = JSON.parse(readFileSync(STOP_COUNTER_FILE, "utf-8"));
+    if (data.sid !== sessionId) return { sid: sessionId, count: 0 };
+    return data;
+  } catch {
+    return { sid: sessionId, count: 0 };
+  }
+}
+
+export function stopCounterSet(sessionId, count) {
+  try {
+    mkdirSync(TRACKER_DIR, { recursive: true });
+    writeFileSync(STOP_COUNTER_FILE, JSON.stringify({ sid: sessionId, count }));
+  } catch {}
+}
+
 export function cursorGet(sessionId) {
   try {
     const f = join(TRACKER_DIR, `${sessionId}.txt`);
