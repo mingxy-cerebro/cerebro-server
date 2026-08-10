@@ -249,7 +249,7 @@ _sha256_16() {
 # Mirrors plugins/opencode/src/tags.ts (getUserTag / getProjectTag).
 # Email source: OMEM_USER_EMAIL env, else git config user.email.
 container_tags() {
-  local email project_dir user_tag project_tag
+  local email project_dir user_tag="" project_tag=""
   email="${OMEM_USER_EMAIL:-$(git config user.email 2>/dev/null || true)}"
   project_dir="$(detect_project_path)"
   [[ -n "$email" ]] && user_tag="omem_user_$(_sha256_16 "$email")"
