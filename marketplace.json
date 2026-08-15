@@ -19,7 +19,7 @@
         "en": "Cerebro persistent memory for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge, recall auto-approval, incremental session archival at stop, bundled zero-dependency 17-tool MCP server.",
         "zh-CN": "ZCode 的 Cerebro 持久记忆插件 — 会话开始注入记忆（画像 + 项目 + 语义搜索）、逐条提示的推理式召回指令与关键词提醒、召回调用自动放行、Stop 增量归档，内置零依赖 17 工具 MCP 服务。"
       },
-      "version": "0.3.0",
+      "version": "0.3.2",
       "author": {
         "name": "mingxy-cerebro",
         "url": "https://github.com/mingxy-cerebro/cerebro-server"

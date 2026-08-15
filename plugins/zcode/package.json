@@ -1,6 +1,6 @@
 {
   "name": "@mingxy/cerebro-zcode",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Cerebro persistent memory plugin for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge on every prompt, recall auto-approval, incremental session archival at stop, and a bundled zero-dependency 17-tool MCP server. Install via ZCode marketplace, npm, or one-shot installer.",
   "type": "module",
   "license": "Apache-2.0",
