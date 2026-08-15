@@ -67,7 +67,9 @@ out = out.replace("[CEREBRO-MEMORY]", `[CEREBRO-MEMORY]\n${timeLine}`);
 
 // CEREBRO-STATUS 通过 systemMessage 显示给用户（Q2: toast 替代方案）
 const memCount = injection.projectMemoryCount + injection.searchCount;
-let statusMsg = `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
+let statusMsg = injection.recentFailed
+  ? `🧠 Cerebro v${PLUGIN_VERSION} · Recent ✗ (timeout) · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`
+  : `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
 
 // After compact, PostCompact toast gets overridden by SessionStart:compact toast.
 // Merge PostCompact ingest result into this toast so user sees it.
@@ -86,6 +88,7 @@ await postRecallEvent({
   profileInjected: injection.profileCount > 0,
   keptCount: injection.projectMemoryCount,
   injectedContent: out,
+  failureReason: injection.recentFailed ? "recent fetch failed/timeout" : "",
 });
 
 emit({

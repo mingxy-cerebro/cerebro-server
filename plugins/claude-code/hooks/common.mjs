@@ -31,7 +31,7 @@ const DEF = {
   logDir: join(HOME, ".config/cerebro/logs"),
   logEnabled: true,
   profileTimeoutMs: 2000,
-  recentTimeoutMs: 3000,
+  recentTimeoutMs: 6000,
 };
 
 // ─── Config cascade ──────────────────────────────────────────────────────────
@@ -579,7 +579,7 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
       : Promise.resolve(""),
     recentEnabled
       ? fetch(`${config.apiUrl}/v1/memories${recentQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.recentTimeoutMs) })
-        .then((r) => r.text()).catch(() => "")
+        .then((r) => (r.ok ? r.text() : null)).catch(() => null)
       : Promise.resolve(""),
     safeQ
       ? fetch(`${config.apiUrl}/v1/memories/search?q=${encodeURIComponent(safeQ)}&limit=${searchCount}${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`, { headers: hdrs, signal: AbortSignal.timeout(5000) })
@@ -596,10 +596,15 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
 
   // parse recent (用完整 content，不用 l0_abstract)
   let projectMemories = [];
-  try {
-    const rd = JSON.parse(recentResp);
-    if (rd && !rd.error) projectMemories = rd.memories || [];
-  } catch {}
+  let recentFailed = false;
+  if (recentResp === null) {
+    recentFailed = true;
+  } else {
+    try {
+      const rd = JSON.parse(recentResp);
+      if (rd && !rd.error) projectMemories = rd.memories || [];
+    } catch {}
+  }
 
   // parse search
   let searchResults = [];
@@ -651,12 +656,13 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
     profileCount: profileContent ? 1 : 0,
     projectMemoryCount: projectMemories.length,
     searchCount: dedupedResults.length,
+    recentFailed,
   };
 }
 
 // ─── POST recall-event (shared by session-start + user-prompt-submit) ─────────
 // 让 web Sessions 页面看到每次注入的内容。对标 opencode chatMessageRecallHook createRecallEvent。
-export async function postRecallEvent({ sessionId, recallType, queryText, profileInjected, keptCount, injectedContent, maxScore = 0 }) {
+export async function postRecallEvent({ sessionId, recallType, queryText, profileInjected, keptCount, injectedContent, maxScore = 0, failureReason = "" }) {
   if (!sessionId || !config.apiKey) return;
   try {
     await fetch(`${config.apiUrl}/v1/recall-events`, {
@@ -673,6 +679,7 @@ export async function postRecallEvent({ sessionId, recallType, queryText, profil
         discarded_count: 0,
         injected_count: keptCount || 0,
         injected_content: (injectedContent || "").slice(0, 10000),
+        failure_reason: (failureReason || "").slice(0, 200),
       }),
       signal: AbortSignal.timeout(5000),
     });

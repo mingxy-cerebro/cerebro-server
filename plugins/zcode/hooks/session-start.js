@@ -94,7 +94,7 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
       ? withTimeout(client.getInjection(projectPath), profileTimeout, null)
       : Promise.resolve(null),
     recentEnabled
-      ? withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, [])
+      ? withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, null)
       : Promise.resolve([]),
     query
       ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath), searchTimeout, [])
@@ -146,6 +146,10 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   }
 
   sections.push("[/CEREBRO-MEMORY]");
+
+  if (projectMemories === null) {
+    logWarn("recent fetch timed out", { timeoutMs: recentTimeout });
+  }
 
   let text = sections.join("\n");
   if (text.length > maxChars) {
