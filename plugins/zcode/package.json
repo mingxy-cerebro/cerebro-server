@@ -1,18 +1,31 @@
 {
   "name": "@mingxy/cerebro-zcode",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Cerebro persistent memory plugin for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge on every prompt, recall auto-approval, incremental session archival at stop, and a bundled zero-dependency 17-tool MCP server. Install via ZCode marketplace, npm, or one-shot installer.",
   "type": "module",
   "license": "Apache-2.0",
-  "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
+  "author": {
+    "name": "mingxy-cerebro",
+    "email": "hi@cerebro.dev"
+  },
   "homepage": "https://github.com/mingxy-cerebro/cerebro-server",
   "repository": {
     "type": "git",
     "url": "https://github.com/mingxy-cerebro/cerebro-server.git",
     "directory": "plugins/zcode"
   },
-  "keywords": ["memory", "persistent", "agent-memory", "cerebro", "zcode", "mcp", "zero-dependency"],
-  "engines": { "node": ">=18" },
+  "keywords": [
+    "memory",
+    "persistent",
+    "agent-memory",
+    "cerebro",
+    "zcode",
+    "mcp",
+    "zero-dependency"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "cerebro-zcode-install": "./scripts/postinstall.js",
     "cerebro-zcode-uninstall": "./scripts/preuninstall.js",
