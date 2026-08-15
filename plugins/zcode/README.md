@@ -1,128 +1,131 @@
 # Cerebro for ZCode
 
-Persistent memory plugin for ZCode — auto-inject user preferences, project memories, and global memories at session start; auto-archive sessions at stop/compact. Powered by the [Cerebro (omem)](https://github.com/mingxy-cerebro/cerebro-server) backend.
+Persistent memory plugin for ZCode — session-start memory injection, reasoned-recall instruction + keyword nudge on every prompt, recall auto-approval, and incremental session archival at every turn end. Powered by the [Cerebro (omem)](https://github.com/mingxy-cerebro/cerebro-server) backend.
 
-This plugin ports the core capabilities of the OpenCode plugin (`@mingxy/cerebro`) to ZCode's plugin architecture.
+Feature-parity port of the claude-code plugin (`@mingxy/cerebro-claude-code`) and the opencode plugin (`@mingxy/cerebro`), adapted to ZCode's plugin architecture.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  ZCode session                                                  │
-│                                                                 │
-│  ┌─────────────────┐   SessionStart    ┌──────────────────────┐ │
-│  │                 │ ───────────────▶  │ session-start.js     │ │
-│  │   AI agent      │                   │  • profile inject    │ │
-│  │                 │                   │  • project memories  │ │
-│  │                 │ ◀──── inject ──── │  • global search     │ │
-│  │                 │                   └──────────────────────┘ │
-│  │                 │                                            │
-│  │                 │   Stop            ┌──────────────────────┐ │
-│  │                 │ ───────────────▶  │ stop.js              │ │
-│  │                 │                   │  • session-ingest    │ │
-│  │                 │                   │  • idempotent dedup  │ │
-│  │                 │                   └──────────────────────┘ │
-│  │                 │                                            │
-│  │                 │   PreCompact     ┌──────────────────────┐ │
-│  │                 │ ───────────────▶ │ pre-compact.js       │ │
-│  │                 │ ◀──── inject ─── │  • compaction ctx    │ │
-│  │                 │                   │  • archive messages  │ │
-│  │                 │   ┌───────────┐   └──────────────────────┘ │
-│  │                 │   │ MCP tools │                            │
-│  │                 │ ─▶│ (17)      │◀── AI on-demand calls     │
-│  └─────────────────┘   └───────────┘                            │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  ZCode session                                                       │
+│                                                                      │
+│  SessionStart (startup|resume|clear|compact)                         │
+│    session-start.js → [CEREBRO-MEMORY] injection:                    │
+│      [CEREBRO-TIME] + profile + project recent + semantic search     │
+│                                                                      │
+│  UserPromptSubmit (every message, ZERO API calls)                    │
+│    user-prompt-submit.js → <cerebro-recall> reasoning instruction    │
+│      + save/recall keyword nudges (config-driven)                    │
+│                                                                      │
+│  PreToolUse (matcher Skill|Bash)                                     │
+│    pre-tool-use.js → auto-approve memory-recall calls                │
+│                                                                      │
+│  Stop (every turn end)                                               │
+│    stop.js → incremental session archive                             │
+│      (turnId cursor + message-count slicing, CC-grade cleaning)      │
+│                                                                      │
+│  MCP tools (17, zero-dependency)                                     │
+│    mcp/server.js → memory_* / space_* on-demand                      │
+└──────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
                    ┌─────────────────────┐
                    │  Cerebro backend    │
-                   │  (omem-server)      │
                    │  /v1 /v2 API        │
                    └─────────────────────┘
 ```
 
-## Capabilities
+### Design notes
 
-### Hooks (automatic, via Node scripts)
+- **Per-message keyword search + auto-inject is NOT implemented** — that is the deprecated opencode `autoRecall` pattern. Instead, every user prompt gets a static reasoning instruction (`<cerebro-recall>`) that teaches the model when to call `memory_search` itself. Zero search API calls on the prompt path.
+- **ZCode has no PreCompact/PostCompact/SessionEnd events.** Compaction is covered by SessionStart(compact) re-injection plus the Stop-hook snapshot-shrink detection (a compact reset triggers a full re-sync ingest, doubling as compact-summary capture). Ctrl+C is covered by per-turn incremental archival — nothing is left unflushed.
+- **Cross-world path canonicalization**: memory producers run in WSL (`/mnt/c/...`) and Windows (`C:\...`) over the same repos. Every `project_path` and project tag hash sent to the server is canonicalized to the `/mnt/<drive>/...` form, so WSL-side (opencode / claude-code) and Windows-side (zcode) plugins share one project identity. Controlled by `connection.projectPathStyle` (`auto` | `wsl` | `native`, default `auto` — POSIX paths pass through untouched, so the same code is safe inside WSL).
+
+## Capabilities vs the other Cerebro plugins
+
+| Feature | opencode | claude-code | zcode (this) |
+|---|---|---|---|
+| Session-start injection (profile + project + semantic) | ✅ | ✅ | ✅ |
+| Time header `[CEREBRO-TIME]` | ✅ (system transform) | ✅ | ✅ (SessionStart) |
+| Reasoned-recall instruction per prompt | ❌ | ✅ | ✅ |
+| Save/recall keyword nudge | ✅ | ✅ | ✅ |
+| Recall call auto-approval | — | ✅ (PreToolUse) | ✅ (PreToolUse) |
+| Periodic session archival | ✅ session.idle | ✅ Stop×5 + SessionEnd | ✅ Stop (per-turn incremental) |
+| Compact summary ingestion | ✅ | ✅ Pre/PostCompact | ✅ Stop shrink-detection |
+| Ingest cleaning (strip echo, drop thinking, truncate tools) | partial | ✅ | ✅ |
+| Container tags (user/project isolation) on writes | ✅ | ✅ | ✅ |
+| 17 memory/space tools | ✅ plugin tools | ✅ MCP | ✅ MCP (zero-dep) |
+| Auto-store toggle | ✅ | — | ✅ (memory_toggle + Stop gate) |
+| Web UI | ✅ | ✅ | ✅ (127.0.0.1:5212, idle daemon) |
+| Per-message keyword auto-inject (deprecated) | ✅ deprecated | ❌ | ❌ |
+
+## Hooks
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `session-start.js` | `SessionStart` (startup\|clear\|compact) | **Core**: inject user preferences (profile) + project memories + global memories once at session start |
-| `stop.js` | `Stop` | Auto-archive the session via `/v1/memories/session-ingest` (idempotent, deduped) |
-| `pre-compact.js` | `PreCompact` | Inject 6-section compaction context + archive recent messages |
+| `session-start.js` | `SessionStart` (`startup\|resume\|clear\|compact`) | Inject `[CEREBRO-MEMORY]` once at session start: time header + profile + recent project memories + semantic search (query derived from the last user message on resume/compact; project name on cold start) |
+| `user-prompt-submit.js` | `UserPromptSubmit` | Inject `<cerebro-recall>` reasoning instruction + keyword nudges (static text, no API calls) |
+| `pre-tool-use.js` | `PreToolUse` (`Skill\|Bash`) | Auto-approve memory-recall calls (Bash path guarded against shell-chaining injection) |
+| `stop.js` | `Stop` | Incremental archive via `/v1/memories/session-ingest` |
 
-> **Note**: ZCode has no per-message hook. The OpenCode plugin's per-message recall is deprecated. This plugin injects memory **once** at session start (the documented correct behavior) instead of on every message.
+> ZCode supports exactly seven hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Stop`. `PreCompact` / `PostCompact` / `SessionEnd` / `SubagentStop` are **not** supported (their duties are covered as described under Design notes).
 
-### MCP Tools (17 tools, AI on-demand)
+## MCP Tools (17, zero-dependency)
 
-Powered by [`@ourmem/mcp`](https://www.npmjs.com/package/@ourmem/mcp) by default (zero-setup). An enhanced `mcp/server.js` with v2 profile support is also bundled.
+The bundled `mcp/server.js` implements the stdio JSON-RPC transport inline — no `npm install`, no node_modules. Works straight from a marketplace / git / directory install. Loaded via the plugin's own `.mcp.json`.
 
 Memory: `memory_store` · `memory_search` · `memory_get` · `memory_update` · `memory_delete` · `memory_list` · `memory_ingest` · `memory_stats` · `memory_profile` · `memory_profile_stats` · `memory_toggle`
 Spaces: `space_create` · `space_list` · `space_add_member` · `memory_share` · `memory_pull` · `memory_reshare`
 
-### Skills (lightweight shortcuts)
+Business rules aligned with the other plugins: every write auto-prepends container tags (`omem_user_*` / `omem_project_*`), searches auto-scope by the same tags, `source` defaults to `zcode`, query capped at 200 chars, content sanitized at 3000, enums (category / visibility / scope / mode / role) validated before any network call.
 
-- `memory-recall` — triggers on "搜/记得/之前/search/recall"
-- `memory-store` — triggers on "记住/保存/别忘了/save this"
+## Skills & Commands
 
-### Commands (slash commands)
-
+- Skill `memory-recall` — triggers on "搜/记得/之前/search/recall"
+- Skill `memory-store` — triggers on "记住/保存/别忘了/save this"
 - `/memory <text>` — store a memory
 - `/recall <query>` — search memories
+- `/memory-save` — summarize and archive the current session (via `memory_ingest`)
 
 ## Installation
 
-> **How this works**: ZCode plugins are filesystem-based (not in-process JS modules), so ZCode has no built-in `npm install <plugin>` command. This package bridges that gap with an npm **postinstall** hook: `npm install -g @ourmem/zcode` copies the plugin to `~/.zcode/plugins/cerebro/` and registers it in `~/.zcode/cli/config.json` under `plugins.dirs`. Restarting ZCode then auto-loads it (`source:"inline"`, `defaultEnabled:true`). The ergonomics match OpenCode's `"plugin": ["@pkg"]` — one command, restart, done.
+Requires Node.js ≥ 18. No npm dependencies.
 
-### Option A: npm (recommended)
+### Option A: ZCode marketplace (recommended)
+
+1. In ZCode → Settings → Plugin Management → **Discover** tab → **`+`** button.
+2. Add this GitHub repository: `mingxy-cerebro/cerebro-server` (the repo root ships `marketplace.json`).
+3. Find **Cerebro Memory** in the marketplace → **Get**.
+4. Restart ZCode.
+
+Updates track the repo. Behind a proxy, set `ZCODE_HTTP_PROXY=http://host:port` (a bare `http_proxy` is ignored).
+
+### Option B: npm
 
 ```sh
-npm install -g @ourmem/zcode
-# postinstall hook runs automatically → plugin registered
-# then restart ZCode
+npm install -g @mingxy/cerebro-zcode
+# postinstall copies the plugin to ~/.zcode/plugins/cerebro and registers
+# it via plugins.dirs; restart ZCode afterwards.
 ```
 
-Uninstall is symmetric:
-```sh
-npm uninstall -g @ourmem/zcode
-# preuninstall hook removes plugin files + config entry
-```
+Uninstall: `npm uninstall -g @mingxy/cerebro-zcode` (preuninstall removes files + config entries).
 
-The postinstall hook is a no-op during local development (when the package isn't inside a `node_modules/` tree), so `npm install` in this repo won't self-install.
-
-### Option B: Manual one-shot installer
+### Option C: dev sync (from a repo checkout)
 
 ```sh
 git clone https://github.com/mingxy-cerebro/cerebro-server.git
 cd cerebro-server/plugins/zcode
-node install.js                          # install to ~/.zcode/plugins/cerebro
-node install.js --target /custom/path    # install elsewhere
+node install.js                          # sync to ~/.zcode/plugins/cerebro
+node install.js --target /custom/path    # sync elsewhere
 node install.js --uninstall              # remove
 ```
 
-### Option C: Manual config-driven install
-
-1. Place the plugin anywhere stable, e.g. `~/.zcode/plugins/cerebro/`.
-2. Add its path to `plugins.dirs` in `~/.zcode/cli/config.json`:
-   ```jsonc
-   {
-     "plugins": {
-       "dirs": ["C:\\Users\\you\\.zcode\\plugins\\cerebro"],
-       "enabled": true
-     }
-   }
-   ```
-3. Restart ZCode.
-
-### Supported hook events
-
-ZCode only supports these hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` (verified from the ZCode runtime's `Kr` whitelist). This plugin uses `SessionStart` (memory injection) and `Stop` (session archival). Note: `PreCompact`/`SessionEnd`/`SubagentStop` are **not** supported and will trigger `plugin_hook_unsupported_event` errors.
+The installer also cleans up any pre-0.3.0 global `mcp.servers.cerebro` registration (the plugin's own `.mcp.json` takes over — keeping both would spawn two identical MCP servers).
 
 ## Configuration
 
 ### Credentials (required)
-
-Set the Cerebro API URL and key as environment variables:
 
 ```bash
 # Linux/macOS
@@ -136,7 +139,7 @@ set OMEM_API_URL=https://www.mengxy.cc
 set OMEM_API_KEY=your-tenant-key
 ```
 
-Or in `~/.config/cerebro/config.json`:
+Or in `~/.config/cerebro/config.json` (priority: env vars > config file > defaults):
 
 ```jsonc
 {
@@ -147,66 +150,46 @@ Or in `~/.config/cerebro/config.json`:
 }
 ```
 
-Priority: env vars > config file > defaults.
+### Injection-content config (`~/.zcode/cerebro.json`)
 
-### Full config reference
+Auto-initialized from the bundled `config.default.json` on first run (three-level fallback: user file > bundled > built-in). Controls WHAT gets injected:
+
+| Section | Keys | Default | Description |
+|---|---|---|---|
+| `language` | — | `en` | Language of injected instructions |
+| `recall` | `enabled`, `prompt` | `true` | The `<cerebro-recall>` reasoning instruction |
+| `nudge` | `enabled`, `saveKeywords[]`, `recallKeywords[]`, `savePrompt`, `recallPrompt` | see file | Keyword nudges |
+| `sessionStart` | `profileEnabled`, `recentActivityEnabled`, `timeEnabled` | all `true` | SessionStart injection toggles |
+
+### Server-connection config reference (`~/.config/cerebro/config.json`)
 
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
 | `connection.apiUrl` | — | `https://www.mengxy.cc` | Cerebro backend URL |
 | `connection.apiKey` | — | `""` | Tenant API key |
 | `connection.requestTimeoutMs` | `OMEM_REQUEST_TIMEOUT_MS` | `15000` | HTTP timeout |
+| `connection.projectPathStyle` | `OMEM_PROJECT_PATH_STYLE` | `auto` | Path canonicalization: `auto` / `wsl` / `native` |
 | `content.maxQueryLength` | — | `200` | Search query char cap |
 | `content.maxContentChars` | — | `30000` | Total injection char cap |
 | `content.maxContentLength` | — | `3000` | Single content char cap |
 | `injection.recentCount` | — | `5` | Project memories to inject |
 | `injection.searchCount` | — | `10` | Search results to inject |
-| `injection.recentTruncateChars` | — | `0` (no trunc) | Project memory truncation |
-| `injection.searchTruncateChars` | — | `0` (no trunc) | Search result truncation |
-| `ingest.autoCaptureThreshold` | `OMEM_AUTO_CAPTURE_THRESHOLD` | `5` | Min messages to trigger archive |
+| `injection.profileTimeoutMs` / `recentTimeoutMs` / `searchTimeoutMs` | — | `2000` / `3000` / `5000` | Per-fetch degraded timeouts |
+| `ingest.autoCaptureThreshold` | `OMEM_AUTO_CAPTURE_THRESHOLD` | `5` | Min total messages before archival |
 | `ingest.ingestMode` | `OMEM_INGEST_MODE` | `smart` | `smart` (LLM) or `raw` |
 
-## Using the Enhanced MCP server (optional)
+## Logs & state
 
-By default `.mcp.json` uses `npx @ourmem/mcp` (zero-dependency). To use the bundled enhanced server with v2 profile support, first install deps then edit `.mcp.json`:
+Hook logs: `~/.config/cerebro/logs/cerebro-zcode.log` (5MB rolling, 7-day expiry).
+Ingest state: `~/.config/cerebro/zcode-state/` (per-session turn cursors + auto-store switches; or `${ZCODE_PLUGIN_DATA}`).
+Web UI: `http://127.0.0.1:5212` (auto-started daemon, idle self-shutdown).
 
-```bash
-cd plugins/zcode && npm install
+## Development
+
+```sh
+cd plugins/zcode
+npm test          # node --test tests/ — 45 tests, zero dependencies
 ```
-
-```json
-{
-  "mcpServers": {
-    "cerebro": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.js"],
-      "env": {
-        "OMEM_API_KEY": "${OMEM_API_KEY}",
-        "OMEM_API_URL": "${OMEM_API_URL:-https://www.mengxy.cc}"
-      }
-    }
-  }
-}
-```
-
-## Logs
-
-Hook logs are written to `~/.config/cerebro/logs/cerebro-zcode.log` (5MB rolling, 7-day expiry).
-
-Idempotency state (processed message IDs) lives in `~/.config/cerebro/zcode-state/` (or `${ZCODE_PLUGIN_DATA}`).
-
-## Comparison with the OpenCode plugin
-
-| Feature | OpenCode plugin | This ZCode plugin |
-|---------|----------------|-------------------|
-| Session-start injection (profile+project+global) | ✅ | ✅ |
-| Per-message recall | ✅ (deprecated) | ❌ (intentionally omitted) |
-| Stop auto-archive | via `session.idle` | ✅ via `Stop` |
-| PreCompact context + archive | ✅ | ✅ |
-| 17 memory tools | ✅ | ✅ (MCP) |
-| Auto-store toggle | ✅ | ✅ (file-based) |
-| Keyword nudge | ✅ | ❌ → Skill fallback |
-| TUI / Web UI | ✅ | ❌ |
 
 ## License
 

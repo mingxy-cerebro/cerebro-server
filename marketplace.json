@@ -1,0 +1,52 @@
+{
+  "name": "cerebro",
+  "version": 1,
+  "description": "Cerebro plugins — shared persistent memory for AI agents (ZCode, Claude Code, OpenCode).",
+  "description_i18n": {
+    "en": "Cerebro plugins — shared persistent memory for AI agents (ZCode, Claude Code, OpenCode).",
+    "zh-CN": "Cerebro 插件市场 — AI Agent 共享持久记忆（ZCode、Claude Code、OpenCode）。"
+  },
+  "owner": {
+    "name": "mingxy-cerebro",
+    "url": "https://github.com/mingxy-cerebro/cerebro-server"
+  },
+  "plugins": [
+    {
+      "name": "cerebro",
+      "source": "plugins/zcode",
+      "description": "Cerebro persistent memory for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge, recall auto-approval, incremental session archival at stop, bundled zero-dependency 17-tool MCP server.",
+      "description_i18n": {
+        "en": "Cerebro persistent memory for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge, recall auto-approval, incremental session archival at stop, bundled zero-dependency 17-tool MCP server.",
+        "zh-CN": "ZCode 的 Cerebro 持久记忆插件 — 会话开始注入记忆（画像 + 项目 + 语义搜索）、逐条提示的推理式召回指令与关键词提醒、召回调用自动放行、Stop 增量归档，内置零依赖 17 工具 MCP 服务。"
+      },
+      "version": "0.3.0",
+      "author": {
+        "name": "mingxy-cerebro",
+        "url": "https://github.com/mingxy-cerebro/cerebro-server"
+      },
+      "category": "developer-tools",
+      "displayName": "Cerebro Memory",
+      "displayName_i18n": {
+        "zh-CN": "Cerebro 持久记忆"
+      },
+      "keywords": [
+        "memory",
+        "persistent",
+        "agent-memory",
+        "context",
+        "cerebro",
+        "mcp"
+      ],
+      "examplePrompts": [
+        "Search my memories for the bug we fixed last week",
+        "Remember that this project uses pnpm, not npm"
+      ],
+      "examplePrompts_i18n": {
+        "zh-CN": [
+          "搜一下上周我们修的那个 bug 的记忆",
+          "记住这个项目用 pnpm 不用 npm"
+        ]
+      }
+    }
+  ]
+}

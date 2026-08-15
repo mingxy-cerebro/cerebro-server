@@ -1,7 +1,9 @@
 // Shared utilities — ported from plugins/opencode/src/hooks.ts + client.ts
-import { readFileSync } from "node:fs";
+// + ingest cleaning ported from plugins/claude-code/hooks/common.mjs
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 
 const BOUNDARY_SEARCH_RATIO = 0.6;
 
@@ -29,6 +31,47 @@ export function detectProjectRoot(cwd) {
   } catch {}
   gitRootCache.set(dir, root);
   return root;
+}
+
+// ── Cross-platform project path canonicalization ──────────────────────
+// Memory producers run in different worlds over the SAME repo:
+//   WSL (opencode / claude-code) sees /mnt/c/dev/foo
+//   Windows (zcode)                sees C:\dev\foo, C:/dev/foo, or /c/dev/foo
+// The server filters memories by exact project_path string, so without
+// normalization the two worlds never see each other's memories.
+// toRemoteProjectPath() converts any Windows-flavored path to the WSL form
+// (/mnt/<drive>/...) for everything we SEND to the server. Local file IO
+// must keep using the native path — convert only at the API boundary.
+//
+// style: "auto" (default; Windows drive paths → /mnt form, POSIX stays as-is
+//        so the same code is safe when running inside WSL/Linux),
+//        "wsl" (force conversion), "native" (never convert).
+const PATH_STYLE = (process.env.OMEM_PROJECT_PATH_STYLE || "auto").toLowerCase();
+
+function windowsToMnt(p) {
+  // Windows drive form: D:\foo or D:/foo (unambiguous on any platform)
+  let m = p.match(/^([a-zA-Z]):[\\/](.*)$/);
+  if (m) return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, "/")}`;
+  // Git-bash / MSYS form: /d/foo — only meaningful on Windows; on real Linux
+  // a single-letter root dir is a genuine path, so don't touch it there.
+  if (process.platform === "win32") {
+    m = p.match(/^\/([a-zA-Z])\/(.*)$/);
+    if (m) return `/mnt/${m[1].toLowerCase()}/${m[2]}`;
+  }
+  return null;
+}
+
+export function toRemoteProjectPath(p) {
+  if (!p) return p;
+  if (PATH_STYLE === "native") return p;
+  const converted = windowsToMnt(p);
+  if (converted) return converted;
+  if (PATH_STYLE === "wsl") {
+    // POSIX path in force-wsl mode: /mnt/... is already canonical; anything
+    // else (e.g. native Linux path) stays as-is — we never guess.
+    return p;
+  }
+  return p; // auto + non-Windows path (WSL/Linux) — canonical already
 }
 
 // ── Content sanitization ──────────────────────────────────────────────
@@ -82,15 +125,35 @@ export function formatRelativeAge(isoDate) {
 
 // ── Container tags — user + project isolation (port of tags.ts) ───────
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 
-export function getUserTag(email) {
-  const id = email || process.env.USER || process.env.USERNAME || "unknown";
+// Canonical user identity, aligned with claude-code containerTags():
+// env override > git config user.email > legacy env fallbacks. Keeping this
+// chain identical across plugins is what makes the omem_user_<hash> tag —
+// and therefore user-scoped memory isolation — match across WSL/Windows.
+export function resolveUserEmail() {
+  if (process.env.OMEM_USER_EMAIL) return process.env.OMEM_USER_EMAIL;
+  try {
+    const email = execSync("git config user.email", {
+      encoding: "utf-8",
+      timeout: 2000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (email) return email;
+  } catch {}
+  return process.env.GIT_AUTHOR_EMAIL || process.env.USER || process.env.USERNAME || "";
+}
+
+export function getUserTag(emailOverride) {
+  const id = emailOverride || resolveUserEmail() || "unknown";
   const hash = createHash("sha256").update(id).digest("hex").slice(0, 16);
   return `omem_user_${hash}`;
 }
 
 export function getProjectTag(directory) {
-  const dir = directory || process.cwd();
+  // Hash the REMOTE (canonical) form so the tag matches what WSL-side
+  // plugins compute for the same repo.
+  const dir = toRemoteProjectPath(directory || process.cwd());
   const hash = createHash("sha256").update(dir).digest("hex").slice(0, 16);
   return `omem_project_${hash}`;
 }
@@ -233,4 +296,88 @@ export function extractUserRequest(content) {
     if (pattern.test(text)) return "";
   }
   return text;
+}
+
+// ── Ingest cleaning (port of claude-code common.mjs cleanText/blockText) ──
+// Strips inject-echo blocks (<system-reminder>, <cerebro-*>, [CEREBRO-MEMORY])
+// so hooks never re-ingest their own injections.
+const INJECT_TAG_RE = /<(system-reminder|cerebro-[a-z0-9_-]+|supermemory-[a-z0-9_-]+)\b[^>]*>[\s\S]*?<\/\1>/gi;
+const INJECT_SELF_RE = /<(system-reminder|cerebro-[a-z0-9_-]+|supermemory-[a-z0-9_-]+)\b[^>]*\/>/gi;
+const MEMORY_BLOCK_RE = /\[CEREBRO-MEMORY\][\s\S]*?\[\/CEREBRO-MEMORY\]/g;
+const WS_RE = /\s+/g;
+
+export function cleanText(s) {
+  if (typeof s !== "string") s = String(s);
+  return s
+    .replace(INJECT_TAG_RE, "")
+    .replace(INJECT_SELF_RE, "")
+    .replace(MEMORY_BLOCK_RE, "")
+    .replace(WS_RE, " ")
+    .trim();
+}
+
+// Content-block flattening: drop thinking, truncate tool_result (500) and
+// serialized tool_use input (100) — matches claude-code flushSessionIngest.
+export function blockText(b) {
+  const t = b.type;
+  if (t === "text") return b.text || "";
+  if (t === "thinking") return null;
+  if (t === "tool_result") {
+    let c = b.content || "";
+    if (Array.isArray(c)) {
+      c = c
+        .map((x) => (typeof x === "object" && x?.type === "text" ? x.text || "" : typeof x === "string" ? x : ""))
+        .join("\n");
+    } else if (typeof c !== "string") {
+      try { c = JSON.stringify(c); } catch { c = String(c); }
+    }
+    return "tool_result: " + (c || "").slice(0, 500);
+  }
+  if (t === "tool_use") {
+    let inp;
+    try { inp = JSON.stringify(b.input); } catch { inp = String(b.input); }
+    return `tool_use(${b.name || "?"}): ${inp.slice(0, 100)}`;
+  }
+  return null;
+}
+
+export function contentText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (typeof b === "string") return b;
+        if (typeof b === "object" && b !== null) return blockText(b);
+        return null;
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+// ── Auto-store toggle (shared by Stop hook + MCP memory_toggle tool) ─────
+function stateDir() {
+  if (process.env.ZCODE_PLUGIN_DATA) return process.env.ZCODE_PLUGIN_DATA;
+  return join(homedir(), ".config", "cerebro", "zcode-state");
+}
+
+function autoStorePath(sessionId) {
+  return join(stateDir(), `autostore-${sessionId || "default"}.json`);
+}
+
+export function getAutoStore(sessionId) {
+  try {
+    const data = JSON.parse(readFileSync(autoStorePath(sessionId), "utf-8"));
+    return data.enabled ?? true;
+  } catch {
+    return true;
+  }
+}
+
+export function setAutoStore(sessionId, enabled) {
+  try {
+    mkdirSync(stateDir(), { recursive: true });
+    writeFileSync(autoStorePath(sessionId), JSON.stringify({ enabled, ts: Date.now() }));
+  } catch {}
 }

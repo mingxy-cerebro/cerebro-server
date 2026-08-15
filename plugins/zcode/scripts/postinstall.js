@@ -1,8 +1,12 @@
 #!/usr/bin/env node
-// postinstall hook — runs automatically after `npm install @ourmem/zcode`.
+// postinstall hook — runs automatically after `npm install @mingxy/cerebro-zcode`.
 // Copies the plugin assets to ~/.zcode/plugins/cerebro/ and registers the path
 // in ~/.zcode/cli/config.json (plugins.dirs). After this, restarting ZCode loads
 // the plugin automatically (source:"inline", defaultEnabled:true).
+//
+// v0.3.0: zero npm dependencies (MCP included) — nothing to build or install
+// after copying. MCP loads from the plugin's own .mcp.json; any legacy global
+// mcp.servers registration is cleaned up to avoid double-spawning.
 //
 // Safety: this is a no-op when run from inside the plugin's own dev directory
 // (detected via npm_lifecycle_event / cwd), so `npm install` during local
@@ -66,9 +70,7 @@ async function main() {
 
   console.log("[cerebro-zcode] Installing plugin into ZCode...");
 
-  // 1. Copy plugin assets to stable location.
-  // node_modules is NOT copied (it's hoisted to the npm root, not inside the pkg).
-  // We install mcp runtime deps into TARGET separately below to avoid recursion.
+  // 1. Copy plugin assets to stable location (zero-dependency — no npm install)
   mkdirSync(TARGET, { recursive: true });
   cpSync(PKG_ROOT, TARGET, {
     recursive: true,
@@ -76,46 +78,26 @@ async function main() {
       const rel = src.slice(PKG_ROOT.length).replace(/\\/g, "/");
       if (rel.includes("/node_modules/")) return false;
       if (rel.includes("/.git/")) return false;
+      if (rel.endsWith(".tgz")) return false;
       return true;
     },
   });
 
-  // 1b. Install MCP runtime deps into TARGET so mcp/server.js can resolve
-  // @modelcontextprotocol/sdk + zod. Skip our own postinstall to avoid recursion.
-  try {
-    const { spawnSync } = await import("node:child_process");
-    const res = spawnSync(
-      process.platform === "win32" ? "npm.cmd" : "npm",
-      ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-      { cwd: TARGET, stdio: "pipe", encoding: "utf-8", shell: true },
-    );
-    if (res.status !== 0) {
-      console.warn(`[cerebro-zcode] npm install in TARGET failed (exit ${res.status}). MCP tools may not work.`);
-      if (res.stderr) console.warn(`[cerebro-zcode] ${res.stderr.slice(0, 300)}`);
-    } else {
-      console.log("[cerebro-zcode] ✓ MCP dependencies installed");
-    }
-  } catch (err) {
-    console.warn(`[cerebro-zcode] Could not install MCP deps: ${err instanceof Error ? err.message : String(err)}`);
-    console.warn("[cerebro-zcode] Run `npm install` manually in the plugin dir to enable MCP tools.");
-  }
-
-  // 2. Register in config.json: plugins.dirs (hooks/skills) + global mcp.servers (MCP tools)
-  //    ZCode does NOT spawn MCP from inline (plugins.dirs) plugins — only global
-  //    mcp.servers works. So we register cerebro's MCP server there too.
+  // 2. Register in config.json plugins.dirs; clean up legacy global mcp.servers
+  //    (pre-0.3.0 registered MCP globally; v0.3.0 loads it from .mcp.json)
   const cfg = ensurePluginsShape(readConfig());
   const targetNorm = TARGET.replace(/\//g, "\\");
   if (!cfg.plugins.dirs.some((d) => resolve(String(d)) === resolve(TARGET))) {
     cfg.plugins.dirs.push(targetNorm);
   }
-  if (!cfg.mcp) cfg.mcp = {};
-  if (!cfg.mcp.servers) cfg.mcp.servers = {};
-  const serverJsNorm = join(TARGET, "mcp", "server.js").replace(/\//g, "\\");
-  cfg.mcp.servers.cerebro = { type: "stdio", command: "node", args: [serverJsNorm] };
+  if (cfg.mcp?.servers?.cerebro) {
+    delete cfg.mcp.servers.cerebro;
+    console.log("[cerebro-zcode] ✓ Removed legacy cerebro entry from mcp.servers");
+  }
   writeConfig(cfg);
 
-  console.log(`[cerebro-zcode] ✓ Plugin copied to ${TARGET}`);
-  console.log(`[cerebro-zcode] ✓ Registered plugins.dirs + mcp.servers in ${CONFIG_PATH}`);
+  console.log(`[cerebro-zcode] ✓ Plugin copied to ${TARGET} (zero-dependency)`);
+  console.log(`[cerebro-zcode] ✓ Registered plugins.dirs in ${CONFIG_PATH}`);
   console.log("");
   console.log("[cerebro-zcode] Next steps:");
   console.log("  1. Restart ZCode (close all windows and reopen).");

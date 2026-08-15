@@ -27,6 +27,7 @@ omem-server-source/
     openclaw/           # OpenClaw plugin (TypeScript)
     mcp/                # MCP server plugin (TypeScript)
     claude-code/        # Claude Code plugin (hooks + skills)
+    zcode/              # ZCode plugin (hooks + skills + zero-dep MCP, ESM JS)
 ```
 
 ### Startup Flow
@@ -117,7 +118,7 @@ Concurrency limits: import semaphore (3), reconcile semaphore (1)
 - **85 Rust source files**, ~23,500 lines of production code
 - **373 inline tests** across 49 files
 - **12 top-level modules** in omem-server/src/
-- **4 TypeScript plugins** in plugins/
+- **5 agent plugins** in plugins/ (4 TypeScript + 1 ESM JavaScript)
 
 ## Plugins (TypeScript)
 
@@ -132,6 +133,9 @@ MCP server implementation. Files: client, index, tools.
 
 ### claude-code/
 Claude Code hooks + skills integration (no src/ — uses hooks/ and skills/ directories).
+
+### zcode/
+ZCode plugin (pure ESM JavaScript, zero npm dependencies). 4 hooks (SessionStart injection, UserPromptSubmit recall-instruction + nudge, PreToolUse recall auto-approval, Stop incremental ingest), zero-dependency 17-tool MCP server, WSL/Windows cross-platform path canonicalization (`/mnt/<drive>/...`), marketplace + npm + dev-sync installation. Repo-root `marketplace.json` publishes it.
 
 ## Hierarchical AGENTS.md
 

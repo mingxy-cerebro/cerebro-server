@@ -1,7 +1,7 @@
 {
   "name": "cerebro",
-  "version": "0.1.0",
-  "description": "Cerebro persistent memory for ZCode — auto-inject user preferences, project memories, and global memories at session start; auto-archive sessions at stop/compact. Powered by Cerebro (omem) backend.",
+  "version": "0.3.0",
+  "description": "Cerebro persistent memory for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge, recall auto-approval, incremental session archival at stop. Powered by Cerebro (omem) backend.",
   "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
   "license": "Apache-2.0",
   "homepage": "https://github.com/mingxy-cerebro/cerebro-server",

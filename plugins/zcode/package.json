@@ -1,7 +1,7 @@
 {
   "name": "@mingxy/cerebro-zcode",
-  "version": "0.2.0",
-  "description": "Cerebro persistent memory plugin for ZCode — auto-inject user preferences, project memories, and global memories at session start; auto-archive sessions at stop. Bundled 17-tool MCP server. Installed automatically via postinstall hook.",
+  "version": "0.3.0",
+  "description": "Cerebro persistent memory plugin for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge on every prompt, recall auto-approval, incremental session archival at stop, and a bundled zero-dependency 17-tool MCP server. Install via ZCode marketplace, npm, or one-shot installer.",
   "type": "module",
   "license": "Apache-2.0",
   "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
@@ -11,8 +11,8 @@
     "url": "https://github.com/mingxy-cerebro/cerebro-server.git",
     "directory": "plugins/zcode"
   },
-  "keywords": ["memory", "persistent", "agent-memory", "cerebro", "zcode", "postinstall"],
-  "engines": { "node": ">=20" },
+  "keywords": ["memory", "persistent", "agent-memory", "cerebro", "zcode", "mcp", "zero-dependency"],
+  "engines": { "node": ">=18" },
   "bin": {
     "cerebro-zcode-install": "./scripts/postinstall.js",
     "cerebro-zcode-uninstall": "./scripts/preuninstall.js",
@@ -27,6 +27,7 @@
     "scripts/",
     "web/",
     ".mcp.json",
+    "config.default.json",
     "web-server.js",
     "install.js",
     "README.md"
@@ -34,13 +35,10 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js",
-    "install:dev": "node install.js"
+    "install:dev": "node install.js",
+    "test": "node --test tests/"
   },
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.23.0"
   }
 }

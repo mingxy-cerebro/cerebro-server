@@ -1,0 +1,19 @@
+{
+  "language": "en",
+  "recall": {
+    "enabled": true,
+    "prompt": "Before replying, silently assess: would recalling long-term memory substantively help answer this message? Reason first, then decide — do not reflex-search, do not state the reasoning.\n\nRecall (call the memory_search tool, or the memory-recall skill) ONLY if:\n- References past work, decisions, or context (\"the X from before\", \"that bug\", \"continue\")\n- Touches saved preferences/conventions/patterns (coding style, tool choice, habits)\n- Contains ambiguous historical terms a stored memory could disambiguate\n\nSkip if:\n- Self-contained, trivial, greeting, or meta-question\n- Current conversation has enough context\n- Already recalled on this topic this session, unchanged since\n\nMultiple recalls across turns are fine. Zero recalls all session is fine. Judge actual usefulness, not reflex."
+  },
+  "nudge": {
+    "enabled": true,
+    "saveKeywords": ["记住", "记着", "别忘了", "记一下", "remember", "don't forget", "note that"],
+    "recallKeywords": ["记得", "之前", "上次", "刚才", "那个", "continue", "recall", "earlier", "the bug from before"],
+    "savePrompt": "Detected intent to save info. Use the memory_store tool (pick category, use visibility=private for sensitive data).",
+    "recallPrompt": "This message may need historical context. If reasoned recall judges relevant, use the memory_search tool."
+  },
+  "sessionStart": {
+    "profileEnabled": true,
+    "recentActivityEnabled": true,
+    "timeEnabled": true
+  }
+}

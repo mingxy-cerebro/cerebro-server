@@ -1,8 +1,14 @@
 // Cerebro plugin config — ported from plugins/opencode/src/config.ts
 // Loads: DEFAULTS -> ~/.config/cerebro/config.json -> env vars (highest priority)
-import { readFileSync } from "node:fs";
+//
+// Injection-content config (recall prompt, nudge keywords, sessionStart toggles)
+// is separate: ~/.zcode/cerebro.json, three-level fallback mirroring the
+// claude-code plugin (~/.claude/cerebro.json):
+//   user file > auto-init from bundled config.default.json > bundled default
+import { readFileSync, copyFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const DEFAULTS = {
   connection: {
@@ -116,4 +122,35 @@ export function loadConfig() {
     config.logging.logDir = config.logging.logDir.replace(/^~/, homedir());
   }
   return config;
+}
+
+// ── Injection-content config (zcode-specific, independent from server config) ──
+const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const ZC_USER_CONFIG = join(homedir(), ".zcode", "cerebro.json");
+const ZC_BUNDLED_CONFIG = join(PLUGIN_ROOT, "config.default.json");
+
+const INJECTION_FALLBACK = {
+  language: "en",
+  recall: { enabled: true },
+  nudge: { enabled: true },
+  sessionStart: { profileEnabled: true, recentActivityEnabled: true, timeEnabled: true },
+};
+
+export function loadInjectionConfig() {
+  // 1. User config exists → read it
+  try {
+    return JSON.parse(readFileSync(ZC_USER_CONFIG, "utf-8"));
+  } catch {}
+  // 2. First run → auto-initialize by copying bundled default
+  try {
+    mkdirSync(dirname(ZC_USER_CONFIG), { recursive: true });
+    copyFileSync(ZC_BUNDLED_CONFIG, ZC_USER_CONFIG);
+    return JSON.parse(readFileSync(ZC_USER_CONFIG, "utf-8"));
+  } catch {}
+  // 3. Fallback → read bundled default directly
+  try {
+    return JSON.parse(readFileSync(ZC_BUNDLED_CONFIG, "utf-8"));
+  } catch {
+    return structuredClone(INJECTION_FALLBACK);
+  }
 }

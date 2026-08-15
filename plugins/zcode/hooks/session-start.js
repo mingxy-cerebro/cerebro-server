@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { loadConfig, DEFAULTS } from "./lib/config.js";
+import { loadConfig, loadInjectionConfig, DEFAULTS } from "./lib/config.js";
 import { CerebroClient } from "./lib/cerebro-client.js";
 import { logInfo, logError, logDebug, logWarn } from "./lib/logger.js";
 import {
@@ -22,6 +22,7 @@ import {
   getProjectTag,
   detectProjectName,
   detectProjectRoot,
+  toRemoteProjectPath,
   extractUserRequest,
   formatRelativeAge,
   truncateAtBoundary,
@@ -66,9 +67,13 @@ function emitEmpty() {
 }
 
 // Build the [CEREBRO-MEMORY] block — port of buildMemoryInjection (hooks.ts:240-320)
-async function buildInjection(client, projectPath, query, config) {
+async function buildInjection(client, projectPath, query, config, injectionCfg) {
   const maxChars = config.content?.maxContentChars ?? 30000;
   const ic = config.injection ?? {};
+  const sc = injectionCfg?.sessionStart ?? {};
+  const profileEnabled = sc.profileEnabled !== false;
+  const recentEnabled = sc.recentActivityEnabled !== false;
+  const timeEnabled = sc.timeEnabled !== false;
   const recentCount = ic.recentCount || 5;
   const searchCount = ic.searchCount || 10;
   const recentTruncate = ic.recentTruncateChars || 0; // 0 = no truncation
@@ -85,14 +90,27 @@ async function buildInjection(client, projectPath, query, config) {
 
   // Three concurrent fetches with degraded timeouts — must never block session
   const [profile, projectMemories, searchResults] = await Promise.all([
-    withTimeout(client.getInjection(projectPath), profileTimeout, null),
-    withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, []),
+    profileEnabled
+      ? withTimeout(client.getInjection(projectPath), profileTimeout, null)
+      : Promise.resolve(null),
+    recentEnabled
+      ? withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, [])
+      : Promise.resolve([]),
     query
       ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath), searchTimeout, [])
       : Promise.resolve([]),
   ]);
 
-  const sections = ["[CEREBRO-MEMORY]", ""];
+  const sections = ["[CEREBRO-MEMORY]"];
+
+  // 0. Current time header (port of claude-code CEREBRO-TIME, local timezone)
+  if (timeEnabled) {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][now.getDay()];
+    sections.push(`[CEREBRO-TIME] ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())} ${weekday}`);
+  }
+  sections.push("");
 
   // 1. User preferences / profile
   if (profile?.content) {
@@ -145,9 +163,11 @@ async function buildInjection(client, projectPath, query, config) {
   };
 }
 
-// Try to derive a query from the first user message in the transcript.
-// zcode SessionStart fires BEFORE the first user turn, so transcript may be
-// empty (cold start) — that's fine, we degrade to project-name query.
+// Try to derive a query from the LAST user message in the transcript.
+// zcode SessionStart fires BEFORE the first user turn on startup, so the
+// transcript may be empty (cold start) — we degrade to project-name query.
+// On resume/compact the transcript holds history: the last user message is
+// the closest match to what the user is about to continue working on.
 async function deriveQuery(input, projectPath) {
   const transcriptPath = input?.transcript_path;
   if (transcriptPath) {
@@ -155,6 +175,7 @@ async function deriveQuery(input, projectPath) {
       const raw = readFileSync(transcriptPath, "utf-8");
       // JSONL or JSON array
       const lines = raw.split(/\r?\n/).filter(Boolean);
+      let derived = "";
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
@@ -170,10 +191,11 @@ async function deriveQuery(input, projectPath) {
           if (typeof content !== "string") continue;
           const cleaned = extractUserRequest(content);
           if (cleaned && !/^(hi|hello|hey|你好|嗨|嗯|ok|okay|好的|收到|\s*)$/i.test(cleaned.trim())) {
-            return cleaned.slice(0, 500);
+            derived = cleaned.slice(0, 500); // keep scanning — last one wins
           }
         } catch {}
       }
+      if (derived) return derived;
     } catch {}
   }
 
@@ -222,6 +244,7 @@ function spawnWebServer(port) {
 async function main() {
   const input = await readStdin();
   const config = loadConfig();
+  const injectionCfg = loadInjectionConfig();
 
   if (!config.connection.apiKey) {
     const msg =
@@ -251,10 +274,13 @@ async function main() {
     return;
   }
 
-  // Resolve project path: prefer cwd from hook input, fallback to CLAUDE_PROJECT_DIR env
+  // Resolve project path: prefer cwd from hook input, fallback to CLAUDE_PROJECT_DIR env.
+  // localRoot stays native (file IO); projectPath is canonicalized (/mnt/<drive>/...
+  // on Windows) so WSL-side producers of memory see the same project.
   const rawPath = input?.cwd || process.env.CLAUDE_PROJECT_DIR || process.env.OMEM_PROJECT_DIR || "";
-  const projectPath = rawPath ? detectProjectRoot(rawPath) : "";
-  const query = await deriveQuery(input, projectPath);
+  const localRoot = rawPath ? detectProjectRoot(rawPath) : "";
+  const projectPath = localRoot ? toRemoteProjectPath(localRoot) : "";
+  const query = await deriveQuery(input, localRoot);
 
   logInfo("SessionStart building injection", {
     projectPath: projectPath || "(none)",
@@ -262,7 +288,7 @@ async function main() {
   });
 
   try {
-    const injection = await buildInjection(client, projectPath, query, config);
+    const injection = await buildInjection(client, projectPath, query, config, injectionCfg);
     const hasContent =
       injection.profileCount > 0 || injection.memoryCount > 0 || injection.projectMemoryCount > 0;
 
