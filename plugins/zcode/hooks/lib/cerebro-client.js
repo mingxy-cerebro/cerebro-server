@@ -188,7 +188,10 @@ export class CerebroClient {
       this.apiKey,
       `/v1/recall-events`,
       { method: "POST", body: JSON.stringify(params) },
-      10000,
+      // Short budget: this call is fire-and-forget telemetry from hooks whose
+      // own timeout is 10s — a slow backend must never hold a hook process
+      // open near its kill deadline.
+      3000,
     );
   }
 
