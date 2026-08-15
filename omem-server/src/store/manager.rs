@@ -7,7 +7,7 @@ use crate::domain::error::OmemError;
 use crate::domain::space::{MemberRole, Space, SpaceType};
 use crate::ingest::session::SessionStore;
 
-const DEFAULT_MAX_CACHED: usize = 20;
+const DEFAULT_MAX_CACHED: usize = 128;
 
 struct CacheEntry {
     store: Arc<LanceStore>,
@@ -66,13 +66,26 @@ impl StoreManager {
     }
 
     pub async fn get_store(&self, tenant_id: &str) -> Result<Arc<LanceStore>, OmemError> {
-        let mut cache = self.cache.lock().await;
-
-        if let Some(entry) = cache.get_mut(tenant_id) {
-            entry.last_accessed = std::time::Instant::now();
-            return Ok(entry.store.clone());
+        // Fast path under lock
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(entry) = cache.get_mut(tenant_id) {
+                entry.last_accessed = std::time::Instant::now();
+                return Ok(entry.store.clone());
+            }
         }
 
+        // Slow path: open + init OUTSIDE the global lock (init is read-only in steady state)
+        let uri = format!("{}/{}", self.base_uri, tenant_id);
+        let store = LanceStore::new(&uri).await?;
+        store.init_table().await?;
+        let store = Arc::new(store);
+
+        // Write back under lock; concurrent winner takes precedence
+        let mut cache = self.cache.lock().await;
+        if let Some(entry) = cache.get_mut(tenant_id) {
+            return Ok(entry.store.clone());
+        }
         if cache.len() >= self.max_cached {
             let oldest_key = cache
                 .iter()
@@ -83,12 +96,6 @@ impl StoreManager {
                 cache.remove(&key);
             }
         }
-
-        let uri = format!("{}/{}", self.base_uri, tenant_id);
-        let store = LanceStore::new(&uri).await?;
-        store.init_table().await?;
-        let store = Arc::new(store);
-
         cache.insert(
             tenant_id.to_string(),
             CacheEntry {
@@ -174,13 +181,25 @@ impl StoreManager {
     }
 
     pub async fn get_session_store(&self, tenant_id: &str) -> Result<Arc<SessionStore>, OmemError> {
-        let mut cache = self.session_cache.lock().await;
-
-        if let Some(entry) = cache.get_mut(tenant_id) {
-            entry.last_accessed = std::time::Instant::now();
-            return Ok(entry.store.clone());
+        // Fast path under lock
+        {
+            let mut cache = self.session_cache.lock().await;
+            if let Some(entry) = cache.get_mut(tenant_id) {
+                entry.last_accessed = std::time::Instant::now();
+                return Ok(entry.store.clone());
+            }
         }
 
+        // Slow path: open + init OUTSIDE the global lock (init is read-only in steady state)
+        let uri = format!("{}/personal/{}", self.base_uri, tenant_id);
+        let store = Arc::new(SessionStore::new(&uri).await?);
+        store.init_table().await?;
+
+        // Write back under lock; concurrent winner takes precedence
+        let mut cache = self.session_cache.lock().await;
+        if let Some(entry) = cache.get_mut(tenant_id) {
+            return Ok(entry.store.clone());
+        }
         if cache.len() >= self.max_cached {
             let oldest_key = cache
                 .iter()
@@ -191,11 +210,6 @@ impl StoreManager {
                 cache.remove(&key);
             }
         }
-
-        let uri = format!("{}/personal/{}", self.base_uri, tenant_id);
-        let store = Arc::new(SessionStore::new(&uri).await?);
-        store.init_table().await?;
-
         cache.insert(
             tenant_id.to_string(),
             SessionCacheEntry {

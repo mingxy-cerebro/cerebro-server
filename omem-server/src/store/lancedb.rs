@@ -390,22 +390,6 @@ impl LanceStore {
         self.ensure_recall_events_indexes().await?;
         self.ensure_recall_items_indexes().await?;
 
-        // One-time purge of previously soft-deleted data
-        match self.table.delete("state = 'deleted'").await {
-            Ok(_) => tracing::info!("Purged soft-deleted rows"),
-            Err(e) => tracing::warn!("Failed to purge deleted rows (non-critical): {e}"),
-        }
-
-        // Startup: rebuild all indices to clean up accumulated index fragment UUIDs.
-        // This is safe and idempotent: drop all → prune orphaned files → recreate needed indices.
-        // Without this, index UUID directories accumulate indefinitely (10K+ observed).
-        if let Err(e) = self.rebuild_indices().await {
-            tracing::warn!(error = %e, "startup: rebuild_indices failed, falling back to optimize");
-            if let Err(e) = self.optimize().await {
-                tracing::warn!(error = %e, "startup_optimize_failed");
-            }
-        }
-
         Ok(())
     }
 
@@ -2512,8 +2496,7 @@ impl LanceStore {
         Ok(())
     }
 
-    /// Rebuild all indices from scratch by dropping every existing index, pruning orphaned
-    /// index files from disk, then recreating only the indices we actually need.
+    /// Manual maintenance only — no longer called from init_table (was: per-init drop+retrain caused lock-held multi-second cold starts and index UUID churn).
     ///
     /// This is the nuclear option for cleaning up index fragment accumulation.
     /// Triggered at startup when fragment count exceeds INDEX_FRAGMENT_THRESHOLD.
