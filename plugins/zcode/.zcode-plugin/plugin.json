@@ -1,6 +1,6 @@
 {
   "name": "cerebro",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Cerebro persistent memory for ZCode — session-start memory injection (profile + project + semantic), reasoned-recall instruction + keyword nudge, recall auto-approval, incremental session archival at stop. Powered by Cerebro (omem) backend.",
   "author": { "name": "mingxy-cerebro", "email": "hi@cerebro.dev" },
   "license": "Apache-2.0",
