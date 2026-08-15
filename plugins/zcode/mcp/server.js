@@ -594,7 +594,22 @@ async function handleMessage(msg) {
   const params = msg.params || {};
 
   // Notifications (no id) never get a response
-  if (id === null) return;
+  if (id === null) {
+    // MCP spec: after the client's initialized notification, a server with
+    // logging capability may push notifications/message log notifications.
+    if (method === "notifications/initialized") {
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: {
+          level: "info",
+          logger: "cerebro",
+          data: `🧠 Cerebro v${VERSION} connected`,
+        },
+      });
+    }
+    return;
+  }
 
   try {
     switch (method) {
@@ -604,7 +619,7 @@ async function handleMessage(msg) {
           id,
           result: {
             protocolVersion: params.protocolVersion || "2024-11-05",
-            capabilities: { tools: {} },
+            capabilities: { tools: {}, logging: {} },
             serverInfo: { name: "cerebro-zcode", version: VERSION },
           },
         });
