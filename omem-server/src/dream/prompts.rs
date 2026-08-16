@@ -9,15 +9,16 @@ const DREAM_SYSTEM_PROMPT: &str = "\
 1. 去重合并:多条语义重复的旧条目合并为一条,source=merged
 2. 证据更新:旧条目断言被新证据推翻或修订时,更新其内容,source=updated
 3. 新知挖掘:session 中含未落档的持久事实,挖出为新条目,source=added,type 由你归类(user/feedback/project/reference 四选一)
-4. 原样保留:未受影响的旧条目原样保留,source=kept,内容不改写
+4. 原样保留:未受影响的旧条目仅输出 {\"name\":\"...\",\"source\":\"kept\"} 两字段(name 必须与源档逐字一致),其余字段一律省略——调用方会从旧档原样补全
 5. 淘汰:旧档中过时、无价值的条目不进入 entries
 6. type 透传:旧档条目的 frontmatter type 原样保留;无 type 的旧条目和新挖条目由你归类四选一
 
 输出纯 JSON(禁 markdown 围栏、禁 YAML、禁 <think> 标签,直接输出 JSON 对象):
 {\"entries\":[{\"name\":\"条目名\",\"description\":\"一句话摘要\",\"type\":\"user|feedback|project|reference\",\"body\":\"完整内容\",\"links\":[\"相关条目名\"],\"source\":\"merged|updated|added|kept\"}],\"stats\":{\"merged\":N,\"updated\":N,\"added\":N,\"dropped\":N,\"total\":N}}
+其中 source=kept 的条目只输出 {\"name\":\"...\",\"source\":\"kept\"},其余字段全部省略(description/type/body/links 不写)。
 
 自检要求:
-- entries 是完整的新记忆档(包含未变动的条目),不是仅变更清单
+- entries 覆盖旧档中除淘汰外的全部条目(kept 条目以极简形态出现),不是仅变更清单
 - stats.total 必须 == entries 数量
 - merged + updated + added + kept 条数 == total
 - dropped = 旧档中被淘汰的条目数
@@ -80,6 +81,6 @@ mod tests {
         assert!(system.contains("merged|updated|added|kept"));
         assert!(system.contains("user|feedback|project|reference"));
         assert!(system.contains("透传"));
-        assert!(system.contains("完整的新记忆档"));
+        assert!(system.contains("kept 的条目只输出"));
     }
 }

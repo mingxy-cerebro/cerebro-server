@@ -21,6 +21,8 @@ struct ChatRequest {
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Thinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Clone)]
@@ -62,6 +64,7 @@ pub struct OpenAICompatLlm {
     model: String,
     response_format: Option<ResponseFormat>,
     enable_thinking: Option<bool>,
+    max_tokens: Option<u32>,
 }
 
 fn resolve_chat_url(base_url: &str) -> String {
@@ -109,6 +112,7 @@ impl OpenAICompatLlm {
                 .clone()
                 .map(|t| ResponseFormat { format_type: t }),
             enable_thinking: Some(false),
+            max_tokens: None,
         })
     }
 
@@ -144,6 +148,7 @@ impl OpenAICompatLlm {
             model: config.recall_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
+            max_tokens: None,
         })
     }
 
@@ -179,6 +184,7 @@ impl OpenAICompatLlm {
             model: config.profile_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
+            max_tokens: None,
         })
     }
 
@@ -215,6 +221,8 @@ impl OpenAICompatLlm {
             model: config.dream_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
+            // dream 输出 = 完整记忆档 JSON,默认输出上限(~4k)会掐断;8192 是 deepseek 支持的安全档
+            max_tokens: Some(8192),
         })
     }
 
@@ -237,6 +245,7 @@ impl OpenAICompatLlm {
                 let thinking_type = if v { "enabled".to_string() } else { "disabled".to_string() };
                 Thinking { thinking_type }
             }),
+            max_tokens: self.max_tokens,
         }
     }
 }

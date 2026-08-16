@@ -44,9 +44,10 @@ pub enum EntrySource {
     Kept,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryType {
+    #[default]
     User,
     Feedback,
     Project,
@@ -56,9 +57,12 @@ pub enum EntryType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamEntry {
     pub name: String,
+    /// kept 条目免重写(输出体积瘦身):LLM 只需给 name+source,其余字段缺省,调用方从旧档原样补全
+    #[serde(default)]
     pub description: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub entry_type: EntryType,
+    #[serde(default)]
     pub body: String,
     #[serde(default)]
     pub links: Vec<String>,
@@ -342,6 +346,19 @@ mod tests {
             sessions: vec!["session1".to_string()],
             since: Some("2026-08-15T00:00:00Z".to_string()),
         }
+    }
+
+    #[test]
+    fn kept_entry_minimal_form_deserializes() {
+        // kept 免重写:LLM 只给 name+source,缺省字段由 serde default 兜住,调用方从旧档补全
+        let entries: Vec<DreamEntry> =
+            serde_json::from_str(r#"[{"name":"x","source":"kept"}]"#).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "x");
+        assert_eq!(entries[0].source, EntrySource::Kept);
+        assert_eq!(entries[0].body, "");
+        assert_eq!(entries[0].description, "");
+        assert_eq!(entries[0].links, Vec::<String>::new());
     }
 
     // ── validate_request ─────────────────────────────────────────

@@ -85,7 +85,7 @@ spec 文档落地 → domain model 入档 → TDD 绿 → 手测一轮 POST/GET 
 | **DreamJob** | 一次 Dream 的运行记录:`{id, tenant_id, status, result?, error?, created_at, started_at?, completed_at?}`。生命周期:pending → running → completed / failed。 |
 | **DreamStatus** | job 状态枚举:pending / running / completed / failed。 |
 | **DreamResult** | 引擎产出:`{entries: DreamEntry[], stats: DreamStats}`。纯 JSON。 |
-| **DreamEntry** | 新记忆档中的一条:`{name, description, type, body, links[], source}`。source ∈ {merged, updated, added, kept}。 |
+| **DreamEntry** | 新记忆档中的一条:`{name, description, type, body, links[], source}`。source ∈ {merged, updated, added, kept}。kept 条目允许极简形态 `{name, source}`(其余字段缺省,调用方补全,见 D-1b)。 |
 | **EntrySource** | 条目来源标记:merged(多条旧条目合并)/ updated(旧条目被新证据修订)/ added(从 sessions 新挖)/ kept(原样保留,未受影响)。 |
 | **EntryType** | 条目记忆类型,四类枚举:user(用户画像)/ feedback(工作指导)/ project(项目动态)/ reference(外部指针)。源档 frontmatter 的 type 透传保留;新挖条目(added)由 LLM 归类四选一。 |
 | **DreamStats** | `{merged, updated, added, dropped, total}`。dropped=旧档中被判定淘汰的条数;total=entries 总数(含 kept)。 |
@@ -209,6 +209,7 @@ omem-server/src/llm/openai_compat.rs — OpenAICompatLlm::new_dream 构造器
 | ADR-3 | 任务级超时 600s | §6 推演:最坏 540s + 余量 | 已定 |
 | ADR-4 | dream_semaphore = Semaphore(1),队列上限 8 → 429 | 单 LLM 通道并行无益;3.4Gi 小机防堆积;imports 同款 semaphore 手法 | 已定 |
 | D-1 | **entries = 完整新记忆档**(未变条目 source=kept 一并返回),而非"仅变更条目" | stats.total 独立于 m+u+a 存在,暗示全量;调用方拿 entries 可直接整体替换记忆档文件,免本地合并逻辑;diff 呈报靠 source 标记;与官方 platform dreams 产出完整新 store 同构 | **已批复(2026-08-16)** |
+| D-1b | kept 条目免重写:kept 仅输出 `{name, source}` 两字段(name 与源档逐字一致),description/type/body/links 缺省;调用方从旧档按 name 原样补全 | D-1 全量重写在 30+ 条目记忆档下输出天然 >4k,叠加默认输出上限导致 JSON 被掐断(首夜事故);瘦身 80%+ 且记忆档越滚越大也扛得住 | **修订(2026-08-16 首夜事故后)** |
 | D-2 | GET 归属校验:非本人 job 返回 404(imports 的 get_import 现无归属校验,dream 不抄这一点) | id 可枚举探测,跨租户 403 会泄露存在性 | **已批复(2026-08-16)** |
 | ADR-5 | DreamEntry 保留 `type` 字段(user/feedback/project/reference 四类):源档 frontmatter type 透传,新挖条目 LLM 归类 | 调用方源档是带 type 的 Markdown frontmatter;全量返回若丢 type,本地补装时类型信息蒸发,记忆召回行为会变 | **已批复(师尊补刀,2026-08-16)** |
 | ADR-6 | dream 引擎走 **deepseek 官方 API** 独立通道(`OMEM_DREAM_LLM_*` 配置组),不走 opencode zen 免费通道,不动 profile_llm 现状 | zen 免费通道并发受限且不稳定,dream 任务跑一半断=白梦;官方通道稳定;解耦后 profile 行为零变化 | **师尊急令(2026-08-16)** |
@@ -224,6 +225,7 @@ omem-server/src/llm/openai_compat.rs — OpenAICompatLlm::new_dream 构造器
 | 2026-08-16 | 手测验收通过(§10 勾选)。记录:①手测借 siliconflow Qwen3-8B 打通管线,生产换 deepseek 官方 key;Qwen 对 updated 条目标记 source 但 body 未改写——生产首晚重点盯 deepseek 同场景,不改写则 prompt 需加强 ②drvfs(/mnt/d)上 LanceDB 写后读丢元数据,服务数据目录必须在 ext4(WSL home 或服务器),.dream-mt 手测目录已清理 |
 | 2026-08-16 | 玄机评审落地:P1-1 /v1/events 挪入 authed_routes(EventSource 走 api_key query,存量消费方需加参数);P1-2 payload 字节上限 512KB(超限 400 Validation——项目错误表无 422 变体,以 400 承载);P2-2 dream LLM Noop 化启动警告日志;P2-1 TOCTOU/P2-4 evict 空跑 不修记录在案;P2-3 型号名核实转部署清单(§13) |
 | 2026-08-16 | P2-2 落地偏差回正:`create_dream_llm_service` 原返回 NoopLlm 被 main 包成 Some,导致 key 未配时启动 warn 静音 + spawn 层 400 防线失效(Noop 跑成 failed job)。改为返回 `Option`,未配置= None → 受理层 400 + 启动 `dream LLM is Noop` warn 双达成 |
+| 2026-08-16 | 首夜真梦梦碎修复(job 1d24164e failed: JSON EOF——输出被掐断):双刀落:①`new_dream` 通道加 `max_tokens: 8192`(deepseek 默认输出上限 ~4k,ChatRequest 透传,其余通道 None 不受影响);②kept 条目免重写(D-1b):prompt 要求 kept 仅输出 name+source 两字段,serde 层 description/type/body/links 加 default 兜缺省,调用方从旧档按 name 原样补全。输出体积降 80%+ |
 
 ## 10. 验收清单
 
