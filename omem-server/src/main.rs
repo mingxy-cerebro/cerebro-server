@@ -6,7 +6,7 @@ use omem_server::api::{build_router, AppState};
 use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
-use omem_server::llm::{create_llm_service, create_profile_llm_service, create_recall_llm_service, LlmService};
+use omem_server::llm::{create_dream_llm_service, create_llm_service, create_profile_llm_service, create_recall_llm_service, LlmService};
 use omem_server::store::{SpaceStore, StoreManager, TenantStore};
 use omem_server::domain::category::CategoryRegistry;
 use omem_server::profile_v2::store::ProfileStore;
@@ -90,7 +90,7 @@ async fn main() {
         Ok(svc) => Some(Arc::from(svc)),
         Err(_) => None,
     };
-    let profile_v2_service = Arc::new(ProfileV2Service::new(profile_store.clone(), profile_llm, &config));
+    let profile_v2_service = Arc::new(ProfileV2Service::new(profile_store.clone(), profile_llm.clone(), &config));
     let induction_engine = Arc::new(InductionEngine::new(profile_v2_service.clone()));
     let injection_builder = Arc::new(InjectionBuilder::new(profile_v2_service.clone()));
     tracing::info!(
@@ -135,6 +135,17 @@ async fn main() {
             .expect("failed to create recall LLM service"),
     );
 
+    let dream_llm: Option<Arc<dyn LlmService>> = match create_dream_llm_service(&config).await {
+        Ok(svc) => svc.map(Arc::from),
+        Err(e) => {
+            tracing::warn!(error = %e, "dream LLM init failed — /v1/dreams unavailable");
+            None
+        }
+    };
+    if dream_llm.is_none() {
+        tracing::warn!("dream LLM is Noop (key empty) — set OMEM_DREAM_LLM_* to enable /v1/dreams");
+    }
+
     let state = Arc::new(AppState {
         store_manager,
         tenant_store,
@@ -142,6 +153,8 @@ async fn main() {
         embed,
         llm,
         recall_llm,
+        dream_llm,
+        dream_jobs: Arc::new(omem_server::dream::DreamJobStore::new()),
         config: config.clone(),
         import_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
         reconcile_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),

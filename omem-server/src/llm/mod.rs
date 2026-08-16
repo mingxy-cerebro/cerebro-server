@@ -50,6 +50,21 @@ pub async fn create_profile_llm_service(config: &OmemConfig) -> Result<Box<dyn L
     }
 }
 
+/// key 未配或 provider 不识别 → None(受理层 400 "dream requires dream LLM",SPEC.md §3)。
+/// 有别于 profile 通道的 NoopLlm 兜底:dream 是用户直调 API,Noop 塞进 Some 会绕过
+/// DreamJobStore::spawn 的 None 防线,变成跑完才失败的 job。
+pub async fn create_dream_llm_service(
+    config: &OmemConfig,
+) -> Result<Option<Box<dyn LlmService>>, OmemError> {
+    if config.dream_llm_api_key.is_empty() {
+        return Ok(None);
+    }
+    match config.dream_llm_provider.as_str() {
+        "openai-compatible" => Ok(Some(Box::new(OpenAICompatLlm::new_dream(config)?))),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

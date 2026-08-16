@@ -127,6 +127,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::get_category).put(handlers::update_category).delete(handlers::delete_category),
         )
         .route("/v1/lifecycle/trigger", post(handlers::trigger_lifecycle))
+        .route("/v1/dreams", post(handlers::create_dream))
+        .route("/v1/dreams/{id}", get(handlers::get_dream))
+        // SSE 事件流挪入鉴权域(P1-1):auth_middleware 支持 api_key query 参数,EventSource 可用
+        .route("/v1/events", get(handlers::sse_events))
         .route("/v1/scheduler/status", get(handlers::get_scheduler_status))
         .route("/v1/scheduler/lifecycle/pause", post(handlers::pause_lifecycle))
         .route("/v1/scheduler/lifecycle/resume", post(handlers::resume_lifecycle))
@@ -167,8 +171,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/connectors/github/webhook",
             post(handlers::github_webhook),
-        )
-        .route("/v1/events", get(handlers::sse_events));
+        );
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

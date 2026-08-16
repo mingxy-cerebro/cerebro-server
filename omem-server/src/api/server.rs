@@ -26,6 +26,10 @@ pub struct AppState {
     pub embed: Arc<dyn EmbedService>,
     pub llm: Arc<dyn LlmService>,
     pub recall_llm: Arc<dyn LlmService>,
+    /// Dream LLM 通道(deepseek 官方 API):dream 引擎专用,与 profile_llm 解耦(ADR-2/ADR-6)。
+    pub dream_llm: Option<Arc<dyn LlmService>>,
+    /// Dream job 内存表(ADR-1:不持久化)。
+    pub dream_jobs: Arc<crate::dream::DreamJobStore>,
     pub config: OmemConfig,
     pub import_semaphore: Arc<Semaphore>,
     pub reconcile_semaphore: Arc<Semaphore>,

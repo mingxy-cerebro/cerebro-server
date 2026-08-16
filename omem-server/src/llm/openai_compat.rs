@@ -182,6 +182,42 @@ impl OpenAICompatLlm {
         })
     }
 
+    /// Dream 引擎专用通道(deepseek 官方 API,ADR-6):与 profile_llm 解耦。
+    pub fn new_dream(config: &OmemConfig) -> Result<Self, OmemError> {
+        let base_url = config.dream_llm_base_url.trim_end_matches('/');
+        if base_url.is_empty() {
+            return Err(OmemError::Llm(
+                "dream_llm_base_url is required for openai-compatible provider".to_string(),
+            ));
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if !config.dream_llm_api_key.is_empty() {
+            let auth_value = format!("Bearer {}", config.dream_llm_api_key);
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&auth_value)
+                    .map_err(|e| OmemError::Llm(format!("invalid api key header: {e}")))?,
+            );
+        }
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(READ_TIMEOUT)
+            .default_headers(headers)
+            .build()
+            .map_err(|e| OmemError::Llm(format!("failed to build http client: {e}")))?;
+
+        Ok(Self {
+            client,
+            url: resolve_chat_url(base_url),
+            model: config.dream_llm_model.clone(),
+            response_format: None,
+            enable_thinking: Some(false),
+        })
+    }
+
     fn build_request(&self, system: &str, user: &str) -> ChatRequest {
         ChatRequest {
             model: self.model.clone(),

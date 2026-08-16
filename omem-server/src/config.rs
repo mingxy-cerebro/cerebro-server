@@ -91,6 +91,12 @@ pub struct OmemConfig {
     pub profile_max_global_preferences: usize,
     pub profile_max_project_preferences: usize,
     pub profile_dormant_days: u32,
+
+    // Dream engine configuration (ADR-6: deepseek 官方 API,与 profile_llm 解耦)
+    pub dream_llm_provider: String,
+    pub dream_llm_api_key: String,
+    pub dream_llm_model: String,
+    pub dream_llm_base_url: String,
 }
 
 impl Default for OmemConfig {
@@ -158,6 +164,10 @@ impl Default for OmemConfig {
             profile_max_global_preferences: 20,
             profile_max_project_preferences: 10,
             profile_dormant_days: 90,
+            dream_llm_provider: String::new(),
+            dream_llm_api_key: String::new(),
+            dream_llm_model: "deepseek-v4-flash".to_string(),
+            dream_llm_base_url: "https://api.deepseek.com".to_string(),
         }
     }
 }
@@ -350,6 +360,10 @@ impl OmemConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.profile_max_project_preferences),
+            dream_llm_provider: env::var("OMEM_DREAM_LLM_PROVIDER").unwrap_or(defaults.dream_llm_provider),
+            dream_llm_api_key: env::var("OMEM_DREAM_LLM_API_KEY").unwrap_or(defaults.dream_llm_api_key),
+            dream_llm_model: env::var("OMEM_DREAM_LLM_MODEL").unwrap_or(defaults.dream_llm_model),
+            dream_llm_base_url: env::var("OMEM_DREAM_LLM_BASE_URL").unwrap_or(defaults.dream_llm_base_url),
             profile_dormant_days: env::var("OMEM_PROFILE_DORMANT_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())

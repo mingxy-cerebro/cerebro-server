@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod connectors;
 pub mod domain;
+pub mod dream;
 pub mod embed;
 pub mod ingest;
 pub mod lifecycle;

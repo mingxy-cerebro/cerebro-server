@@ -1,4 +1,5 @@
 pub mod categories;
+pub mod dreams;
 pub mod events;
 pub mod files;
 pub mod github;
@@ -21,6 +22,7 @@ pub use github::{github_connect, github_webhook};
 pub use imports::{
     create_import, cross_reconcile, get_import, list_imports, rollback_import, trigger_intelligence,
 };
+pub use dreams::{create_dream, get_dream};
 pub use lifecycle::trigger_lifecycle;
 pub use memory::{
     backfill_project_path, batch_delete, batch_get_memories, batch_update_visibility,
