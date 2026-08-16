@@ -3,6 +3,7 @@
 // Runs independently after Claude Code terminates. No stdin/stdout to Claude.
 import { existsSync } from "node:fs";
 import { config, flushSessionIngest, logDebug, logError } from "./common.mjs";
+import { judgeMaterial, readState, runDream } from "./dream.mjs";
 
 const tp = process.env.CEREBRO_TP || "";
 const sid = process.env.CEREBRO_SID || "";
@@ -26,6 +27,19 @@ if (result.ok) {
   logDebug(`detached flush: ok count=${result.count} sid=${sid}`);
 } else {
   logError(`detached flush: failed sid=${sid} http=${result.status || "?"} (cursor NOT advanced, will retry next session)`);
+}
+
+// ─── dream trigger: session just ended = new material; judge then run ────────
+// This detached worker already survives CC exit, so it also survives the
+// ≤660s dream poll — no second spawn needed.
+try {
+  const judge = judgeMaterial(readState());
+  if (judge.ok) {
+    logDebug(`dream: material ready (new=${judge.count}), dreaming after flush`);
+    await runDream();
+  }
+} catch (e) {
+  logError(`dream trigger: ${e?.message || e}`);
 }
 
 process.exit(0);
