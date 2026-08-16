@@ -1,7 +1,7 @@
 {
   "name": "cerebro",
   "description": "Persistent memory for Claude Code — memories survive across sessions, projects, and machines",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": {
     "name": "mingxy-cerebro",
     "email": "hi@cerebro.dev"

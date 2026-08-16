@@ -211,7 +211,7 @@ export function SpacesPage() {
     const userId = newMemberId.trim()
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     if (!uuidRegex.test(userId)) {
-      toast.error("用户ID格式不正确，请输入有效的 UUID（如：c60beb98-7aab-4985-8c1d-29ffd6aff75a）")
+      toast.error("用户ID格式不正确，请输入有效的 UUID（如：123e4567-e89b-42d3-a456-426614174000）")
       return
     }
     setAddingMember(true)
