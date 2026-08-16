@@ -639,11 +639,11 @@ export function ProfilePage() {
                 ))}
               </div>
               {totalSlotPages > 1 && (
-                <div className="flex items-center justify-between pt-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                   <p className="text-xs text-muted-foreground">
                     第 {slotPage} / {totalSlotPages} 页 · 共 {allSlotEntries.length} 个分组
                   </p>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <Button
                       variant="outline"
                       size="icon"
@@ -656,20 +656,26 @@ export function ProfilePage() {
                     >
                       <ChevronLeft className="size-4" />
                     </Button>
-                    {Array.from({ length: totalSlotPages }, (_, i) => i + 1).map(page => (
-                      <Button
-                        key={page}
-                        variant={page === slotPage ? "default" : "outline"}
-                        size="icon"
-                        className={cn("size-8 text-xs", page === slotPage && "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-0")}
-                        onClick={() => {
-                          setSlotPage(page)
-                          document.getElementById('pref-slot-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                        }}
-                      >
-                        {page}
-                      </Button>
-                    ))}
+                    {Array.from({ length: totalSlotPages }, (_, i) => i + 1)
+                      .filter(page => page === 1 || page === totalSlotPages || Math.abs(page - slotPage) <= 2)
+                      .map((page, i, arr) => (
+                        <span key={page} className="flex items-center">
+                          {i > 0 && arr[i - 1] !== page - 1 && (
+                            <span className="px-1 text-xs text-muted-foreground">...</span>
+                          )}
+                          <Button
+                            variant={page === slotPage ? "default" : "outline"}
+                            size="icon"
+                            className={cn("size-8 text-xs", page === slotPage && "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-0")}
+                            onClick={() => {
+                              setSlotPage(page)
+                              document.getElementById('pref-slot-list')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            }}
+                          >
+                            {page}
+                          </Button>
+                        </span>
+                      ))}
                     <Button
                       variant="outline"
                       size="icon"
@@ -896,7 +902,7 @@ export function ProfilePage() {
                   </div>
 
                   {totalChangelogPages > 1 && (
-                    <div className="flex items-center justify-center gap-2 pt-2">
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
                       <Button
                         variant="outline"
                         size="sm"
@@ -908,17 +914,23 @@ export function ProfilePage() {
                         上一页
                       </Button>
                       <div className="flex items-center gap-1">
-                        {Array.from({ length: totalChangelogPages }, (_, i) => i + 1).map(page => (
-                          <Button
-                            key={page}
-                            variant={changelogPage === page ? "default" : "ghost"}
-                            size="sm"
-                            className="h-7 w-7 text-xs p-0"
-                            onClick={() => setChangelogPage(page)}
-                          >
-                            {page}
-                          </Button>
-                        ))}
+                        {Array.from({ length: totalChangelogPages }, (_, i) => i + 1)
+                          .filter(page => page === 1 || page === totalChangelogPages || Math.abs(page - changelogPage) <= 2)
+                          .map((page, i, arr) => (
+                            <span key={page} className="flex items-center">
+                              {i > 0 && arr[i - 1] !== page - 1 && (
+                                <span className="px-1 text-xs text-muted-foreground">...</span>
+                              )}
+                              <Button
+                                variant={changelogPage === page ? "default" : "ghost"}
+                                size="sm"
+                                className="h-7 w-7 text-xs p-0"
+                                onClick={() => setChangelogPage(page)}
+                              >
+                                {page}
+                              </Button>
+                            </span>
+                          ))}
                       </div>
                       <Button
                         variant="outline"
