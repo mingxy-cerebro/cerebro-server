@@ -23,6 +23,7 @@ const DREAM_DIR = process.env.OMEM_DREAM_DIR || join(HOME, ".cache", "cerebro", 
 const OUT_DIR = join(DREAM_DIR, "output");
 const STATE = join(DREAM_DIR, "state.json");
 const LOCK = join(DREAM_DIR, "trigger.lock");
+const CONF = join(DREAM_DIR, "config.json");
 // ponytail: hardcodes the home-project memory dir as the dream subject; DREAM_MEMORY_DIR
 // escapes hatch for other projects if per-project dreams ever matter
 const MEMORY_DIR = process.env.OMEM_DREAM_MEMORY_DIR || join(HOME, ".claude", "projects", "-home-dongx", "memory");
@@ -38,6 +39,14 @@ const PER_SESSION_CAP = 16 * 1024;    // per-transcript extraction budget
 const LOCK_TTL_MS = 15 * 60 * 1000;   // > 600s server job budget
 const POLL_INTERVAL_MS = 2000;
 const POLL_BUDGET_MS = 660 * 1000;    // > 600s server timeout (ADR-3)
+
+// ─── runtime config: on/off switch + badge TTL ───────────────────────────────
+// Absent file = defaults (on): fresh install dreams without any setup.
+const DEFAULT_CONF = { enabled: true, badge_ttl_secs: 3600 };
+export function readDreamConfig() {
+  try { return { ...DEFAULT_CONF, ...JSON.parse(readFileSync(CONF, "utf8")) }; }
+  catch { return { ...DEFAULT_CONF }; }
+}
 
 // ─── state helpers (tmp+rename atomic) ───────────────────────────────────────
 export function readState() {
@@ -74,7 +83,7 @@ function collectMemory() {
 }
 
 // ─── food: sessions (mechanical extraction, no LLM in hooks) ─────────────────
-function listTranscripts(sinceMs) {
+function listTranscripts() {
   const out = [];
   for (const proj of readdirSync(PROJECTS_DIR)) {
     const dir = join(PROJECTS_DIR, proj);
@@ -114,17 +123,40 @@ function extractTranscript(path) {
 // ─── rhythm judge ────────────────────────────────────────────────────────────
 export function judgeMaterial(state) {
   const last = state?.last_dream_at ? Date.parse(state.last_dream_at) : 0;
-  const sinceMs = last || 0;
-  const newer = listTranscripts(sinceMs).filter((t) => t.mtime > sinceMs && t.mtime > last);
+  const newer = listTranscripts().filter((t) => t.mtime > last);
   const age = Date.now() - last;
   const enoughTime = age >= MIN_INTERVAL_MS;
   const fallback = last > 0 && age >= FALLBACK_MS;
-  return { ok: newer.length >= MIN_NEW_SESSIONS && (enoughTime || !last) || fallback, since: last ? new Date(last).toISOString() : null, count: newer.length };
+  const remaining_ms = last ? Math.max(0, MIN_INTERVAL_MS - age) : null;
+  return { ok: newer.length >= MIN_NEW_SESSIONS && (enoughTime || !last) || fallback, since: last ? new Date(last).toISOString() : null, count: newer.length, remaining_ms };
+}
+
+// ─── statusline badge: all state→label/color decisions live here, bash renders ─
+// off grey / run orange (zombie run >30min falls through) / fail red until TTL /
+// rdy green (gates met) / accumulating `[n/2]·3h 41m` (needs n sessions + time).
+const RUN_ZOMBIE_MS = 30 * 60 * 1000; // > lock TTL 15min + poll 11min: live run can't outlive it
+function fmtRemain(ms) {
+  if (ms == null || ms <= 0) return "";
+  const m = Math.ceil(ms / 60000);
+  return m < 1 ? "<1m" : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+export function badgeLine() {
+  const conf = readDreamConfig();
+  if (!conf.enabled) return { text: "cerebro dream off", color: 90 };
+  const st = readState();
+  const age = st?.updated_at ? Date.now() - Date.parse(st.updated_at) : Infinity;
+  if (st?.phase === "run" && age < RUN_ZOMBIE_MS) return { text: "cerebro dream run", color: 208 };
+  if (st?.phase === "fail" && age < conf.badge_ttl_secs * 1000) return { text: "cerebro dream fail", color: 196 };
+  const judge = judgeMaterial(st);
+  if (judge.ok) return { text: "cerebro dream rdy", color: 71 };
+  const rem = fmtRemain(judge.remaining_ms);
+  return { text: `cerebro dream [${Math.min(judge.count, MIN_NEW_SESSIONS)}/${MIN_NEW_SESSIONS}]${rem ? "·" + rem : ""}`, color: 250 };
 }
 
 // ─── detached main: trigger + poll + persist ─────────────────────────────────
 export async function runDream() {
   if (!config.apiKey) return;
+  if (!readDreamConfig().enabled) { logDebug("dream: disabled by config"); return; }
   if (!acquireLock()) { logDebug("dream: lock held, another window is dreaming"); return; }
   try {
     const prev = readState();
@@ -132,7 +164,7 @@ export async function runDream() {
     if (!judge.ok) { logDebug(`dream: not enough material (new=${judge.count})`); return; }
 
     const memory = collectMemory();
-    const trans = listTranscripts(0).filter((t) => !judge.since || t.mtime > Date.parse(judge.since));
+    const trans = listTranscripts().filter((t) => !judge.since || t.mtime > Date.parse(judge.since));
     const sessions = [];
     let bytes = memory.length;
     for (const t of trans) { // newest first; drop oldest by simply stopping
@@ -233,6 +265,7 @@ export async function fetchOrphanResult(st) {
 
 // ─── direct CLI entry (detached worker) ──────────────────────────────────────
 if (process.argv[1] && basename(process.argv[1]) === "dream.mjs") {
+  if (process.argv[2] === "--badge") { console.log(JSON.stringify(badgeLine())); process.exit(0); }
   if (!existsSync(LOCK) && judgeMaterial(readState()).ok) {
     await runDream();
   }
