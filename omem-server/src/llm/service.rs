@@ -66,6 +66,12 @@ pub async fn complete_json<T: serde::de::DeserializeOwned>(
         Ok(v) => return Ok(v),
         Err(first_err) => {
             tracing::debug!(error = %first_err, len = cleaned.len(), "JSON parse failed, trying repair");
+            // 截断铁证(EOF):LLM 被 max_tokens 掐断,retry 大概率同样截断,先试抢救前缀
+            if first_err.to_string().contains("EOF while parsing") {
+                if let Some(v) = salvage_truncated(&cleaned) {
+                    return Ok(v);
+                }
+            }
         }
     }
 
@@ -88,12 +94,68 @@ pub async fn complete_json<T: serde::de::DeserializeOwned>(
         Ok(v) => return Ok(v),
         Err(retry_err) => {
             tracing::debug!(error = %retry_err, "retry JSON parse failed, trying repair");
+            if retry_err.to_string().contains("EOF while parsing") {
+                if let Some(v) = salvage_truncated(&cleaned) {
+                    return Ok(v);
+                }
+            }
         }
     }
 
     let repaired = try_repair_json(&cleaned);
     serde_json::from_str(&repaired)
         .map_err(|e| OmemError::Llm(format!("JSON parse failed after retry: {e}")))
+}
+
+
+/// 抢救被 max_tokens 截断的 JSON:回退到最后一个完整容器元素的边界,按未闭合栈补全闭合符。
+/// 只在元素级边界切(闭 `}`/`]` 且父层为数组),字段写一半的残条整条丢弃,语义宁缺勿错。
+/// dream 场景丢掉的尾部条目由调用方按 kept(未提及=原样保留)语义兜底,零损失。
+fn salvage_truncated<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    // 切点必须连同当时的栈快照一起记:回退切点后,栈深与扫到末尾时不同
+    let mut last_safe: Option<(usize, Vec<u8>)> = None;
+
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => stack.push(b'{'),
+            b'[' => stack.push(b'['),
+            b'}' | b']' => {
+                stack.pop();
+                if stack.last() == Some(&b'[') {
+                    last_safe = Some((i + 1, stack.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    if stack.is_empty() {
+        return None; // 完整 JSON,截断补救不适用
+    }
+    let (cut, stack_at_cut) = last_safe?;
+    let mut out = s[..cut].to_string();
+    while matches!(out.as_bytes().last(), Some(b',') | Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r')) {
+        out.pop();
+    }
+    for &b in stack_at_cut.iter().rev() {
+        out.push(if b == b'[' { ']' } else { '}' });
+    }
+    let v: T = serde_json::from_str(&out).ok()?;
+    tracing::warn!("LLM JSON truncated by max_tokens; salvaged prefix ({} of {} chars)", out.len(), s.len());
+    Some(v)
 }
 
 fn try_repair_json(s: &str) -> String {
@@ -159,6 +221,40 @@ fn fix_unescaped_chars_in_strings(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct SalvageFixture {
+        entries: Vec<SalvageEntry>,
+    }
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct SalvageEntry {
+        name: String,
+        source: Option<String>,
+    }
+
+    #[test]
+    fn salvage_recovers_complete_prefix_of_truncated_json() {
+        // dream 形状:entries 写到一半被 max_tokens 掐断(字符串内+元素内双残)
+        let truncated = "{\"entries\":[{\"name\":\"a\",\"source\":\"kept\"},{\"name\":\"b\",\"source\":\"kept\"},{\"name\":\"c\",\"body\":\"写一半";
+        let v: SalvageFixture = salvage_truncated(truncated).expect("prefix salvageable");
+        assert_eq!(v.entries.len(), 2); // 残条 c 整条丢弃
+        assert_eq!(v.entries[1].name, "b");
+    }
+
+    #[test]
+    fn salvage_rejects_complete_json() {
+        let complete = "{\"entries\":[{\"name\":\"a\"}]}";
+        let v: Option<SalvageFixture> = salvage_truncated(complete);
+        assert!(v.is_none()); // 栈空 = 未截断,不适用
+    }
+
+    #[test]
+    fn salvage_handles_pretty_printed_truncation() {
+        let pretty = "{\n  \"entries\": [\n    {\"name\": \"a\", \"source\": \"kept\"},\n    {\"name\": \"b\", \"source\": \"kept\"},\n    {\"name\": \"c\", \"body\": \"半条";
+        let v: SalvageFixture = salvage_truncated(pretty).expect("pretty prefix salvageable");
+        assert_eq!(v.entries.len(), 2);
+    }
+
     use super::*;
 
     #[test]

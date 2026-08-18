@@ -51,6 +51,7 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatChoiceMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -221,8 +222,10 @@ impl OpenAICompatLlm {
             model: config.dream_llm_model.clone(),
             response_format: None,
             enable_thinking: Some(false),
-            // dream 输出 = 完整记忆档 JSON,默认输出上限(~4k)会掐断;8192 是 deepseek 支持的安全档
-            max_tokens: Some(8192),
+            // dream 输出 = 完整记忆档 JSON,默认输出上限(~4k)会掐断;记忆档涨大后模型偶发
+            // 忽略 kept 极简规则全文重写,8192 顶格截断(2026-08-18 fail 案)。16384 覆盖到
+            // ~50 条档的全档重写;再超由 complete_json 截断补救兜底(salvage_truncated)。
+            max_tokens: Some(16384),
         })
     }
 
@@ -335,10 +338,13 @@ impl LlmService for OpenAICompatLlm {
                     OmemError::Llm(format!("Failed to parse response: {e}"))
                 })?;
 
-            let content = body
-                .choices
-                .into_iter()
-                .next()
+            let choice = body.choices.into_iter().next();
+            if let Some(fr) = choice.as_ref().and_then(|c| c.finish_reason.as_deref()) {
+                if fr == "length" {
+                    tracing::warn!("LLM output truncated by max_tokens (finish_reason=length)");
+                }
+            }
+            let content = choice
                 .and_then(|c| c.message.content)
                 .unwrap_or_default();
 

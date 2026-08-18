@@ -13,6 +13,8 @@ const DREAM_SYSTEM_PROMPT: &str = "\
 5. 淘汰:旧档中过时、无价值的条目不进入 entries
 6. type 透传:旧档条目的 frontmatter type 原样保留;无 type 的旧条目和新挖条目由你归类四选一
 
+输出预算铁律:输出 token 上限有限,超限会被掐断导致整体失败。因此必须输出紧凑单行 JSON(禁缩进禁换行美化),且 kept 条目严格只给两字段——任何多余输出都是在浪费预算、增加失败风险。
+
 输出纯 JSON(禁 markdown 围栏、禁 YAML、禁 <think> 标签,直接输出 JSON 对象):
 {\"entries\":[{\"name\":\"条目名\",\"description\":\"一句话摘要\",\"type\":\"user|feedback|project|reference\",\"body\":\"完整内容\",\"links\":[\"相关条目名\"],\"source\":\"merged|updated|added|kept\"}],\"stats\":{\"merged\":N,\"updated\":N,\"added\":N,\"dropped\":N,\"total\":N}}
 其中 source=kept 的条目只输出 {\"name\":\"...\",\"source\":\"kept\"},其余字段全部省略(description/type/body/links 不写)。
