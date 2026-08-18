@@ -137,8 +137,8 @@ export function judgeMaterial(state) {
 const RUN_ZOMBIE_MS = 30 * 60 * 1000; // > lock TTL 15min + poll 11min: live run can't outlive it
 function fmtRemain(ms) {
   if (ms == null || ms <= 0) return "";
-  const m = Math.ceil(ms / 60000);
-  return m < 1 ? "<1m" : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+  const m = Math.ceil(ms / 60000); // entry guard ⇒ m ≥ 1
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 export function badgeLine() {
   const conf = readDreamConfig();
