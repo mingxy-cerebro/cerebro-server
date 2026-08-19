@@ -41,6 +41,8 @@ pub enum EntrySource {
     Merged,
     Updated,
     Added,
+    // ponytail: 宽容天花板——LLM 幻觉枚举外值(如 dropped)静默归 kept(不动,最安全);需观测时升级为 warn log
+    #[serde(other)]
     Kept,
 }
 
@@ -359,6 +361,14 @@ mod tests {
         assert_eq!(entries[0].body, "");
         assert_eq!(entries[0].description, "");
         assert_eq!(entries[0].links, Vec::<String>::new());
+    }
+
+    #[test]
+    fn unknown_source_variant_falls_back_to_kept() {
+        // 线上事故:LLM 把 stats 里的 dropped 概念泄漏进 entry.source,serde 报 unknown variant 梦必挂
+        let entries: Vec<DreamEntry> =
+            serde_json::from_str(r#"[{"name":"x","source":"dropped"}]"#).unwrap();
+        assert_eq!(entries[0].source, EntrySource::Kept);
     }
 
     // ── validate_request ─────────────────────────────────────────
