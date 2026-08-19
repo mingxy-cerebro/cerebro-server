@@ -768,32 +768,32 @@ When in doubt about classification:
 - **DENOISE**: Keep conclusions, omit verbose intermediate steps. Drop file line numbers, version numbers, and process trivia.
 - **MERGE**: You MUST group ALL work from the SAME debugging/development session into one entry. "Same session" = same bug investigation, same feature implementation, or same architectural decision chain (diagnose → locate → fix → test → deploy). Do NOT split these into separate entries.
 - **UPSERT**: When "## Existing Memories" section contains a memory about the SAME topic, produce ONE updated entry that merges old + new information. Do NOT create a duplicate.
-- **TIMELINE**: For merged WORK entries, preserve chronological order using `## YYYY-MM-DD HH:MM Title` section headers within the summary.
+- **TIMELINE**: For merged WORK entries, present sub-topics in chronological order. The system automatically prepends `## timestamp topic` headers when storing — you MUST NOT write `## ` level headings in any output field. Use `### Title` sub-headings inside `summary`/`detail` instead.
 - **L1 COVERAGE (MANDATORY)**: `overview` (L1) MUST cover ALL topics in this entry, not just the latest section. When merging or updating, extend the existing arrow timeline to include the new topic. Format: `old_topic→old_topic→new_topic→result`. NEVER overwrite L1 with only the newest section's timeline — the previous topics must remain in the arrow chain. Same rule applies to `l2_content`: must aggregate key facts from ALL sections.
 - **TAG**: Include project name + sub-topic as tags from the ALLOWED_TAGS list (e.g., "programming", "architecture").
-- **SECTION TITLE REUSE**: When updating an existing memory, if the Existing Memories above already contain a `## YYYY-MM-DD HH:MM [topic]` section about the SAME technical topic, you MUST reuse that exact section title (including the project prefix) as your `topic` field. Do NOT invent a new title for the same topic.
+- **TOPIC REUSE (CRITICAL)**: "## Existing Memories" lists the topics already captured for this session as a plain list (heading syntax stripped). Before outputting any topic, scan that list. If your candidate covers the SAME subject as any listed topic — match by MEANING, wording may differ — you MUST copy that listed topic string VERBATIM as your `topic` field. NEVER paraphrase, reword, shorten, or invent a synonym: a reworded topic creates a duplicate section. Only create a new title when NO listed topic matches by meaning. The `topic` field MUST be a single-line plain title — never start it with "#" and never embed line breaks.
 
 **WORK OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
 For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
 ```
-## {工作主题/技术决策}
+### {工作主题/技术决策}
 - **内容**: {简要描述做了什么、为什么、结果如何}
 - **影响范围**: {影响的模块/文件/系统}
 - **结论**: {最终结论或决策}
 ```
-- Each independent technical topic gets its own `## Title` section.
+- Each independent technical topic gets its own `### Title` section (never `## ` — the system adds that level itself when storing).
 - Related topics MUST be merged into one entry (MERGE rule still applies).
 - DENOISE rule still applies: 内容 should be conclusions, not step-by-step process details.
 - Example (Chinese input):
 ```
-## API认证中间件重构
+### API认证中间件重构
 - **内容**: 将auth middleware从layer改为from_fn_with_state模式，支持多租户隔离
 - **影响范围**: api/middleware.rs, api/router.rs, 所有需要认证的handler
 - **结论**: 使用Extension(tenant_id)注入租户ID，性能提升且代码更简洁
 ```
 - Example (English input):
 ```
-## Database Migration to LanceDB 0.27
+### Database Migration to LanceDB 0.27
 - **Content**: Migrated vector storage from custom implementation to LanceDB 0.27 with per-tenant LRU cache
 - **Scope**: store/manager.rs, store/lancedb.rs, ingest pipeline
 - **Decision**: LRU cache with max 20 entries balances memory and latency
@@ -836,7 +836,7 @@ Return ONLY valid JSON array. Each element:
 
 - "topic": Short title (1 sentence) → maps to l0_abstract.
 - "overview": Concise summary in ≤150 chars → maps to l1_overview. For WORK: MUST use arrow timeline format showing progression: `verb phrase→verb phrase→result`. Example: "diagnosed bug→fixed handler→verified→deployed". Each node = what happened, arrows = temporal/causal progression. For EMOTIONAL: brief gist.
-- "detail": Structured narrative in ≤300 chars → maps to l2_content. For WORK: use structured Markdown format (## Title + key-value pairs). For EMOTIONAL: expanded narrative.
+- "detail": Structured narrative in ≤300 chars → maps to l2_content. For WORK: use structured Markdown format (### Title + key-value pairs). For EMOTIONAL: expanded narrative.
 - "summary": Full content → maps to content. WORK ≤500 chars, EMOTIONAL ≤500 chars. WORK must use structured Markdown format.
 - "tags": Max 3 relevant tags selected from the ALLOWED_TAGS list below. Do NOT invent tags. Exclude "session_compress". Most important keywords only.
 - "scope": "public" for WORK, "private" for EMOTIONAL.
@@ -871,7 +871,7 @@ pub fn build_session_extract_prompt_with_memories(
 1. The `topic` field MUST be prefixed with [{name}]. Example: \"[{name}] fix memory leak\"
 2. The `overview` field MUST be prefixed with [{name}]. Example: \"[{name}] 修复内存泄漏的摘要\"
 3. The `detail` field MUST be prefixed with [{name}]. Example: \"[{name}] 修复内存泄漏的详细过程\"
-4. The `summary` field's `## Title` line MUST also be prefixed with [{name}]. Example: \"## [{name}] 修复内存泄漏\""
+4. Inside `summary`/`detail`, prefix `### Title` sub-headings with [{name}]. Example: \"### [{name}] 修复内存泄漏\". Do NOT write `## ` level headings in any field — the system adds the `## timestamp topic` section header itself."
         )
     } else {
         String::new()
@@ -924,6 +924,21 @@ mod session_extract_tests {
     fn test_system_prompt_has_existing_memory_awareness_rule() {
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Existing Memory Awareness"));
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("## Existing Memories"));
+    }
+
+    // 双段头事故后加的禁令：prompt 不得教 LLM 写 `## ` 级标题（系统存储时自己加）
+    #[test]
+    fn test_system_prompt_bans_hash_hash_headings() {
+        assert!(!SESSION_EXTRACT_SYSTEM_PROMPT.contains("## YYYY-MM-DD"), "TIMELINE must not teach ## headings");
+        assert!(!SESSION_EXTRACT_SYSTEM_PROMPT.contains("`## Title`"), "format template must use ### not ##");
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("### {工作主题/技术决策}"));
+    }
+
+    // 措辞漂移双段事故后强化：同主题必须原样复用已列 topic
+    #[test]
+    fn test_system_prompt_has_topic_reuse_rule() {
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("TOPIC REUSE"));
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("VERBATIM"));
     }
 
     #[test]

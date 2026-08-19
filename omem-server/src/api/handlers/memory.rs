@@ -2655,16 +2655,39 @@ async fn fetch_session_work_memory(
     })
 }
 
+/// Strip a stored `## ` heading down to bare topic text for the dedup hint:
+/// "## 2026-08-19 16:57 [proj] topic" → "[proj] topic". Feeding bare text (no
+/// `##`, no timestamp) stops the LLM from parroting heading syntax into its own
+/// topic field — observed live as double `##` headings on appended sections.
+fn bare_topic(heading: &str) -> &str {
+    let t = heading.strip_prefix("## ").unwrap_or(heading);
+    // Optional "YYYY-MM-DD HH:MM " timestamp prefix = 17 ASCII chars
+    let b = t.as_bytes();
+    let has_ts = b.len() > 17
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[4] == b'-'
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[7] == b'-'
+        && b[8..10].iter().all(|c| c.is_ascii_digit())
+        && b[10] == b' '
+        && b[11..13].iter().all(|c| c.is_ascii_digit())
+        && b[13] == b':'
+        && b[14..16].iter().all(|c| c.is_ascii_digit())
+        && b[16] == b' ';
+    if has_ts { &t[17..] } else { t }
+}
+
 /// Build a merged summary string from a slice of memories, capped at 2000 chars.
 /// Content source = `## ` section headers (the topic list), NOT l0+l1: l0 drifts to
 /// the latest topic on every append, which hid older topics from the dedup hint
-/// and let the LLM re-extract them (duplicate sections). Memories without section
-/// headers fall back to l0+l1 so the hint never goes blank.
+/// and let the LLM re-extract them (duplicate sections). Headers are stripped to
+/// bare topic text (see `bare_topic`) so the LLM never sees heading syntax.
+/// Memories without section headers fall back to l0+l1 so the hint never goes blank.
 fn build_merged_summary(memories: &[Memory]) -> String {
     let mut parts = Vec::new();
     let mut total_len = 0usize;
     for m in memories {
-        let topics: Vec<&str> = m.content.lines().filter(|l| l.starts_with("## ")).collect();
+        let topics: Vec<&str> = m.content.lines().filter(|l| l.starts_with("## ")).map(bare_topic).collect();
         let part = if topics.is_empty() {
             format!("[{}] {}: {}", m.updated_at, m.l0_abstract, m.l1_overview)
         } else {
@@ -2728,8 +2751,19 @@ mod dedup_tests {
         let s = build_merged_summary(&[m]);
         assert!(s.contains("topic-a"), "older topic must survive L0 drift: {s}");
         assert!(s.contains("topic-b"));
+        assert!(!s.contains("## "), "hint must be bare topic text, no heading syntax to parrot: {s}");
         assert!(!s.contains("content-a"), "section bodies must not leak in: {s}");
         assert!(!s.contains("overview of topic-b"), "l1 must not leak in: {s}");
+    }
+
+    // 清单剥前缀：## 和时间戳都剥掉，防 LLM 学舌标题语法（双段头事故根因之一）
+    #[test]
+    fn bare_topic_strips_heading_and_timestamp_prefix() {
+        assert_eq!(bare_topic("## 2026-08-19 16:57 [proj] 杂痕清理"), "[proj] 杂痕清理");
+        assert_eq!(bare_topic("## [proj] 杂痕清理"), "[proj] 杂痕清理");
+        assert_eq!(bare_topic("plain line, no heading"), "plain line, no heading");
+        // 类时间戳但非全数字 = 不是时间戳，不剥
+        assert_eq!(bare_topic("## 20x6-08-19 16:57 topic"), "20x6-08-19 16:57 topic");
     }
 
     #[test]
