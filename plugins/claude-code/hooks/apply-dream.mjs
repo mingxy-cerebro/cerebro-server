@@ -66,10 +66,28 @@ if (!archivePath && existsSync(OUT_DIR)) {
   if (files.length) archivePath = join(OUT_DIR, files[files.length - 1]);
 }
 if (!archivePath) { console.error("apply-dream: no dream output found"); process.exit(1); }
-const entries = JSON.parse(readFileSync(archivePath, "utf8")).entries || [];
+let entries = JSON.parse(readFileSync(archivePath, "utf8")).entries || [];
+
+// ─── dedup: the LLM occasionally emits the same name twice — once with full
+// content, once as a bare stub (source=kept, empty body/description; the
+// deepseek rewrite tic, cf. cc-dream-truncation-fix). The write phase is
+// last-write-wins, so a trailing stub would clobber the real entry into a
+// 60-byte frontmatter shell. Collapse by name BEFORE merging: longest
+// non-empty body wins; on a tie kept wins (conservative — kept writes nothing). ──
+{
+  const seen = new Map();
+  for (const e of entries) {
+    const cur = seen.get(e.name);
+    if (!cur || (e.body || "").length > (cur.body || "").length
+      || ((e.body || "").length === (cur.body || "").length && e.source === "kept" && cur.source !== "kept"))
+      seen.set(e.name, e);
+  }
+  entries = [...seen.values()];
+}
 
 // ─── merge ────────────────────────────────────────────────────────────────────
 const unknown = [];   // kept names missing from the old archive — LLM renamed, memory at risk
+const empty = [];     // content actions with empty body+description — never written, surfaced
 const report = { keep: 0, write: [], drop: [], dropCount: 0 };
 for (let e of entries) {
   // normalize BEFORE any branch: an LLM-emitted Chinese name that the MEMORY.md
@@ -83,6 +101,10 @@ for (let e of entries) {
     report.drop.push(e.name);
     report.dropCount++;
   } else if (act === "added" || act === "merged" || act === "updated") {
+    // an empty stub must never clobber a real file: writing it would leave a
+    // 60-byte frontmatter shell. merged/updated skip = old content survives;
+    // added skip = surfaced below, not silently dropped.
+    if (!(e.body || "").trim() && !(e.description || "").trim()) { empty.push(`${e.name} (${act})`); continue; }
     report.write.push(e); // LLM content is authoritative for these actions
   } else {
     unknown.push(`${e.name} (action=${act || "?"})`);
@@ -97,6 +119,7 @@ const lines = [
 for (const e of report.write) lines.push(`  ${e.source || e.action}  ${e.name} — ${(e.description || "").slice(0, 60)}`);
 for (const n of report.drop) lines.push(`  drop  ${n}`);
 for (const n of unknown) lines.push(`  ?     ${n}  ← surfaced, not dropped`);
+for (const n of empty) lines.push(`  ~     ${n}  ← empty stub skipped, not written`);
 if (orphanFiles.length) lines.push(`  (unparsed old files left untouched: ${orphanFiles.length})`);
 console.log(lines.join("\n"));
 if (unknown.length) console.log("\n⚠ URGENT: unknown kept names above — surface to the user BEFORE applying; they may be renames the LLM invented.");
