@@ -1741,6 +1741,8 @@ pub async fn session_ingest(
                         mem.tags.push(tag.clone());
                     }
                 }
+                // cap monotonic tag growth across appends; tail = newest added
+                mem.tags.truncate(8);
             };
 
             /// Find the best split point in content so that the first half ≤ max_chars.
@@ -2037,7 +2039,14 @@ pub async fn session_ingest(
                                 memory_id = %existing.id,
                                 "session_ingest: skipping EMOTIONAL append, content already exists"
                             );
-                        } else {
+                        } else if has_section_for_topic(&existing.content, &topic.topic) {
+                        // 硬兜底：已有同 topic 段头 → 拦截追加（summary 全等拦不住措辞略异的重提取）
+                        tracing::info!(
+                            memory_id = %existing.id,
+                            topic = %topic.topic,
+                            "session_ingest: skipping EMOTIONAL append, section for topic already exists"
+                        );
+                    } else {
                         let new_content = format!("{}{}", existing.content, append_section);
                         if new_content.chars().count() <= 3000 {
                             apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
@@ -2073,6 +2082,11 @@ pub async fn session_ingest(
                         loaded.sort_by_key(|m| m.content.chars().count());
 
                         for mut mem in loaded {
+                            // 硬兜底：retain 按「段头匹配||l0相等||同session」放行，段头已匹配的条目
+                            // 再追加 = 同 topic 双段，跳过找下一个
+                            if has_section_for_topic(&mem.content, &topic.topic) {
+                                continue;
+                            }
                             let new_content = format!("{}{}", mem.content, append_section);
                             if new_content.chars().count() <= 3000 {
                                 apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
@@ -2204,6 +2218,10 @@ pub async fn session_ingest(
                         loaded.sort_by_key(|m| m.content.chars().count());
 
                         for mut mem in loaded {
+                            // 硬兜底：段头已含同 topic 的条目跳过，避免 fallback 追加造同 topic 双段
+                            if has_section_for_topic(&mem.content, &topic.topic) {
+                                continue;
+                            }
                             let new_content = format!("{}\n\n{}\n{}", mem.content, section_header, section_body);
                             if new_content.chars().count() <= 3000 {
                                 apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
@@ -2638,11 +2656,20 @@ async fn fetch_session_work_memory(
 }
 
 /// Build a merged summary string from a slice of memories, capped at 2000 chars.
+/// Content source = `## ` section headers (the topic list), NOT l0+l1: l0 drifts to
+/// the latest topic on every append, which hid older topics from the dedup hint
+/// and let the LLM re-extract them (duplicate sections). Memories without section
+/// headers fall back to l0+l1 so the hint never goes blank.
 fn build_merged_summary(memories: &[Memory]) -> String {
     let mut parts = Vec::new();
     let mut total_len = 0usize;
     for m in memories {
-        let part = format!("[{}] {}: {}", m.updated_at, m.l0_abstract, m.l1_overview);
+        let topics: Vec<&str> = m.content.lines().filter(|l| l.starts_with("## ")).collect();
+        let part = if topics.is_empty() {
+            format!("[{}] {}: {}", m.updated_at, m.l0_abstract, m.l1_overview)
+        } else {
+            format!("[{}] {}", m.updated_at, topics.join(" | "))
+        };
         if total_len + part.len() + 2 > 2000 {
             break;
         }
@@ -2650,6 +2677,18 @@ fn build_merged_summary(memories: &[Memory]) -> String {
         parts.push(part);
     }
     parts.join("\n\n")
+}
+
+/// True if `content` already has a `## ` section whose header ends with `topic`.
+/// Headers carry a date prefix ("## 2026-08-19 14:00 <topic>"), so suffix match
+/// compares the topic text itself. Exact match only — no fuzzy, 宁漏勿误杀.
+/// An empty topic never matches (it would match every header).
+fn has_section_for_topic(content: &str, topic: &str) -> bool {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return false;
+    }
+    content.lines().any(|l| l.starts_with("## ") && l.ends_with(topic))
 }
 
 pub async fn optimize_memories(
@@ -2664,4 +2703,69 @@ pub async fn optimize_memories(
     store.optimize().await?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn mem(content: &str, l0: &str, l1: &str) -> Memory {
+        let mut m = Memory::new(content, Category::new("events"), MemoryType::Pinned, "test-tenant");
+        m.l0_abstract = l0.to_string();
+        m.l1_overview = l1.to_string();
+        m.updated_at = "2026-08-19T16:00:00+08:00".to_string();
+        m
+    }
+
+    // 刀1：merged_summary 内容源 = content 段头集合，旧主题不再随 L0 漂移蒸发
+    #[test]
+    fn merged_summary_lists_section_headers_not_l0_l1() {
+        let m = mem(
+            "## 2026-08-18 10:00 topic-a\ncontent-a\n\n## 2026-08-19 11:00 topic-b\ncontent-b",
+            "topic-b", // L0 已漂移到最后一个主题
+            "overview of topic-b",
+        );
+        let s = build_merged_summary(&[m]);
+        assert!(s.contains("topic-a"), "older topic must survive L0 drift: {s}");
+        assert!(s.contains("topic-b"));
+        assert!(!s.contains("content-a"), "section bodies must not leak in: {s}");
+        assert!(!s.contains("overview of topic-b"), "l1 must not leak in: {s}");
+    }
+
+    #[test]
+    fn merged_summary_falls_back_to_l0_l1_without_headers() {
+        let m = mem("plain content without headers", "topic-x", "overview-x");
+        let s = build_merged_summary(&[m]);
+        assert!(s.contains("topic-x") && s.contains("overview-x"), "{s}");
+    }
+
+    #[test]
+    fn merged_summary_caps_at_2000_chars() {
+        let content = format!("## 2026-08-19 10:00 {}", "t".repeat(1200));
+        let m = mem(&content, "l0", "l1");
+        let s = build_merged_summary(&[m.clone(), m.clone()]);
+        assert!(s.chars().count() <= 2000, "len={}", s.chars().count());
+    }
+
+    // 刀2：段头硬校验（宁漏勿误杀——仅拦 topic 后缀完全一致）
+    #[test]
+    fn section_guard_matches_topic_suffix_behind_date() {
+        let content = "intro line\n\n## 2026-08-18 10:00 fix login bug\nbody";
+        assert!(has_section_for_topic(content, "fix login bug"));
+        assert!(has_section_for_topic(content, "  fix login bug  "), "trim 容差");
+    }
+
+    #[test]
+    fn section_guard_ignores_reworded_or_empty_topics() {
+        let content = "## 2026-08-18 10:00 fix login bug\nbody";
+        assert!(!has_section_for_topic(content, "fix the login bug"), "reworded = new topic, 放行");
+        assert!(!has_section_for_topic(content, "fix login"), "宁漏勿误杀：前缀不算同 topic");
+        assert!(!has_section_for_topic(content, ""), "empty topic would match everything");
+    }
+
+    #[test]
+    fn section_guard_only_matches_heading_lines() {
+        let content = "plain mention of fix login bug in a body line";
+        assert!(!has_section_for_topic(content, "fix login bug"));
+    }
 }
