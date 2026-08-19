@@ -1,6 +1,6 @@
 {
   "name": "@mingxy/cerebro-claude-code",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Persistent memory for Claude Code — memories survive across sessions, projects, and machines",
   "author": {
     "name": "mingxy-cerebro",

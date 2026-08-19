@@ -268,6 +268,34 @@ export function readCompactResult() {
   }
 }
 
+// ─── Pending clear flush (SessionEnd:clear → SessionStart:clear) ────────────
+// /clear swaps session_id, so the old transcript can only be flushed by the
+// NEW session's SessionStart(clear) hook (detached flush can't emit a toast).
+const PENDING_CLEAR_FLUSH_FILE = join(HOME, ".config/cerebro/pending-clear-flush.json");
+
+export function writePendingClearFlush(tp, sid) {
+  try {
+    mkdirSync(dirname(PENDING_CLEAR_FLUSH_FILE), { recursive: true });
+    writeFileSync(PENDING_CLEAR_FLUSH_FILE, JSON.stringify({ tp, sid, ts: Date.now() }));
+  } catch {}
+}
+
+export function readPendingClearFlush() {
+  try {
+    if (!existsSync(PENDING_CLEAR_FLUSH_FILE)) return null;
+    const data = JSON.parse(readFileSync(PENDING_CLEAR_FLUSH_FILE, "utf-8"));
+    // Stale after 60s — user cleared but never resumed in this window
+    if (Date.now() - (data.ts || 0) > 60_000) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingClearFlush() {
+  try { unlinkSync(PENDING_CLEAR_FLUSH_FILE); } catch {}
+}
+
 // ─── Cursor (session ingest dedup) ───────────────────────────────────────────
 const TRACKER_DIR = join(HOME, ".config/cerebro/trackers");
 
@@ -418,7 +446,7 @@ function contentText(content) {
   return "";
 }
 
-export async function flushSessionIngest(transcriptPath, sessionId) {
+export async function flushSessionIngest(transcriptPath, sessionId, timeoutSec = 25) {
   if (!transcriptPath || !existsSync(transcriptPath) || !sessionId || !config.apiKey) return { ok: false, count: 0 };
 
   const cursor = cursorGet(sessionId);
@@ -476,7 +504,7 @@ export async function flushSessionIngest(transcriptPath, sessionId) {
     if (pn) body.project_name = pn;
     if (pp) body.project_path = pp;
 
-    const result = await omPost("/v1/memories/session-ingest", body, 25);
+    const result = await omPost("/v1/memories/session-ingest", body, timeoutSec);
     if (result.status >= 200 && result.status < 300) {
       cursorSet(sessionId, lastUid);
       logDebug(`flush_session_ingest: ok http=${result.status} cursor=${lastUid}`);

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult, injectionConfig,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult, readPendingClearFlush, clearPendingClearFlush, flushSessionIngest, injectionConfig,
 } from "./common.mjs";
 import { judgeMaterial, readState, writeStateForReport, fetchOrphanResult } from "./dream.mjs";
 
@@ -128,6 +128,29 @@ if (startSource === "compact") {
   const cr = readCompactResult();
   if (cr) {
     statusMsg += ` · Post-compact ingest ${cr.ok ? "✓" : "✗"} ${cr.count} items`;
+  }
+}
+
+// After /clear, the OLD session's tail flush runs here (SessionEnd:clear only
+// wrote a handoff file) so its result shows in this toast like stop/compact.
+if (startSource === "clear") {
+  const pending = readPendingClearFlush();
+  if (pending) {
+    const r = await flushSessionIngest(pending.tp, pending.sid, 8).catch(() => ({ ok: false, count: 0 }));
+    if (r.ok) {
+      clearPendingClearFlush();
+      statusMsg += ` · Clear ingest ✓ ${r.count} msgs`;
+    } else {
+      // Out of hook budget — detached retry with full 25s timeout, silent
+      try {
+        const child = spawn(process.execPath, [join(PLUGIN_ROOT, "hooks", "flush-detached.mjs")], {
+          detached: true, stdio: "ignore",
+          env: { ...process.env, CEREBRO_TP: pending.tp, CEREBRO_SID: pending.sid, CEREBRO_CLEAR_PENDING: "1" },
+        });
+        child.unref();
+      } catch {}
+      statusMsg += ` · Clear ingest ↻ background`;
+    }
   }
 }
 

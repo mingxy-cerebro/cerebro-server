@@ -2,7 +2,7 @@
 // cerebro detached flush — spawned by session-end.mjs to survive process exit
 // Runs independently after Claude Code terminates. No stdin/stdout to Claude.
 import { existsSync } from "node:fs";
-import { config, flushSessionIngest, logDebug, logError } from "./common.mjs";
+import { config, flushSessionIngest, clearPendingClearFlush, logDebug, logError } from "./common.mjs";
 import { judgeMaterial, readState, runDream } from "./dream.mjs";
 
 const tp = process.env.CEREBRO_TP || "";
@@ -25,6 +25,9 @@ const result = await flushSessionIngest(tp, sid).catch((err) => {
 
 if (result.ok) {
   logDebug(`detached flush: ok count=${result.count} sid=${sid}`);
+  // Retrying a SessionStart(clear) handoff — consume it so the next SessionStart
+  // doesn't replay a 0-delta toast from the stale pending file.
+  if (process.env.CEREBRO_CLEAR_PENDING) clearPendingClearFlush();
 } else {
   logError(`detached flush: failed sid=${sid} http=${result.status || "?"} (cursor NOT advanced, will retry next session)`);
 }
