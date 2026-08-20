@@ -5,6 +5,8 @@
 //   unknown kept name → surfaced as `unknown`, NEVER silently dropped (that is memory evaporation)
 //   dropped → removal candidate, listed for review; applied only with --apply
 //   merged/updated/added → LLM version wins (content is allowed to change there)
+//     except: added onto an existing local file is a conflict (LLM relabeled an
+//     existing memory as new) — skipped and surfaced, never blindly overwrites
 //   stats.total still counts kept entries — the ledger is the server's, not ours to re-derive
 //
 // Read-only review by default (prints the diff); `--apply` writes after user approval.
@@ -88,6 +90,7 @@ let entries = JSON.parse(readFileSync(archivePath, "utf8")).entries || [];
 // ─── merge ────────────────────────────────────────────────────────────────────
 const unknown = [];   // kept names missing from the old archive — LLM renamed, memory at risk
 const empty = [];     // content actions with empty body+description — never written, surfaced
+const conflict = [];  // added but a local file with that name exists — LLM rewrite mislabeled as new
 const report = { keep: 0, write: [], drop: [], dropCount: 0 };
 for (let e of entries) {
   // normalize BEFORE any branch: an LLM-emitted Chinese name that the MEMORY.md
@@ -105,6 +108,11 @@ for (let e of entries) {
     // 60-byte frontmatter shell. merged/updated skip = old content survives;
     // added skip = surfaced below, not silently dropped.
     if (!(e.body || "").trim() && !(e.description || "").trim()) { empty.push(`${e.name} (${act})`); continue; }
+    // added onto an existing local file = the LLM relabeled a rewrite as new
+    // (deepseek tic, cf. the 2026-08-20 archive where 6 existing entries came
+    // back as added with condensed bodies and zero new info). Its content
+    // would trade a hand-written file for a stub — skip, surface, human decides.
+    if (act === "added" && oldFiles.has(e.name)) { conflict.push(e.name); continue; }
     report.write.push(e); // LLM content is authoritative for these actions
   } else {
     unknown.push(`${e.name} (action=${act || "?"})`);
@@ -114,15 +122,17 @@ for (let e of entries) {
 // ─── review output ────────────────────────────────────────────────────────────
 const lines = [
   `apply-dream review · archive ${archivePath}`,
-  `kept ${report.keep} / write ${report.write.length} / drop ${report.dropCount} / unknown ${unknown.length}`,
+  `kept ${report.keep} / write ${report.write.length} / drop ${report.dropCount} / unknown ${unknown.length} / conflict ${conflict.length}`,
 ];
 for (const e of report.write) lines.push(`  ${e.source || e.action}  ${e.name} — ${(e.description || "").slice(0, 60)}`);
 for (const n of report.drop) lines.push(`  drop  ${n}`);
 for (const n of unknown) lines.push(`  ?     ${n}  ← surfaced, not dropped`);
 for (const n of empty) lines.push(`  ~     ${n}  ← empty stub skipped, not written`);
+for (const n of conflict) lines.push(`  !     ${n}  ← added but exists locally, skipped — review manually`);
 if (orphanFiles.length) lines.push(`  (unparsed old files left untouched: ${orphanFiles.length})`);
 console.log(lines.join("\n"));
 if (unknown.length) console.log("\n⚠ URGENT: unknown kept names above — surface to the user BEFORE applying; they may be renames the LLM invented.");
+if (conflict.length) console.log("\n⚠ CONFLICT: added-but-exists above — old file kept, dream content discarded; merge by hand if the dream version carries new info.");
 if (!APPLY) { console.log("\ndry run — pass --apply to write"); process.exit(0); }
 
 // ─── write phase (--apply) ─────────────────────────────────────────────────────

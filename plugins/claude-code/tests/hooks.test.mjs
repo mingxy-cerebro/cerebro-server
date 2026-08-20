@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const HOOKS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "hooks");
 
@@ -107,5 +109,40 @@ describe("session-end.mjs", () => {
     const { stdout } = await runHook("session-end.mjs", {});
     const out = JSON.parse(stdout);
     assert.deepEqual(out, {});
+  });
+});
+
+describe("apply-dream.mjs", () => {
+  test("added onto existing local file is a conflict, not an overwrite", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "apply-dream-"));
+    try {
+      const memDir = join(tmp, "memory");
+      mkdirSync(memDir);
+      const existing = "---\nname: cc-x\ndescription: hand-written\nmetadata:\n  type: feedback\n---\n\nprecise body\n";
+      writeFileSync(join(memDir, "cc-x.md"), existing);
+      writeFileSync(join(memDir, "MEMORY.md"), "- [cc-x](cc-x.md) — hand-written\n");
+      const outDir = join(tmp, "dream", "output");
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(outDir, "20260820.json"), JSON.stringify({ entries: [
+        { name: "cc-x", action: "added", body: "condensed stub rewrite" }, // mislabeled rewrite
+        { name: "cc-new", action: "added", body: "genuinely new" },        // real addition
+      ] }));
+
+      const res = await new Promise((resolve) => {
+        const child = spawn(process.execPath, [join(HOOKS_DIR, "apply-dream.mjs"), "--apply"], {
+          env: { ...process.env, OMEM_DREAM_DIR: join(tmp, "dream"), OMEM_DREAM_MEMORY_DIR: memDir },
+        });
+        let stdout = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.on("close", (code) => resolve({ stdout, code }));
+      });
+
+      assert.ok(res.stdout.includes("conflict 1"), `expected one conflict, got: ${res.stdout}`);
+      assert.ok(res.stdout.includes("!     cc-x"), "conflicting name must be listed");
+      assert.equal(readFileSync(join(memDir, "cc-x.md"), "utf8"), existing, "existing file must stay untouched");
+      assert.ok(readFileSync(join(memDir, "cc-new.md"), "utf8").includes("genuinely new"), "genuinely new entry must be written");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
