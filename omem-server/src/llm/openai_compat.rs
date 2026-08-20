@@ -295,9 +295,15 @@ impl LlmService for OpenAICompatLlm {
 
             // Retry on 5xx server errors
             if status.is_server_error() && attempt + 1 < MAX_RETRIES {
-                let bytes = resp.bytes().await.map_err(|e| {
-                    OmemError::Llm(format!("Failed to read error response: {e}"))
-                })?;
+                let bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let err_msg = format!("Failed to read error response: {e}");
+                        tracing::warn!(error = %err_msg, attempt, "LLM error-body read failed, will retry");
+                        last_err = Some(err_msg);
+                        continue;
+                    }
+                };
                 if bytes.len() > MAX_RESPONSE_BYTES {
                     return Err(OmemError::Llm(format!(
                         "Error response too large: {} bytes",
@@ -311,9 +317,18 @@ impl LlmService for OpenAICompatLlm {
             }
 
             if !status.is_success() {
-                let bytes = resp.bytes().await.map_err(|e| {
-                    OmemError::Llm(format!("Failed to read error response: {e}"))
-                })?;
+                let bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let err_msg = format!("Failed to read error response: {e}");
+                        if attempt + 1 < MAX_RETRIES {
+                            tracing::warn!(error = %err_msg, attempt, "LLM error-body read failed, will retry");
+                            last_err = Some(err_msg);
+                            continue;
+                        }
+                        return Err(OmemError::Llm(err_msg));
+                    }
+                };
                 if bytes.len() > MAX_RESPONSE_BYTES {
                     return Err(OmemError::Llm(format!(
                         "Error response too large: {} bytes",
@@ -324,9 +339,18 @@ impl LlmService for OpenAICompatLlm {
                 return Err(OmemError::Llm(format!("LLM API returned {status}: {body}")));
             }
 
-            let bytes = resp.bytes().await.map_err(|e| {
-                OmemError::Llm(format!("Failed to read response: {e}"))
-            })?;
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let err_msg = format!("Failed to read response: {e}");
+                    if attempt + 1 < MAX_RETRIES {
+                        tracing::warn!(error = %err_msg, attempt, "LLM response body read failed, will retry");
+                        last_err = Some(err_msg);
+                        continue;
+                    }
+                    return Err(OmemError::Llm(err_msg));
+                }
+            };
             if bytes.len() > MAX_RESPONSE_BYTES {
                 return Err(OmemError::Llm(format!(
                     "Response too large: {} bytes",
@@ -458,5 +482,83 @@ mod tests {
             super::resolve_chat_url("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
             "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
         );
+    }
+
+    /// 回归:2xx 状态 + body 被截断(虚高 Content-Length 后提前断流)时,
+    /// resp.bytes() 解码失败应纳入重试而非直接毙命(2026-08-20 dream fail 主凶)。
+    #[tokio::test]
+    async fn retries_on_truncated_success_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        // 测试进程不走 main.rs 的 provider 安装,rustls-no-provider 下需自装 ring
+        rustls::crypto::ring::default_provider().install_default().ok();
+
+        async fn drain_request(socket: &mut TcpStream) {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let header_end = loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "client closed before sending full request");
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "client closed before sending full request");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let full_body = "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}";
+            let mut requests = 0usize;
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                drain_request(&mut socket).await;
+                requests += 1;
+                if requests == 1 {
+                    // 第一发:200 + Content-Length 虚高 + 只发前 10 字节就断流
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        full_body.len() + 100
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(&full_body.as_bytes()[..10]).await.unwrap();
+                } else {
+                    // 第二发:完整合法响应
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        full_body.len()
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(full_body.as_bytes()).await.unwrap();
+                }
+                socket.shutdown().await.unwrap();
+                if requests == 2 {
+                    return requests;
+                }
+            }
+        });
+
+        let config = OmemConfig {
+            llm_base_url: format!("http://{addr}"),
+            ..OmemConfig::default()
+        };
+        let llm = OpenAICompatLlm::new(&config).unwrap();
+        let result = llm.complete_text("sys", "user").await.unwrap();
+        assert_eq!(result, "hello");
+        assert_eq!(server.await.unwrap(), 2, "should have retried once");
     }
 }
