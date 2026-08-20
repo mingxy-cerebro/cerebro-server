@@ -26,6 +26,7 @@ const DEF = {
   requestTimeout: 15,
   recentCount: 8,
   searchCount: 8,
+  globalCount: 3,
   maxContent: 3000,
   maxQueryLength: 200,
   logDir: join(HOME, ".config/cerebro/logs"),
@@ -75,6 +76,7 @@ function loadConfig() {
     requestTimeout: num("MEM_REQUEST_TIMEOUT", c.requestTimeoutMs ? c.requestTimeoutMs / 1000 : null, DEF.requestTimeout),
     recentCount: num("MEM_RECENT_COUNT", i.recentCount, DEF.recentCount),
     searchCount: num("MEM_SEARCH_COUNT", i.searchCount, DEF.searchCount),
+    globalCount: num("MEM_GLOBAL_COUNT", i.globalCount, DEF.globalCount),
     maxContent: num("MEM_MAX_CONTENT", ct.maxContentLength || ct.maxContentChars, DEF.maxContent),
     maxQueryLength: num("MEM_MAX_QUERY_LENGTH", ct.maxQueryLength, DEF.maxQueryLength),
     logDir: (process.env.MEM_LOG_DIR || lg.logDir || DEF.logDir).replace(/^~/, HOME),
@@ -499,7 +501,7 @@ export async function flushSessionIngest(transcriptPath, sessionId, timeoutSec =
   const agentId = process.env.OMEM_AGENT_ID || "claude-code";
 
   if (messages.length > 0) {
-    const body = { messages, agent_id: agentId };
+    const body = { messages, agent_id: agentId, home_path: HOME };
     if (sessionId) body.session_id = sessionId;
     if (pn) body.project_name = pn;
     if (pp) body.project_path = pp;
@@ -570,12 +572,13 @@ export function truncateAtBoundary(text, maxLength) {
 }
 
 // GET /v1/memories/search — 单路语义搜索
-export async function searchMemories(query, limit, projectPath) {
+export async function searchMemories(query, limit, projectPath, excludeGlobal) {
   limit = limit || config.searchCount;
   const safeQ = truncateQuery(query);
   if (!safeQ) return [];
   const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
   if (projectPath) params.set("project_path", projectPath);
+  if (excludeGlobal) params.set("exclude_global", "1");
   try {
     const resp = await fetch(`${config.apiUrl}/v1/memories/search?${params}`, {
       headers: { "X-API-Key": config.apiKey, Accept: "application/json" },
@@ -589,18 +592,23 @@ export async function searchMemories(query, limit, projectPath) {
 }
 
 // buildMemoryInjection — 对标 opencode hooks.ts:246-329
-// 三路并发：profile + recent + search(query)。query 为空跳过 search。
+// 四路并发：profile + global + recent + search(query)。query 为空跳过 search。
+// 拍板（issue #3）：项目 recent/search 路带 exclude_global（专区已单列，项目路不混全局）；
+// 全局专区 globalCount 条（SessionStart q 为空，走 list 按时间取最新全局记忆）。
 export async function buildMemoryInjection(query, projectPath, options = {}) {
   const profileEnabled = options.profileEnabled !== false;
   const recentEnabled = options.recentEnabled !== false;
+  const globalEnabled = options.globalEnabled !== false;
   const hdrs = { "X-API-Key": config.apiKey, Accept: "application/json" };
   const recentCount = config.recentCount;
   const searchCount = config.searchCount;
+  const globalCount = config.globalCount;
   const profileQs = projectPath ? `?project_path=${encodeURIComponent(projectPath)}` : "";
-  const recentQs = `?limit=${recentCount}&offset=0&sort=updated_at&order=desc${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`;
+  const recentQs = `?limit=${recentCount}&offset=0&sort=updated_at&order=desc&exclude_global=1${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`;
+  const globalQs = `?limit=${globalCount}&offset=0&sort=updated_at&order=desc&global_only=1`;
   const safeQ = truncateQuery(query);
 
-  const [profileResp, recentResp, searchResp] = await Promise.all([
+  const [profileResp, recentResp, globalResp, searchResp] = await Promise.all([
     profileEnabled
       ? fetch(`${config.apiUrl}/v2/profile/inject${profileQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.profileTimeoutMs) })
         .then((r) => r.text()).catch(() => "")
@@ -609,8 +617,12 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
       ? fetch(`${config.apiUrl}/v1/memories${recentQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.recentTimeoutMs) })
         .then((r) => (r.ok ? r.text() : null)).catch(() => null)
       : Promise.resolve(""),
+    globalEnabled
+      ? fetch(`${config.apiUrl}/v1/memories${globalQs}`, { headers: hdrs, signal: AbortSignal.timeout(config.recentTimeoutMs) })
+        .then((r) => (r.ok ? r.text() : null)).catch(() => null)
+      : Promise.resolve(""),
     safeQ
-      ? fetch(`${config.apiUrl}/v1/memories/search?q=${encodeURIComponent(safeQ)}&limit=${searchCount}${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`, { headers: hdrs, signal: AbortSignal.timeout(5000) })
+      ? fetch(`${config.apiUrl}/v1/memories/search?q=${encodeURIComponent(safeQ)}&limit=${searchCount}&exclude_global=1${projectPath ? `&project_path=${encodeURIComponent(projectPath)}` : ""}`, { headers: hdrs, signal: AbortSignal.timeout(5000) })
         .then((r) => r.text()).catch(() => "")
       : Promise.resolve(""),
   ]);
@@ -634,6 +646,13 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
     } catch {}
   }
 
+  // parse global (最新全局记忆，跨项目)
+  let globalMemories = [];
+  try {
+    const gd = JSON.parse(globalResp);
+    if (gd && !gd.error) globalMemories = gd.memories || [];
+  } catch {}
+
   // parse search
   let searchResults = [];
   try {
@@ -650,6 +669,16 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
   }
 
   const seenIds = new Set();
+  if (globalMemories.length > 0) {
+    sections.push("## Global Memories");
+    for (const m of globalMemories) {
+      if (m.id) seenIds.add(m.id);
+      const age = formatRelativeAge(m.updated_at || m.created_at);
+      sections.push(`- (${age}) ${m.content || ""}`);
+    }
+    sections.push("");
+  }
+
   if (projectMemories.length > 0) {
     sections.push("## Recent Project Activity");
     for (const m of projectMemories) {
@@ -682,6 +711,7 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
   return {
     text,
     profileCount: profileContent ? 1 : 0,
+    globalCount: globalMemories.length,
     projectMemoryCount: projectMemories.length,
     searchCount: dedupedResults.length,
     recentFailed,

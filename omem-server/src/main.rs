@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing_subscriber::{fmt, EnvFilter};
 
-use omem_server::api::{build_router, AppState};
+use omem_server::api::{build_router, personal_space_id, AppState};
 use omem_server::config::OmemConfig;
 use omem_server::embed::{create_embed_service, EmbedService};
 use omem_server::lifecycle::scheduler::LifecycleScheduler;
@@ -32,9 +32,113 @@ fn init_tracing(config: &OmemConfig) {
         .init();
 }
 
+/// 存量清洗：把匹配白名单的伪项目记忆 project_path 置空（归全局）。
+/// `omem-server --migrate-global [--path /home/xxx ...] [--dry-run]`
+/// 路径来源 = CLI --path（可重复）∪ OMEM_GLOBAL_HOME_PATHS；dry-run 只列计数与预览不落库。
+async fn migrate_global(config: &OmemConfig, cli_paths: Vec<String>, dry_run: bool) {
+    let mut whitelist: Vec<String> = cli_paths
+        .into_iter()
+        .map(|p| p.trim_end_matches('/').to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    whitelist.extend(config.global_home_paths.iter().cloned());
+    whitelist.dedup();
+    if whitelist.is_empty() {
+        eprintln!("no whitelist: pass --path <dir> (repeatable) or set OMEM_GLOBAL_HOME_PATHS");
+        std::process::exit(2);
+    }
+
+    let base_uri = config.store_uri();
+    let store_manager = Arc::new(StoreManager::new(&base_uri));
+    let tenant_store = Arc::new(
+        TenantStore::new(&format!("{}/_system", base_uri))
+            .await
+            .expect("failed to create TenantStore"),
+    );
+    let tenants = tenant_store.list_all().await.expect("failed to list tenants");
+
+    for tenant in &tenants {
+        let store = match store_manager
+            .get_store(&personal_space_id(&tenant.id))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("tenant {}: skip (store error: {e})", tenant.id);
+                continue;
+            }
+        };
+        for path in &whitelist {
+            // 尾斜杠变体一并洗（与归一化端的 trim_end 容忍对称），防漏洗
+            let p = path.replace('\'', "''");
+            let filter = format!("project_path = '{p}' OR project_path = '{p}/'");
+            let count = match store.count_by_filter(&filter).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("tenant {}: `{path}` count failed: {e}", tenant.id);
+                    continue;
+                }
+            };
+            if count == 0 {
+                continue;
+            }
+            if dry_run {
+                println!("[dry-run] tenant {}: `{path}` → global: {count} memories", tenant.id);
+                let preview = store
+                    .list_filtered(
+                        &omem_server::store::lancedb::ListFilter {
+                            project_path: Some(path.clone()),
+                            ..Default::default()
+                        },
+                        5,
+                        0,
+                    )
+                    .await;
+                if let Ok(mems) = preview {
+                    for m in mems {
+                        let head: String = m.content.chars().take(80).collect();
+                        println!("    - [{}] {}", m.id, head);
+                    }
+                }
+            } else {
+                match store.nullify_project_path(&filter).await {
+                    Ok(n) => println!("tenant {}: `{path}` → global: migrated {n} memories", tenant.id),
+                    Err(e) => eprintln!("tenant {}: `{path}` migrate failed: {e}", tenant.id),
+                }
+            }
+        }
+    }
+    if dry_run {
+        println!("dry-run done — re-run without --dry-run to apply");
+    } else {
+        println!("migration done");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // 一次性运维子命令：存量伪项目记忆清洗（issue #3 议题1b）。默认不跑，手动触发。
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--migrate-global") {
+        let dry_run = args.iter().any(|a| a == "--dry-run");
+        let cli_paths: Vec<String> = args
+            .windows(2)
+            .filter(|w| w[0] == "--path")
+            .map(|w| w[1].clone())
+            .filter(|v| {
+                if v.starts_with("--") {
+                    eprintln!("--path expects a value, got `{v}`");
+                    std::process::exit(2);
+                }
+                true
+            })
+            .collect();
+        let config = OmemConfig::from_env();
+        migrate_global(&config, cli_paths, dry_run).await;
+        return;
+    }
 
     let config = OmemConfig::from_env();
     init_tracing(&config);

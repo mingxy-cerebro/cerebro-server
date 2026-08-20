@@ -97,6 +97,9 @@ pub struct OmemConfig {
     pub dream_llm_api_key: String,
     pub dream_llm_model: String,
     pub dream_llm_base_url: String,
+
+    /// 全局归一化白名单（OMEM_GLOBAL_HOME_PATHS，逗号分隔）：命中路径的记忆归为全局（project_path NULL）
+    pub global_home_paths: Vec<String>,
 }
 
 impl Default for OmemConfig {
@@ -168,6 +171,7 @@ impl Default for OmemConfig {
             dream_llm_api_key: String::new(),
             dream_llm_model: "deepseek-v4-flash".to_string(),
             dream_llm_base_url: "https://api.deepseek.com".to_string(),
+            global_home_paths: Vec::new(),
         }
     }
 }
@@ -364,6 +368,13 @@ impl OmemConfig {
             dream_llm_api_key: env::var("OMEM_DREAM_LLM_API_KEY").unwrap_or(defaults.dream_llm_api_key),
             dream_llm_model: env::var("OMEM_DREAM_LLM_MODEL").unwrap_or(defaults.dream_llm_model),
             dream_llm_base_url: env::var("OMEM_DREAM_LLM_BASE_URL").unwrap_or(defaults.dream_llm_base_url),
+            // 部署方补充全局白名单（逗号分隔）；home 主来源是客户端声明的 home_path，这里只放非 home 的全局目录（如笔记仓库）
+            global_home_paths: env::var("OMEM_GLOBAL_HOME_PATHS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             profile_dormant_days: env::var("OMEM_PROFILE_DORMANT_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())

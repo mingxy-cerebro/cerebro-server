@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // ── Safety limits (Qwen3-Embedding-0.6B max context ~32K tokens) ──
@@ -119,6 +121,8 @@ export class OmemClient {
         visibility,
         category,
         project_path: projectPath,
+        // 客户端声明的本机 home（多租户通用），服务端据此把 home 目录记忆归全局
+        home_path: homedir(),
       }),
     });
     if (!result) throw new Error("Failed to create memory");
@@ -204,6 +208,7 @@ export class OmemClient {
         session_id: opts.sessionId,
         tags: opts.tags,
         project_path: opts.projectPath,
+        home_path: homedir(),
       }),
     });
   }

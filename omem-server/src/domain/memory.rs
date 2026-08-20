@@ -25,6 +25,32 @@ pub fn sanitize_project_path(path: &str) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// 全局归属过滤语义（search/list API 的 global_only / exclude_global 参数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalScope {
+    /// 只返回全局记忆（project_path IS NULL）
+    Only,
+    /// 只返回项目记忆（project_path IS NOT NULL），不含全局
+    Exclude,
+}
+
+/// 全局归一化：命中 GLOBAL_HOME_PATHS 白名单的 project_path 归为 None（全局）。
+///
+/// 精确匹配 + 尾斜杠容忍；不做前缀扩展 —— HOME 下子目录各有项目身份，不该被连带全局化。
+/// 白名单为空 = 关闭该机制，一切照旧。
+pub fn normalize_project_path(input: Option<String>, whitelist: &[String]) -> Option<String> {
+    let pp = input?;
+    if pp.is_empty() {
+        return None;
+    }
+    if whitelist.is_empty() {
+        return Some(pp);
+    }
+    let trimmed = pp.trim_end_matches('/');
+    let hit = whitelist.iter().any(|w| w.trim_end_matches('/') == trimmed);
+    if hit { None } else { Some(pp) }
+}
+
 /// Lightweight digest of a memory for summary queries.
 /// Avoids loading full content and vectors.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -197,6 +223,34 @@ mod tests {
         assert!(mem.owner_agent_id.is_empty());
         assert!(mem.provenance.is_none());
         assert_eq!(mem.version, Some(1));
+    }
+
+    #[test]
+    fn normalize_project_path_whitelist_hit() {
+        let wl = vec!["/home/dongx".to_string()];
+        assert_eq!(normalize_project_path(Some("/home/dongx".into()), &wl), None);
+        assert_eq!(normalize_project_path(Some("/home/dongx/".into()), &wl), None);
+        assert_eq!(
+            normalize_project_path(Some("/home/dongx/project".into()), &wl),
+            Some("/home/dongx/project".to_string())
+        );
+        assert_eq!(
+            normalize_project_path(Some("/other".into()), &wl),
+            Some("/other".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_project_path_empty_and_none() {
+        let wl = vec!["/home/dongx".to_string()];
+        assert_eq!(normalize_project_path(None, &wl), None);
+        assert_eq!(normalize_project_path(Some(String::new()), &wl), None);
+        assert_eq!(normalize_project_path(None, &[]), None);
+        // 空白名单 = 机制关闭，路径原样保留
+        assert_eq!(
+            normalize_project_path(Some("/home/dongx".into()), &[]),
+            Some("/home/dongx".to_string())
+        );
     }
 
     #[test]

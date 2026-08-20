@@ -7,7 +7,7 @@ pub mod scheduler_control;
 pub mod server;
 
 pub use router::build_router;
-pub use server::AppState;
+pub use server::{personal_space_id, AppState};
 
 #[cfg(test)]
 mod tests {

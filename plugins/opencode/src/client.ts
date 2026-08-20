@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { logWarn, logError } from "./logger.js";
 import type { CerebroPluginConfig } from "./config.js";
 
@@ -194,6 +195,7 @@ export class CerebroClient {
       visibility,
       category,
       project_path: projectPath,
+      home_path: homedir(),
     });
   }
 
@@ -203,12 +205,16 @@ export class CerebroClient {
     scope?: string,
     tags?: string[],
     projectPath?: string,
+    globalOnly?: boolean,
+    excludeGlobal?: boolean,
   ): Promise<SearchResult[]> {
     const safeQ = truncateQuery(query, this.getCfg("content", "maxQueryLength", 200));
     const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
     if (scope) params.set("scope", scope);
     if (tags && tags.length > 0) params.set("tags", tags.join(","));
     if (projectPath) params.set("project_path", projectPath);
+    if (globalOnly) params.set("global_only", "1");
+    if (excludeGlobal) params.set("exclude_global", "1");
     const res = await this.request<SearchResponse>(
       `/v1/memories/search?${params}`,
       {},
@@ -253,6 +259,7 @@ export class CerebroClient {
       tags: opts.tags,
       project_name: opts.projectName,
       project_path: opts.projectPath,
+      home_path: homedir(),
     });
   }
 
@@ -279,9 +286,10 @@ export class CerebroClient {
     return this.request("/v2/profile/stats");
   }
 
-  async listRecent(limit = 20, projectPath?: string): Promise<MemoryDto[]> {
+  async listRecent(limit = 20, projectPath?: string, excludeGlobal?: boolean): Promise<MemoryDto[]> {
     const params = new URLSearchParams({ limit: String(limit), offset: "0", sort: "updated_at", order: "desc" });
     if (projectPath) params.set("project_path", projectPath);
+    if (excludeGlobal) params.set("exclude_global", "1");
     const res = await this.request<ListResponse>(
       `/v1/memories?${params}`,
     );
@@ -398,6 +406,7 @@ export class CerebroClient {
       session_title: sessionTitle,
       project_name: projectName,
       project_path: projectPath,
+      home_path: homedir(),
     }, 60000);
   }
 }

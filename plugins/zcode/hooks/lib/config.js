@@ -24,6 +24,7 @@ export const DEFAULTS = {
   injection: {
     recentCount: 5,
     searchCount: 10,
+    globalCount: 3,
     recentTruncateChars: 0, // 0 = no truncation
     searchTruncateChars: 0,
     recentTimeoutMs: 6000,

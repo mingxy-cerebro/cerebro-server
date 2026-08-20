@@ -7,13 +7,26 @@ function shortError(prefix: string, err: unknown): string {
   return `${prefix}: ${msg.slice(0, 200)}`;
 }
 
+// ── memory_store 防重开关（issue #3 议题3，师尊拍板 ⑥A）──────────────────────
+// 开启 = 此客户端已有 session-ingest 自动提取，主动直存会双份入库。
+// 三层保证：①description 改写（选工具前劝退）②handler 不落库（数据层硬保证，返回引导文案非 isError）
+// ③用户侧 rules 文档已同步（~/.claude/rules/memory-tools.md）。
+const STORE_DISABLED = process.env.OMEM_DISABLE_STORE === "1";
+
+const STORE_DISABLED_GUIDE =
+  "Not stored: memory_store is disabled on this client (OMEM_DISABLE_STORE=1). " +
+  "This client already captures memories automatically via session-ingest, so storing directly would duplicate. " +
+  "To remember something, write it into this client's local memory files (e.g. the Claude Code project memory directory) — " +
+  "the content will be ingested into the pool automatically. Do not call memory_store again.";
+
 export function registerTools(server: McpServer, client: OmemClient): void {
   server.registerTool(
     "memory_store",
     {
       title: "Store Memory",
-      description:
-        "Store a new memory in omem. Use this to save important information, decisions, preferences, or context for future reference.",
+      description: STORE_DISABLED
+        ? "DISABLED on this client (OMEM_DISABLE_STORE=1) — automatic session-ingest already captures memories. To save a fact, write it to the client's local memory directory instead; it will be ingested automatically. Calling this tool will not store anything."
+        : "Store a new memory in omem. Use this to save important information, decisions, preferences, or context for future reference.",
       inputSchema: {
         content: z.string().describe("The content to remember"),
         tags: z
@@ -43,6 +56,12 @@ export function registerTools(server: McpServer, client: OmemClient): void {
       },
     },
     async ({ content, tags, source, scope, visibility, category, project_path }) => {
+      // 开关开：物理不落库，normal 返回引导文案（非 isError，不打断工具链）
+      if (STORE_DISABLED) {
+        return {
+          content: [{ type: "text" as const, text: STORE_DISABLED_GUIDE }],
+        };
+      }
       try {
         const memory = await client.createMemory(
           content,

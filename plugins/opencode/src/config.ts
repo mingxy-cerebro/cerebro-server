@@ -18,6 +18,7 @@ export interface CerebroPluginConfig {
   injection: {
     recentCount: number;
     searchCount: number;
+    globalCount: number;
     recentTruncateChars: number;
     searchTruncateChars: number;
     recentTimeoutMs: number;
@@ -61,6 +62,7 @@ const DEFAULTS: CerebroPluginConfig = {
   injection: {
     recentCount: 5,
     searchCount: 10,
+    globalCount: 3,
     recentTruncateChars: 0,   // 0 = 不截断
     searchTruncateChars: 0,   // 0 = 不截断
     recentTimeoutMs: 3000,

@@ -407,6 +407,7 @@ pub async fn should_recall(
                 accessible_spaces: accessible_space_ids.clone(),
                 conversation_context: body.conversation_context.clone(),
                 project_path_filter: sanitized_project_path.clone(),
+                global_scope: None,
             };
             match pipeline.search(&search_req, Some(&overrides)).await {
                 Ok(results) => {
@@ -453,6 +454,7 @@ pub async fn should_recall(
                 accessible_spaces: accessible_space_ids.clone(),
                 conversation_context: body.conversation_context.clone(),
                 project_path_filter: sanitized_project_path.clone(),
+                global_scope: None,
             };
         match pipeline.search(&global_search_req, Some(&overrides)).await {
             Ok(results) => {

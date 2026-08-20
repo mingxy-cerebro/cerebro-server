@@ -4,7 +4,8 @@
     "args": ["-y", "@mingxy/cerebro-mcp@latest"],
     "env": {
       "OMEM_API_KEY": "${OMEM_API_KEY}",
-      "OMEM_API_URL": "${OMEM_API_URL:-https://www.mengxy.cc}"
+      "OMEM_API_URL": "${OMEM_API_URL:-https://www.mengxy.cc}",
+      "OMEM_DISABLE_STORE": "1"
     }
   }
 }

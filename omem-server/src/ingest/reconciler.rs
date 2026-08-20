@@ -569,6 +569,7 @@ impl Reconciler {
                             None,
                             None,
                             project_path,
+                            None,
                         )
                         .await
                     {
@@ -601,7 +602,7 @@ impl Reconciler {
 
             match self
                 .store
-                .fts_search(&fts_query, self.max_per_fact, None, None, None, project_path)
+                .fts_search(&fts_query, self.max_per_fact, None, None, None, project_path, None)
                 .await
             {
                 Ok(results) => {

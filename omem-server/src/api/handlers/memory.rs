@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::server::{personal_space_id, AppState};
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
-use crate::domain::memory::{sanitize_project_path, Memory};
+use crate::domain::memory::{normalize_project_path, sanitize_project_path, GlobalScope, Memory};
 use crate::domain::tenant::AuthInfo;
 use crate::domain::types::MemoryType;
 use crate::ingest::types::{IngestMessage, IngestMode, IngestRequest};
@@ -36,6 +36,9 @@ pub struct CreateMemoryBody {
     pub entity_context: Option<String>,
     pub project_name: Option<String>,
     pub project_path: Option<String>,
+    /// 客户端声明的本机 home 目录（多租户通用：谁的 home 谁声明），命中即把 project_path 归全局
+    #[serde(default)]
+    pub home_path: Option<String>,
 
     // Direct single memory creation
     pub content: Option<String>,
@@ -71,6 +74,12 @@ pub struct SearchQuery {
     pub check_stale: bool,
     #[serde(default)]
     pub project_path: Option<String>,
+    /// 只查全局池（project_path IS NULL）
+    #[serde(default)]
+    pub global_only: bool,
+    /// 只查项目池（不含全局），与 project_path 组合即「该项目的非全局记忆」
+    #[serde(default)]
+    pub exclude_global: bool,
 }
 
 const MAX_SEARCH_LIMIT: usize = 1000;
@@ -93,6 +102,12 @@ pub struct ListQuery {
     pub tags: Option<String>,
     pub visibility: Option<String>,
     pub project_path: Option<String>,
+    /// 只列全局池（project_path IS NULL）
+    #[serde(default)]
+    pub global_only: bool,
+    /// 只列项目池（不含全局）
+    #[serde(default)]
+    pub exclude_global: bool,
     #[serde(default = "default_sort")]
     pub sort: String,
     #[serde(default = "default_order")]
@@ -165,6 +180,37 @@ pub struct ListResponseDto {
 
 /// POST /v1/memories
 ///
+/// 归一化白名单 = 客户端声明 home_path ∪ 部署补充白名单（OMEM_GLOBAL_HOME_PATHS，如笔记仓库等非 home 全局目录）。
+/// home 由客户端声明是多租户通用解：谁的 home 谁声明，服务端不写死任何人的路径。
+fn global_home_whitelist(
+    home_path: Option<&str>,
+    extra: &[String],
+) -> Result<Vec<String>, OmemError> {
+    let mut wl = extra.to_vec();
+    if let Some(hp) = home_path {
+        if !hp.is_empty() {
+            wl.push(sanitize_project_path(hp).map_err(|e| {
+                OmemError::Validation(format!("invalid home_path: {e}"))
+            })?);
+        }
+    }
+    Ok(wl)
+}
+
+/// global_only / exclude_global 查询参数 → 内部 GlobalScope 表示；两者互斥，都不传 = 不过滤（现状）
+fn parse_global_scope(global_only: bool, exclude_global: bool) -> Result<Option<GlobalScope>, OmemError> {
+    if global_only && exclude_global {
+        return Err(OmemError::Validation(
+            "global_only and exclude_global are mutually exclusive".to_string(),
+        ));
+    }
+    Ok(match (global_only, exclude_global) {
+        (true, _) => Some(GlobalScope::Only),
+        (_, true) => Some(GlobalScope::Exclude),
+        _ => None,
+    })
+}
+
 /// Two modes:
 /// - If `messages` present → ingest pipeline (async), returns 202
 /// - If `content` present → create single pinned memory, returns 201
@@ -184,6 +230,11 @@ pub async fn create_memory(
         })?),
         _ => None,
     };
+    // 全局归一化：命中 home/白名单的 project_path 归为 None（全局），一处管三端写入
+    let project_path = normalize_project_path(
+        project_path,
+        &global_home_whitelist(body.home_path.as_deref(), &state.config.global_home_paths)?,
+    );
 
     if let Some(messages) = body.messages {
         if messages.is_empty() {
@@ -348,6 +399,8 @@ pub async fn search_memories(
         _ => None,
     };
 
+    let global_scope = parse_global_scope(params.global_only, params.exclude_global)?;
+
     let search_limit = params.limit.min(MAX_SEARCH_LIMIT);
 
     let vectors = state
@@ -387,6 +440,7 @@ pub async fn search_memories(
             accessible_spaces: accessible_space_ids.clone(),
             conversation_context: None,
             project_path_filter: sanitized_project_path.clone(),
+            global_scope,
         };
 
         let mut retrieval_pipeline = RetrievalPipeline::new(store.clone())
@@ -494,6 +548,7 @@ pub async fn search_memories(
                 accessible_spaces: accessible_spaces_clone,
                 conversation_context: None,
                 project_path_filter,
+                global_scope,
             };
             let mut pipeline = RetrievalPipeline::new(store).with_decay_config(decay_cfg);
             if let Some(reranker) = reranker_clone {
@@ -808,6 +863,7 @@ pub async fn list_memories(
         state: params.state,
         visibility: params.visibility,
         project_path: params.project_path,
+        global_scope: parse_global_scope(params.global_only, params.exclude_global)?,
         sort: params.sort,
         order: params.order,
     };
@@ -1197,6 +1253,7 @@ pub async fn get_tier_changes(
         state: Some("active".to_string()),
         visibility: None,
         project_path: None,
+        global_scope: None,
         sort: String::new(),
         order: String::new(),
     };
@@ -1411,6 +1468,9 @@ pub struct SessionIngestBody {
     pub project_name: Option<String>,
     #[serde(default)]
     pub project_path: Option<String>,
+    /// 客户端声明的本机 home 目录，命中即把 project_path 归全局
+    #[serde(default)]
+    pub home_path: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -1482,6 +1542,11 @@ pub async fn session_ingest(
         })?),
         _ => None,
     };
+    // 全局归一化：主控窗口（HOME 目录）的 session 记忆归全局
+    let project_path = normalize_project_path(
+        project_path,
+        &global_home_whitelist(body.home_path.as_deref(), &state.config.global_home_paths)?,
+    );
     let ingest_source = body.source.unwrap_or_else(|| "session_ingest".to_string());
 
     // Fire-and-forget: process in background, return 202 immediately
@@ -2801,5 +2866,37 @@ mod dedup_tests {
     fn section_guard_only_matches_heading_lines() {
         let content = "plain mention of fix login bug in a body line";
         assert!(!has_section_for_topic(content, "fix login bug"));
+    }
+}
+
+#[cfg(test)]
+mod global_scope_tests {
+    use super::{global_home_whitelist, parse_global_scope};
+    use crate::domain::memory::GlobalScope;
+
+    #[test]
+    fn whitelist_merges_declared_home_with_extra() {
+        let extra = vec!["/srv/notes".to_string()];
+        // None home：只有部署方补充白名单
+        assert_eq!(global_home_whitelist(None, &extra).unwrap(), extra);
+        // 客户端声明 home：并入
+        let wl = global_home_whitelist(Some("/home/alice"), &extra).unwrap();
+        assert_eq!(wl, vec!["/srv/notes".to_string(), "/home/alice".to_string()]);
+        // 空 home_path 不并入
+        assert_eq!(global_home_whitelist(Some(""), &extra).unwrap(), extra);
+    }
+
+    #[test]
+    fn whitelist_rejects_unsafe_home_path() {
+        assert!(global_home_whitelist(Some("/home/../etc"), &[]).is_err());
+        assert!(global_home_whitelist(Some("/home/o'brien"), &[]).is_err());
+    }
+
+    #[test]
+    fn parse_global_scope_mapping_and_mutex() {
+        assert_eq!(parse_global_scope(false, false).unwrap(), None);
+        assert_eq!(parse_global_scope(true, false).unwrap(), Some(GlobalScope::Only));
+        assert_eq!(parse_global_scope(false, true).unwrap(), Some(GlobalScope::Exclude));
+        assert!(parse_global_scope(true, true).is_err());
     }
 }

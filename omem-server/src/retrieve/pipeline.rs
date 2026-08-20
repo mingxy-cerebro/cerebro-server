@@ -7,7 +7,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::domain::error::OmemError;
-use crate::domain::memory::Memory;
+use crate::domain::memory::{GlobalScope, Memory};
 use crate::lifecycle::decay::{DecayConfig, DecayEngine};
 use crate::store::lancedb::LanceStore;
 
@@ -39,6 +39,8 @@ pub struct SearchRequest {
     pub accessible_spaces: Vec<String>,
     pub conversation_context: Option<Vec<String>>,
     pub project_path_filter: Option<String>,
+    /// 全局归属过滤（global_only / exclude_global 查询参数），None = 不过滤
+    pub global_scope: Option<GlobalScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,7 +322,7 @@ impl RetrievalPipeline {
         let vector_fut = async {
             if let Some(ref qv) = request.query_vector {
                 self.store
-                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None, None, project_path)
+                    .vector_search(qv, fetch_limit, 0.0, scope, vis_ref, None, None, project_path, request.global_scope)
                     .await
             } else {
                 Ok(Vec::new())
@@ -329,7 +331,7 @@ impl RetrievalPipeline {
 
         let bm25_fut = async {
             self.store
-                .fts_search(&request.query, fetch_limit, scope, vis_ref, None, project_path)
+                .fts_search(&request.query, fetch_limit, scope, vis_ref, None, project_path, request.global_scope)
                 .await
         };
 
@@ -1332,6 +1334,7 @@ mod tests {
             accessible_spaces: Vec::new(),
             conversation_context: None,
             project_path_filter: None,
+            global_scope: None,
         };
 
         let results = pipeline.search(&request, None).await.expect("search should succeed");
@@ -1398,6 +1401,7 @@ mod tests {
             accessible_spaces: Vec::new(),
             conversation_context: None,
             project_path_filter: None,
+            global_scope: None,
         };
 
         let results = pipeline.search(&request, None).await.expect("search");
@@ -1478,6 +1482,7 @@ mod tests {
             accessible_spaces: Vec::new(),
             conversation_context: None,
             project_path_filter: None,
+            global_scope: None,
         };
 
         let results = pipeline
@@ -1515,6 +1520,7 @@ mod tests {
             accessible_spaces: Vec::new(),
             conversation_context: None,
             project_path_filter: None,
+            global_scope: None,
         };
 
         let results = pipeline.search(&request, None).await.expect("search");
@@ -1563,6 +1569,7 @@ mod tests {
             accessible_spaces: Vec::new(),
             conversation_context: None,
             project_path_filter: None,
+            global_scope: None,
         };
 
         let results = pipeline

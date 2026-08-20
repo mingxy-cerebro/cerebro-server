@@ -1,6 +1,8 @@
 // Cerebro HTTP client — ported from plugins/opencode/src/client.ts
 // Thin fetch wrapper with X-API-Key auth, AbortController timeout, JSON parse.
+import { homedir } from "node:os";
 import { logWarn, logError } from "./logger.js";
+import { toRemoteProjectPath } from "./util.js";
 
 function request(baseUrl, apiKey, path, init = {}, timeoutMs) {
   const controller = new AbortController();
@@ -69,8 +71,13 @@ export class CerebroClient {
     return request(this.baseUrl, this.apiKey, `/v2/profile/stats`);
   }
 
+  // 本机 home（服务端归一化用，谁的 home 谁声明）；Windows 侧路径转 WSL 形态与 project_path 对齐
+  remoteHome() {
+    return toRemoteProjectPath(homedir());
+  }
+
   // ── Memory CRUD + search ────────────────────────────────────────────
-  async listRecent(limit = 20, projectPath) {
+  async listRecent(limit = 20, projectPath, excludeGlobal) {
     const params = new URLSearchParams({
       limit: String(limit),
       offset: "0",
@@ -78,17 +85,20 @@ export class CerebroClient {
       order: "desc",
     });
     if (projectPath) params.set("project_path", projectPath);
+    if (excludeGlobal) params.set("exclude_global", "1");
     const res = await request(this.baseUrl, this.apiKey, `/v1/memories?${params}`);
     return res?.memories ?? [];
   }
 
-  async searchMemories(query, limit = 10, scope, tags, projectPath) {
+  async searchMemories(query, limit = 10, scope, tags, projectPath, globalOnly, excludeGlobal) {
     const maxQ = this.config.content?.maxQueryLength ?? 200;
     const safeQ = (query || "").slice(0, maxQ);
     const params = new URLSearchParams({ q: safeQ, limit: String(limit) });
     if (scope) params.set("scope", scope);
     if (tags && tags.length > 0) params.set("tags", tags.join(","));
     if (projectPath) params.set("project_path", projectPath);
+    if (globalOnly) params.set("global_only", "1");
+    if (excludeGlobal) params.set("exclude_global", "1");
     const res = await request(
       this.baseUrl,
       this.apiKey,
@@ -117,6 +127,7 @@ export class CerebroClient {
         visibility: opts.visibility,
         category: opts.category,
         project_path: opts.projectPath,
+        home_path: this.remoteHome(),
       }),
     });
   }
@@ -152,6 +163,7 @@ export class CerebroClient {
         tags: opts.tags,
         project_name: opts.projectName,
         project_path: opts.projectPath,
+        home_path: this.remoteHome(),
       }),
     });
   }
@@ -171,6 +183,7 @@ export class CerebroClient {
           session_title: sessionTitle,
           project_name: projectName,
           project_path: projectPath,
+          home_path: this.remoteHome(),
         }),
       },
       60000,

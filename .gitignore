@@ -63,6 +63,7 @@ omem-server-release
 
 # === IDE & agent 本地工作区 ===
 .claude/*
+plugins/.claude/
 !.claude/skills/
 .idea
 .vscode

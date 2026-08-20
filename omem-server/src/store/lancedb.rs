@@ -18,7 +18,7 @@ use lancedb::Connection;
 
 use crate::domain::category::Category;
 use crate::domain::error::OmemError;
-use crate::domain::memory::Memory;
+use crate::domain::memory::{GlobalScope, Memory};
 use crate::domain::relation::MemoryRelation;
 use crate::domain::space::Provenance;
 use crate::domain::types::{MemoryState, MemoryType, Tier};
@@ -37,6 +37,8 @@ pub struct ListFilter {
     pub state: Option<String>,
     pub visibility: Option<String>,
     pub project_path: Option<String>,
+    /// 全局归属过滤（global_only / exclude_global 查询参数的内部表示），None = 不过滤
+    pub global_scope: Option<GlobalScope>,
     pub sort: String,
     pub order: String,
 }
@@ -52,6 +54,7 @@ impl Default for ListFilter {
             state: None,
             visibility: None,
             project_path: None,
+            global_scope: None,
             sort: "created_at".to_string(),
             order: "desc".to_string(),
         }
@@ -1854,6 +1857,14 @@ impl LanceStore {
         Ok(all.into_iter().skip(offset).take(limit).collect())
     }
 
+    /// global_scope → SQL 条件片段（None = 不过滤，由调用方省略）
+    fn global_scope_sql(gs: GlobalScope) -> &'static str {
+        match gs {
+            GlobalScope::Only => "project_path IS NULL",
+            GlobalScope::Exclude => "(project_path IS NOT NULL AND project_path != '')",
+        }
+    }
+
     pub async fn vector_search(
         &self,
         query_vector: &[f32],
@@ -1864,6 +1875,7 @@ impl LanceStore {
         tags_filter: Option<&[String]>,
         category_filter: Option<&str>,
         project_path_filter: Option<&str>,
+        global_scope: Option<GlobalScope>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
         let table = self.table.clone();
         let mut query = table
@@ -1912,6 +1924,12 @@ impl LanceStore {
                 escaped, escaped, escaped
             ));
         }
+        if let Some(gs) = global_scope {
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(Self::global_scope_sql(gs));
+        }
         if !filter.is_empty() {
             query = query.only_if(filter);
         }
@@ -1952,6 +1970,7 @@ impl LanceStore {
         visibility_filter: Option<&str>,
         tags_filter: Option<&[String]>,
         project_path_filter: Option<&str>,
+        global_scope: Option<GlobalScope>,
     ) -> Result<Vec<(Memory, f32)>, OmemError> {
         let table = self.table.clone();
 
@@ -1990,6 +2009,12 @@ impl LanceStore {
                 "(project_path IS NULL OR project_path = '{}' OR project_path LIKE '{}/%' OR '{}' LIKE project_path || '/%' OR visibility = 'private')",
                 escaped, escaped, escaped
             ));
+        }
+        if let Some(gs) = global_scope {
+            if !filter.is_empty() {
+                filter.push_str(" AND ");
+            }
+            filter.push_str(Self::global_scope_sql(gs));
         }
         if !filter.is_empty() {
             q = q.postfilter().only_if(filter);
@@ -2308,6 +2333,32 @@ impl LanceStore {
         Ok(count)
     }
 
+    /// 存量清洗：把匹配 filter 的记忆 project_path 置为 SQL NULL（归全局）。
+    /// Returns the number of rows updated.
+    pub async fn nullify_project_path(&self, filter: &str) -> Result<usize, OmemError> {
+        let table = self.table.clone();
+        let count = table
+            .count_rows(Some(filter.to_string()))
+            .await
+            .map_err(|e| OmemError::Storage(format!("count before nullify failed: {e}")))?;
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        table
+            .update()
+            .only_if(filter.to_string())
+            // column() 接受 SQL 表达式字面量，裸 NULL 即 SQL NULL（sql_str 会存成 'NULL' 字符串，勿用）
+            .column("project_path", "NULL")
+            .execute()
+            .await
+            .map_err(|e| OmemError::Storage(format!("nullify_project_path failed: {e}")))?;
+
+        self.after_mutation().await;
+        Ok(count)
+    }
+
     /// Batch update project_path for memories matching the given filter.
     /// Returns the number of rows updated.
     pub async fn batch_update_project_path(
@@ -2410,6 +2461,9 @@ impl LanceStore {
                 "(project_path = '{}' OR project_path LIKE '{}/%' OR '{}' LIKE project_path || '/%')",
                 escaped, escaped, escaped
             ));
+        }
+        if let Some(gs) = filter.global_scope {
+            conditions.push(Self::global_scope_sql(gs).to_string());
         }
 
         if conditions.is_empty() {
@@ -2938,7 +2992,7 @@ mod tests {
         query_vec[0] = 1.0;
 
         let results = store
-            .vector_search(&query_vec, 3, 0.0, None, None, None, None, None)
+            .vector_search(&query_vec, 3, 0.0, None, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2964,7 +3018,7 @@ mod tests {
         store.create_fts_index().await.unwrap();
 
         let results = store
-            .fts_search("programming language", 10, None, None, None, None)
+            .fts_search("programming language", 10, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3459,7 +3513,7 @@ mod tests {
         store.create(&mem_global, Some(&v)).await.unwrap();
 
         let results_a = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/A"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/A"), None)
             .await
             .unwrap();
 
@@ -3469,7 +3523,7 @@ mod tests {
         assert!(!ids_a.contains(&mem_b.id.as_str()), "should NOT include project B memory");
 
         let results_b = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/B"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/B"), None)
             .await
             .unwrap();
 
@@ -3498,7 +3552,7 @@ mod tests {
         store.create(&mem_global, Some(&v)).await.unwrap();
 
         let results = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, None)
+            .vector_search(&v, 10, 0.0, None, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3521,7 +3575,7 @@ mod tests {
         store.create(&mem_null, Some(&v)).await.unwrap();
 
         let results = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/different/project"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/different/project"), None)
             .await
             .unwrap();
 
@@ -3544,7 +3598,7 @@ mod tests {
         store.create(&mem_profile, Some(&v)).await.unwrap();
 
         let results = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/Y"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/Y"), None)
             .await
             .unwrap();
 
@@ -3555,7 +3609,7 @@ mod tests {
         );
 
         let results_same = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/X"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/X"), None)
             .await
             .unwrap();
 
@@ -3582,14 +3636,14 @@ mod tests {
         store.create(&mem_none, Some(&v)).await.unwrap();
 
         let results = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, None)
+            .vector_search(&v, 10, 0.0, None, None, None, None, None, None)
             .await
             .unwrap();
 
         assert_eq!(results.len(), 2, "both memories should be found without filter");
 
         let results_filtered = store
-            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/any/path"))
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/any/path"), None)
             .await
             .unwrap();
 
@@ -3619,7 +3673,7 @@ mod tests {
         store.create_fts_index().await.unwrap();
 
         let results_a = store
-            .fts_search("rust programming", 10, None, None, None, Some("/project/A"))
+            .fts_search("rust programming", 10, None, None, None, Some("/project/A"), None)
             .await
             .unwrap();
 
@@ -3627,5 +3681,122 @@ mod tests {
         assert!(ids_a.contains(&mem_a.id.as_str()), "should include project A memory");
         assert!(ids_a.contains(&mem_global.id.as_str()), "should include global memory");
         assert!(!ids_a.contains(&mem_b.id.as_str()), "should NOT include project B memory");
+    }
+
+    #[tokio::test]
+    async fn test_vector_search_global_only_and_exclude_global() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "project A memory about rust");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_global = make_memory("t-001", "global memory about coding");
+        mem_global.project_path = None;
+
+        let mut v = vec![0.0f32; VECTOR_DIM as usize];
+        v[0] = 1.0;
+
+        store.create(&mem_a, Some(&v)).await.unwrap();
+        store.create(&mem_global, Some(&v)).await.unwrap();
+
+        // global_only: 只回全局（project_path IS NULL）
+        let only = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, None, Some(GlobalScope::Only))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = only.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_global.id.as_str()), "global_only should include global memory");
+        assert!(!ids.contains(&mem_a.id.as_str()), "global_only should NOT include project memory");
+
+        // exclude_global + project_path: 只回该项目的非全局记忆
+        let excl = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/A"), Some(GlobalScope::Exclude))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = excl.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_a.id.as_str()), "exclude_global + project_path should include project A memory");
+        assert!(!ids.contains(&mem_global.id.as_str()), "exclude_global should NOT include global memory");
+
+        // 不传 global_scope = 现状（含全局）
+        let legacy = store
+            .vector_search(&v, 10, 0.0, None, None, None, None, Some("/project/A"), None)
+            .await
+            .unwrap();
+        assert_eq!(legacy.len(), 2, "without global_scope, legacy behavior (global included) is preserved");
+    }
+
+    #[tokio::test]
+    async fn test_fts_search_global_only() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "rust programming language for project A");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_global = make_memory("t-001", "rust programming language globally");
+        mem_global.project_path = None;
+
+        store.create(&mem_a, None).await.unwrap();
+        store.create(&mem_global, None).await.unwrap();
+        store.create_fts_index().await.unwrap();
+
+        let only = store
+            .fts_search("rust programming", 10, None, None, None, None, Some(GlobalScope::Only))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = only.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_global.id.as_str()), "FTS global_only should include global memory");
+        assert!(!ids.contains(&mem_a.id.as_str()), "FTS global_only should NOT include project memory");
+
+        let excluded = store
+            .fts_search("rust programming", 10, None, None, None, None, Some(GlobalScope::Exclude))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = excluded.iter().map(|(m, _)| m.id.as_str()).collect();
+        assert!(ids.contains(&mem_a.id.as_str()), "FTS exclude_global should include project memory");
+        assert!(!ids.contains(&mem_global.id.as_str()), "FTS exclude_global should NOT include global memory");
+    }
+
+    #[tokio::test]
+    async fn test_list_filtered_global_scope() {
+        let (store, _dir) = setup().await;
+
+        let mut mem_a = make_memory("t-001", "project memory");
+        mem_a.project_path = Some("/project/A".to_string());
+        let mut mem_global = make_memory("t-001", "global memory");
+        mem_global.project_path = None;
+
+        store.create(&mem_a, None).await.unwrap();
+        store.create(&mem_global, None).await.unwrap();
+
+        let only = store
+            .list_filtered(&ListFilter { global_scope: Some(GlobalScope::Only), ..Default::default() }, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].id, mem_global.id);
+
+        let excl = store
+            .list_filtered(&ListFilter { global_scope: Some(GlobalScope::Exclude), ..Default::default() }, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(excl.len(), 1);
+        assert_eq!(excl[0].id, mem_a.id);
+    }
+
+    #[tokio::test]
+    async fn test_nullify_project_path_stores_real_null() {
+        let (store, _dir) = setup().await;
+
+        let mut mem = make_memory("t-001", "memory to globalize");
+        mem.project_path = Some("/home/dongx".to_string());
+        store.create(&mem, None).await.unwrap();
+
+        let updated = store
+            .nullify_project_path("project_path = '/home/dongx'")
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let got = store.get_by_id(&mem.id).await.unwrap().expect("memory should exist");
+        // 必须是真 NULL，不是 'NULL' 或 '' 字符串（空串在既有语义里 ≠ 全局）
+        assert!(got.project_path.is_none(), "project_path should be SQL NULL after nullify, got {:?}", got.project_path);
     }
 }

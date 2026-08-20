@@ -1,6 +1,6 @@
 {
   "name": "@mingxy/cerebro-mcp",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Cerebro MCP Server — persistent memory for Cursor, VS Code, Claude Desktop, and any MCP client",
   "type": "module",
   "main": "dist/index.js",

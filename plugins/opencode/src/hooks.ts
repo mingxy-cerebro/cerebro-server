@@ -238,6 +238,7 @@ interface InjectionResult {
   text: string;
   profileCount: number;
   memoryCount: number;
+  globalCount: number;
   projectMemoryCount: number;
   maxScore: number;
   confidence: number;
@@ -253,24 +254,31 @@ export async function buildMemoryInjection(
   const ic = config.injection ?? DEFAULTS.injection;
   const recentCount = ic.recentCount || DEFAULTS.injection.recentCount;
   const searchCount = ic.searchCount || DEFAULTS.injection.searchCount;
+  const globalCount = ic.globalCount || DEFAULTS.injection.globalCount;
   const recentTruncate = ic.recentTruncateChars || 0;   // 0 = 不截断
   const searchTruncate = ic.searchTruncateChars || 0;    // 0 = 不截断
   const profileTimeout = ic.profileTimeoutMs || DEFAULTS.injection.profileTimeoutMs;
   const recentTimeout = ic.recentTimeoutMs || DEFAULTS.injection.recentTimeoutMs;
   const searchTimeout = ic.searchTimeoutMs || DEFAULTS.injection.searchTimeoutMs;
 
-  const [profile, projectMemories, searchResults] = await Promise.all([
+  // 四路并发：profile + global（专区单列）+ recent + search。
+  // 项目 recent/search 路带 exclude_global（拍板 issue #3：专区已单列，项目路不混全局）。
+  const [profile, globalResults, projectMemories, searchResults] = await Promise.all([
     Promise.race([
       client.getInjection(),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), profileTimeout)),
     ]).catch(() => null),
     Promise.race([
-      client.listRecent(recentCount, projectPath),
+      client.searchMemories(query, globalCount, undefined, undefined, undefined, true),
+      new Promise<never[]>((resolve) => setTimeout(() => resolve([]), searchTimeout)),
+    ]).catch(() => []),
+    Promise.race([
+      client.listRecent(recentCount, projectPath, true),
       new Promise<never[]>((resolve) => setTimeout(() => resolve([]), recentTimeout)),
     ]).catch(() => []),
     query
       ? Promise.race([
-          client.searchMemories(query, searchCount, undefined, undefined, projectPath),
+          client.searchMemories(query, searchCount, undefined, undefined, projectPath, undefined, true),
           new Promise<never[]>((resolve) => setTimeout(() => resolve([]), searchTimeout)),
         ]).catch(() => [])
       : Promise.resolve([]),
@@ -284,6 +292,17 @@ export async function buildMemoryInjection(
   }
 
   const seenIds = new Set<string>();
+
+  const dedupedGlobal = (globalResults || []).filter((r) => r.memory?.id && !seenIds.has(r.memory.id));
+  if (dedupedGlobal.length > 0) {
+    sections.push("## Global Memories");
+    for (const r of dedupedGlobal) {
+      seenIds.add(r.memory.id);
+      const age = formatRelativeAge(r.memory.created_at) || "unknown";
+      sections.push(`- (${age}) ${r.memory.content}`);
+    }
+    sections.push("");
+  }
 
   if (projectMemories.length > 0) {
     sections.push("## Recent Project Activity");
@@ -322,6 +341,7 @@ export async function buildMemoryInjection(
     text,
     profileCount: profile?.preference_count ?? 0,
     memoryCount: dedupedResults?.length ?? 0,
+    globalCount: dedupedGlobal.length,
     projectMemoryCount: projectMemories.length,
     maxScore,
     confidence,
@@ -372,6 +392,7 @@ export function chatMessageRecallHook(
 
       const hasContent = (injection.profileCount ?? 0) > 0
         || (injection.memoryCount ?? 0) > 0
+        || (injection.globalCount ?? 0) > 0
         || (injection.projectMemoryCount ?? 0) > 0;
 
       if (injection.text && hasContent && injection.text.length > 20) {
@@ -387,7 +408,7 @@ export function chatMessageRecallHook(
         } as any);
 
         showToast(tui, "🧠 Memory Injected",
-          `${injection.profileCount} prefs · ${injection.projectMemoryCount} project · ${injection.memoryCount} relevant`,
+          `${injection.profileCount} prefs · ${injection.globalCount} global · ${injection.projectMemoryCount} project · ${injection.memoryCount} relevant`,
           "success");
 
         client.createRecallEvent({
@@ -397,9 +418,9 @@ export function chatMessageRecallHook(
           max_score: injection.maxScore,
           llm_confidence: injection.confidence,
           profile_injected: injection.profileCount > 0,
-          kept_count: injection.projectMemoryCount + injection.memoryCount,
+          kept_count: injection.globalCount + injection.projectMemoryCount + injection.memoryCount,
           discarded_count: 0,
-          injected_count: injection.projectMemoryCount + injection.memoryCount,
+          injected_count: injection.globalCount + injection.projectMemoryCount + injection.memoryCount,
           injected_content: injection.text,
         }).catch((e: unknown) => {
           logErr("chatMessageRecallHook createRecallEvent failed", { error: String(e) });

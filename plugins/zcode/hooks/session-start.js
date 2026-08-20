@@ -76,6 +76,7 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   const timeEnabled = sc.timeEnabled !== false;
   const recentCount = ic.recentCount || 5;
   const searchCount = ic.searchCount || 10;
+  const globalCount = ic.globalCount || DEFAULTS.injection.globalCount;
   const recentTruncate = ic.recentTruncateChars || 0; // 0 = no truncation
   const searchTruncate = ic.searchTruncateChars || 0;
   const profileTimeout = ic.profileTimeoutMs || DEFAULTS.injection.profileTimeoutMs;
@@ -88,16 +89,18 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
       new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
     ]);
 
-  // Three concurrent fetches with degraded timeouts — must never block session
-  const [profile, projectMemories, searchResults] = await Promise.all([
+  // Four concurrent fetches with degraded timeouts — must never block session.
+  // Project recent/search paths carry exclude_global (issue #3: global has its own section).
+  const [profile, globalResults, projectMemories, searchResults] = await Promise.all([
     profileEnabled
       ? withTimeout(client.getInjection(projectPath), profileTimeout, null)
       : Promise.resolve(null),
+    withTimeout(client.searchMemories(query, globalCount, undefined, undefined, undefined, true), searchTimeout, []),
     recentEnabled
-      ? withTimeout(client.listRecent(recentCount, projectPath), recentTimeout, null)
+      ? withTimeout(client.listRecent(recentCount, projectPath, true), recentTimeout, null)
       : Promise.resolve([]),
     query
-      ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath), searchTimeout, [])
+      ? withTimeout(client.searchMemories(query, searchCount, undefined, undefined, projectPath, undefined, true), searchTimeout, [])
       : Promise.resolve([]),
   ]);
 
@@ -119,6 +122,18 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   }
 
   const seenIds = new Set();
+
+  // 1.5 Global memories (cross-project, global_only=1)
+  const dedupedGlobal = (globalResults || []).filter((r) => r.memory?.id && !seenIds.has(r.memory.id));
+  if (dedupedGlobal.length > 0) {
+    sections.push("## Global Memories");
+    for (const r of dedupedGlobal) {
+      seenIds.add(r.memory.id);
+      const age = formatRelativeAge(r.memory?.created_at);
+      sections.push(`- (${age}) ${r.memory?.content}`);
+    }
+    sections.push("");
+  }
 
   // 2. Recent project memories
   if (projectMemories && projectMemories.length > 0) {
@@ -161,6 +176,7 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   return {
     text,
     profileCount: profile?.preference_count ?? 0,
+    globalCount: dedupedGlobal.length,
     projectMemoryCount: projectMemories?.length ?? 0,
     memoryCount: deduped.length,
     maxScore,
@@ -294,11 +310,12 @@ async function main() {
   try {
     const injection = await buildInjection(client, projectPath, query, config, injectionCfg);
     const hasContent =
-      injection.profileCount > 0 || injection.memoryCount > 0 || injection.projectMemoryCount > 0;
+      injection.profileCount > 0 || injection.memoryCount > 0 || injection.globalCount > 0 || injection.projectMemoryCount > 0;
 
     if (injection.text && hasContent && injection.text.length > 20) {
       logInfo("SessionStart injection emitted", {
         profileCount: injection.profileCount,
+        globalCount: injection.globalCount,
         projectMemoryCount: injection.projectMemoryCount,
         memoryCount: injection.memoryCount,
         maxScore: injection.maxScore.toFixed(3),
@@ -316,15 +333,16 @@ async function main() {
           max_score: injection.maxScore,
           llm_confidence: Math.min(injection.maxScore, 1.0),
           profile_injected: injection.profileCount > 0,
-          kept_count: injection.projectMemoryCount + injection.memoryCount,
+          kept_count: injection.globalCount + injection.projectMemoryCount + injection.memoryCount,
           discarded_count: 0,
-          injected_count: injection.projectMemoryCount + injection.memoryCount,
+          injected_count: injection.globalCount + injection.projectMemoryCount + injection.memoryCount,
           injected_content: injection.text,
         })
         .catch((e) => logError("createRecallEvent failed", { error: String(e) }));
     } else {
       logDebug("SessionStart: no content available to inject", {
         profileCount: injection.profileCount,
+        globalCount: injection.globalCount,
         projectMemoryCount: injection.projectMemoryCount,
         memoryCount: injection.memoryCount,
       });

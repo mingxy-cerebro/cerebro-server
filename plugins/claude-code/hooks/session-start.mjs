@@ -158,9 +158,9 @@ if (startSource === "clear") {
 await postRecallEvent({
   sessionId: sid,
   recallType: "session_start",
-  queryText: `Session Start · ${injection.projectMemoryCount} memories · ${injection.profileCount > 0 ? "profile" : "no profile"}`,
+  queryText: `Session Start · ${injection.globalCount} global · ${injection.projectMemoryCount} project · ${injection.profileCount > 0 ? "profile" : "no profile"}`,
   profileInjected: injection.profileCount > 0,
-  keptCount: injection.projectMemoryCount,
+  keptCount: injection.globalCount + injection.projectMemoryCount,
   injectedContent: out,
   failureReason: injection.recentFailed ? "recent fetch failed/timeout" : "",
 });
