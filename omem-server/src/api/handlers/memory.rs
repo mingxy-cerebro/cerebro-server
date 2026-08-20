@@ -75,10 +75,10 @@ pub struct SearchQuery {
     #[serde(default)]
     pub project_path: Option<String>,
     /// 只查全局池（project_path IS NULL）
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_bool_loose")]
     pub global_only: bool,
     /// 只查项目池（不含全局），与 project_path 组合即「该项目的非全局记忆」
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_bool_loose")]
     pub exclude_global: bool,
 }
 
@@ -103,10 +103,10 @@ pub struct ListQuery {
     pub visibility: Option<String>,
     pub project_path: Option<String>,
     /// 只列全局池（project_path IS NULL）
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_bool_loose")]
     pub global_only: bool,
     /// 只列项目池（不含全局）
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_bool_loose")]
     pub exclude_global: bool,
     #[serde(default = "default_sort")]
     pub sort: String,
@@ -195,6 +195,31 @@ fn global_home_whitelist(
         }
     }
     Ok(wl)
+}
+
+/// 宽松 bool 反序列化：query string 里 "1"/"0" 也认（三端插件发 =1/=0）
+fn de_bool_loose<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a boolean (true/false/1/0)")
+        }
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<bool, E> {
+            match v {
+                "1" | "true" | "True" => Ok(true),
+                "0" | "false" | "False" | "" => Ok(false),
+                _ => Err(E::custom(format!("invalid boolean: {v}"))),
+            }
+        }
+    }
+    d.deserialize_any(V)
 }
 
 /// global_only / exclude_global 查询参数 → 内部 GlobalScope 表示；两者互斥，都不传 = 不过滤（现状）
