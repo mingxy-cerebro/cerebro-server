@@ -2,7 +2,7 @@
 // Ported from common.sh — no bash/curl/python3 dependency. Pure Node.
 // Config cascade: env > ~/.config/cerebro/config.json > builtin defaults
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync, readdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,7 @@ const DEF = {
   logEnabled: true,
   profileTimeoutMs: 2000,
   recentTimeoutMs: 6000,
+  webGraceMs: 60000,
 };
 
 // ─── Config cascade ──────────────────────────────────────────────────────────
@@ -62,6 +63,7 @@ function loadConfig() {
   const i = cfg.injection || {};
   const ct = cfg.content || {};
   const lg = cfg.logging || {};
+  const w = cfg.web || {};
 
   const num = (env, cfgVal, def) => {
     const v = process.env[env];
@@ -87,6 +89,7 @@ function loadConfig() {
         : DEF.logEnabled,
     profileTimeoutMs: i.profileTimeoutMs || DEF.profileTimeoutMs,
     recentTimeoutMs: i.recentTimeoutMs || DEF.recentTimeoutMs,
+    webGraceMs: num("OMEM_WEB_GRACE_MS", w.graceMs, DEF.webGraceMs),
   };
 }
 
@@ -220,31 +223,57 @@ function _log(level, msg) {
   } catch {}
 }
 
-// ─── Web server refcount (multi-session lifecycle) ───────────────────────────
-const REFCOUNT_FILE = join(HOME, ".config/cerebro/web-server.refcount");
+// ─── Web server liveness (truth = OS process table) ──────────────────────────
+// Refcount bookkeeping leaked to 169 and never hit zero — counting events is
+// unreliable (killed terminals never decrement). Instead: each CC session
+// drops sessions/<sid>.live holding its CC main pid; anyone interested sweeps
+// the dir with kill(pid, 0) — dead pids get swept, no ledger to rot.
+const SESSIONS_DIR = join(HOME, ".config/cerebro/sessions");
 const WEB_PID_FILE = join(HOME, ".config/cerebro/web-server.pid");
 
-export function refCountInc() {
+export function writeLive(sid) {
+  if (!sid) return;
   try {
-    const n = existsSync(REFCOUNT_FILE) ? parseInt(readFileSync(REFCOUNT_FILE, "utf-8").trim(), 10) || 0 : 0;
-    writeFileSync(REFCOUNT_FILE, String(n + 1));
+    mkdirSync(SESSIONS_DIR, { recursive: true });
+    writeFileSync(join(SESSIONS_DIR, `${sid}.live`), String(process.ppid));
   } catch {}
 }
 
-export function refCountDec() {
+export function removeLive(sid) {
+  if (!sid) return;
+  try { unlinkSync(join(SESSIONS_DIR, `${sid}.live`)); } catch {}
+}
+
+export function countLiveCC() {
+  let alive = 0;
   try {
-    let n = existsSync(REFCOUNT_FILE) ? parseInt(readFileSync(REFCOUNT_FILE, "utf-8").trim(), 10) || 0 : 0;
-    n = Math.max(0, n - 1);
-    if (n === 0) {
+    for (const f of readdirSync(SESSIONS_DIR)) {
+      if (!f.endsWith(".live")) continue;
+      const p = join(SESSIONS_DIR, f);
       try {
-        const pid = parseInt(readFileSync(WEB_PID_FILE, "utf-8").trim(), 10);
-        if (pid) process.kill(pid, "SIGTERM");
-      } catch {}
-      try { unlinkSync(WEB_PID_FILE); } catch {}
-      try { unlinkSync(REFCOUNT_FILE); } catch {}
-    } else {
-      writeFileSync(REFCOUNT_FILE, String(n));
+        process.kill(parseInt(readFileSync(p, "utf-8").trim(), 10), 0); // throws if dead
+        alive++;
+      } catch (e) {
+        // EPERM = process exists but is root's — still alive; only ESRCH = dead
+        if (e && e.code === "EPERM") alive++;
+        else { try { unlinkSync(p); } catch {} } // stale — sweep
+      }
     }
+  } catch {} // dir missing = no session ever
+  return alive;
+}
+
+// Kill a stale web-server daemon so a fresh one can bind (rebirth on every
+// session start — no version sniffing). pid verified via /proc cmdline to
+// survive pid reuse; non-Linux (no /proc) degrades to no-op.
+export function killStaleWebServer() {
+  try {
+    const pid = parseInt(readFileSync(WEB_PID_FILE, "utf-8").trim(), 10);
+    if (!pid || pid === process.pid) return;
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+    if (!cmdline.includes("web-server.mjs")) return; // not ours — don't touch
+    process.kill(pid, "SIGTERM");
+    setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 500).unref();
   } catch {}
 }
 

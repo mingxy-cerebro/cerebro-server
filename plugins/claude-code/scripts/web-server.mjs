@@ -128,5 +128,44 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[cerebro web-server] serving ${WEB_DIR} at http://localhost:${PORT} (pid=${process.pid})`);
 });
 
-process.on("SIGTERM", () => server.close(() => { try { unlinkSync(PID_FILE); } catch {} process.exit(0); }));
-process.on("SIGINT", () => server.close(() => { try { unlinkSync(PID_FILE); } catch {} process.exit(0); }));
+// ── CC-liveness watchdog ─────────────────────────────────────────────────────
+// Truth = OS process table: sessions/<sid>.live maps each CC session to its
+// CC main pid. Sweep on an interval, kill(pid, 0) each, sweep stale ones.
+// Zero CC sessions alive → count down the grace window → self-exit. Survives
+// killed terminals (no SessionEnd needed) — refcount bookkeeping is gone.
+const SESSIONS_DIR = path.join(process.env.HOME || process.env.USERPROFILE || "", ".config/cerebro/sessions");
+const GRACE_MS = parseInt(process.env.OMEM_WEB_GRACE_MS || "", 10) || 60_000;
+const WATCH_MS = parseInt(process.env.OMEM_WEB_WATCH_MS || "", 10) || 60_000;
+let zeroSince = 0; // 0 = CC alive (or unknown)
+
+setInterval(() => {
+  let alive = 0;
+  try {
+    for (const f of fs.readdirSync(SESSIONS_DIR)) {
+      if (!f.endsWith(".live")) continue;
+      const fp = path.join(SESSIONS_DIR, f);
+      try {
+        process.kill(parseInt(fs.readFileSync(fp, "utf-8").trim(), 10), 0);
+        alive++;
+      } catch (e) {
+        if (e && e.code === "EPERM") alive++; // exists, root-owned — alive
+        else { try { fs.unlinkSync(fp); } catch {} }
+      }
+    }
+  } catch {} // dir missing = no CC session ever
+  if (alive > 0) { zeroSince = 0; return; }
+  if (!zeroSince) zeroSince = Date.now();
+  if (Date.now() - zeroSince >= GRACE_MS) {
+    console.log(`[cerebro web-server] no CC sessions alive for ${GRACE_MS / 1000}s, self-exiting`);
+    try { fs.unlinkSync(PID_FILE); } catch {}
+    process.exit(0);
+  }
+}, WATCH_MS);
+
+const shutdown = () => {
+  try { server.closeAllConnections(); } catch {} // Node ≥18.2; old node degrades
+  server.close(() => { try { unlinkSync(PID_FILE); } catch {} process.exit(0); });
+  setTimeout(() => process.exit(0), 1000).unref();
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

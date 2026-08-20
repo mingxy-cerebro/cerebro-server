@@ -5,7 +5,7 @@
 // Fix: spawn detached child process, parent exits immediately.
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { config, PLUGIN_ROOT, refCountDec, parseStdinJSON, emit, logDebug, writePendingClearFlush } from "./common.mjs";
+import { config, PLUGIN_ROOT, removeLive, parseStdinJSON, emit, logDebug, writePendingClearFlush } from "./common.mjs";
 
 if (!config.apiKey) { emit({}); process.exit(0); }
 
@@ -20,7 +20,7 @@ logDebug(`session-end: sid=${sid} reason=${reason} tp=${tp ? tp.slice(-40) : "EM
 // flush to it so the result lands in that hook's toast (detached flush is mute).
 if (reason === "clear" && tp && sid) {
   writePendingClearFlush(tp, sid);
-  refCountDec();
+  removeLive(sid);
   emit({});
   process.exit(0);
 }
@@ -38,7 +38,7 @@ if (tp && sid) {
   } catch {}
 }
 
-refCountDec();
+removeLive(sid);
 emit({
   systemMessage: `🧠 Cerebro · Session flush in background`,
 });

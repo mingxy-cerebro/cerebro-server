@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import {
-  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, refCountInc, readCompactResult, readPendingClearFlush, clearPendingClearFlush, flushSessionIngest, injectionConfig,
+  config, PLUGIN_ROOT, PLUGIN_VERSION, detectProjectPath, parseStdinJSON, emit, buildMemoryInjection, postRecallEvent, writeLive, killStaleWebServer, readCompactResult, readPendingClearFlush, clearPendingClearFlush, flushSessionIngest, injectionConfig,
 } from "./common.mjs";
 import { judgeMaterial, readState, writeStateForReport, fetchOrphanResult } from "./dream.mjs";
 
@@ -61,24 +61,18 @@ const input = parseStdinJSON();
 const sid = input.session_id || "";
 const startSource = input.source || ""; // "startup" | "resume" | "clear" | "compact"
 
-// ─── web server 拉起（probe + detached spawn，跨平台）─────────────────────────
-const webPort = process.env.OMEM_LOCAL_PORT || "5212";
+// ─── web server 换血（杀旧起新，无条件——升级即生效，无版本探测分支）──────────
+killStaleWebServer();
+await new Promise((r) => setTimeout(r, 700)); // old daemon TERM→KILL, port frees
 try {
-  const resp = await fetch(`http://127.0.0.1:${webPort}/health`, {
-    signal: AbortSignal.timeout(1000),
-  });
-  if (!resp.ok) throw new Error("not healthy");
-} catch {
-  try {
-    const child = spawn(
-      process.execPath,
-      [join(PLUGIN_ROOT, "scripts", "web-server.mjs")],
-      { detached: true, stdio: "ignore", env: { ...process.env } },
-    );
-    child.unref();
-  } catch {}
-}
-refCountInc();
+  const child = spawn(
+    process.execPath,
+    [join(PLUGIN_ROOT, "scripts", "web-server.mjs")],
+    { detached: true, stdio: "ignore", env: { ...process.env, OMEM_WEB_GRACE_MS: String(config.webGraceMs) } },
+  );
+  child.unref();
+} catch {}
+writeLive(sid);
 
 // ─── API key 检查 ────────────────────────────────────────────────────────────
 if (!config.apiKey) {
@@ -119,8 +113,8 @@ out = out.replace("[CEREBRO-MEMORY]", `[CEREBRO-MEMORY]\n${timeLine}`);
 // CEREBRO-STATUS 通过 systemMessage 显示给用户（Q2: toast 替代方案）
 const memCount = injection.projectMemoryCount + injection.searchCount;
 let statusMsg = injection.recentFailed
-  ? `🧠 Cerebro v${PLUGIN_VERSION} · Recent ✗ (timeout) · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`
-  : `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
+  ? `🧠 Cerebro v${PLUGIN_VERSION} · Recent ✗ (timeout) · Global ${injection.globalCount} · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`
+  : `🧠 Cerebro v${PLUGIN_VERSION} · Connected · ${memCount} memories · Global ${injection.globalCount} · Profile ${injection.profileCount > 0 ? "✓" : "✗"}`;
 
 // After compact, PostCompact toast gets overridden by SessionStart:compact toast.
 // Merge PostCompact ingest result into this toast so user sees it.
