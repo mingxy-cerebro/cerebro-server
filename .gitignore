@@ -53,3 +53,17 @@ omem-server-release
 # === 环境杂痕（勿 commit）===
 .bashrc
 .bash_profile
+# WSL/Windows 工具误落的空 dotfiles（0B，文件系统锁死删不掉，ignore 兜底）
+.gitconfig
+.profile
+.zprofile
+.zshrc
+.ripgreprc
+.gitmodules
+
+# === IDE & agent 本地工作区 ===
+.claude/
+.idea
+.vscode
+.serena/
+.zcode/
