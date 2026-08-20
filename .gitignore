@@ -62,7 +62,8 @@ omem-server-release
 .gitmodules
 
 # === IDE & agent 本地工作区 ===
-.claude/
+.claude/*
+!.claude/skills/
 .idea
 .vscode
 .serena/
