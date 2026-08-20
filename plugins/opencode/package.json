@@ -23,7 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "prepublishOnly": "npm run build:web && npx tsc --noEmit -p tsconfig.publish.json"
+    "prepublishOnly": "npm run build:web && npx tsc --noEmit -p tsconfig.json"
   },
   "keywords": [
     "opencode",
