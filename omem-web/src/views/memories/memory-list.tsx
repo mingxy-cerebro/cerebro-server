@@ -55,6 +55,8 @@ interface MemoriesResponse {
 }
 
 const SEARCH_DEBOUNCE_MS = 300
+// 项目筛选下拉的「全局」哨兵值——命中时改发 global_only=1（project_path IS NULL 池）
+const GLOBAL_SCOPE_VALUE = "__global__"
 
 export function formatContent(content: string | undefined, maxLength: number = 120) {
   if (!content) return "—"
@@ -187,7 +189,9 @@ export function MemoryListPage() {
       } else if (visibilityFilter === "global") {
         params.visibility = "global"
       }
-      if (projectPathFilter) {
+      if (projectPathFilter === GLOBAL_SCOPE_VALUE) {
+        params.global_only = 1
+      } else if (projectPathFilter) {
         params.project_path = projectPathFilter
       }
       const response = await apiClient.get<MemoriesResponse>("/v1/memories", {
@@ -234,7 +238,7 @@ export function MemoryListPage() {
     tierFilter !== "all" ? { label: `分类: ${tierFilter}`, onClear: () => setTierFilter("all") } : null,
     sortBy !== "created_at" ? { label: `排序: ${sortBy}`, onClear: () => setSortBy("created_at") } : null,
     visibilityFilter !== "all" ? { label: visibilityFilter === "private" ? "仅私密" : "仅普通", onClear: () => setVisibilityFilter("all") } : null,
-    projectPathFilter ? { label: `项目: ${projectPathFilter.split("/").pop()}`, onClear: () => { setProjectPathFilter(""); setPage(1) } } : null,
+    projectPathFilter ? { label: projectPathFilter === GLOBAL_SCOPE_VALUE ? "项目: 全局" : `项目: ${projectPathFilter.split("/").pop()}`, onClear: () => { setProjectPathFilter(""); setPage(1) } } : null,
   ].filter(Boolean) as { label: string; onClear: () => void }[]
 
   const handleResetFilters = () => {
@@ -408,19 +412,16 @@ export function MemoryListPage() {
             <option value="private">私密记忆</option>
           </select>
 
-          {projectPaths.length > 0 && (
-            <>
-              <FolderOpen className="size-3.5 text-muted-foreground" />
-              <select
-                value={projectPathFilter}
-                onChange={(e) => { setProjectPathFilter(e.target.value); setPage(1) }}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm max-w-[200px] truncate"
-              >
-                <option value="">全部项目</option>
-                {projectPaths.map((p) => <option key={p} value={p}>{p.split("/").pop() || p}</option>)}
-              </select>
-            </>
-          )}
+          <FolderOpen className="size-3.5 text-muted-foreground" />
+          <select
+            value={projectPathFilter}
+            onChange={(e) => { setProjectPathFilter(e.target.value); setPage(1) }}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm max-w-[200px] truncate"
+          >
+            <option value="">全部项目</option>
+            <option value={GLOBAL_SCOPE_VALUE}>🌐 全局（无项目）</option>
+            {projectPaths.map((p) => <option key={p} value={p}>{p.split("/").pop() || p}</option>)}
+          </select>
 
           {activeFilters.length > 0 && (
             <Button variant="ghost" size="sm" onClick={handleResetFilters} className="text-muted-foreground hover:text-foreground">

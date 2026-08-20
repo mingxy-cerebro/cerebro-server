@@ -103,6 +103,17 @@ interface MemoryDetail {
   relations?: MemoryRelation[]
 }
 
+// agent_id 是机器标识（kebab-case），显示层映射成人名——存量新存通吃
+const AGENT_LABELS: Record<string, string> = {
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  zcode: "ZCode",
+}
+function formatAgentName(agentId?: string): string {
+  if (!agentId) return "—"
+  return AGENT_LABELS[agentId] ?? agentId
+}
+
 function formatDate(dateString: string) {
   const date = new Date(dateString)
   return date.toLocaleString("zh-CN", {
@@ -855,7 +866,7 @@ export function MemoryDetailPage() {
                     <div className="text-sm font-medium">{memory.scope || "—"}</div>
                   )}
                 </div>
-                <MetaItem label="Agent ID" value={memory.agent_id || "—"} />
+                <MetaItem label="Agent ID" value={formatAgentName(memory.agent_id)} />
                 <MetaItem label="Session ID" value={memory.session_id || "—"} />
               </CardContent>
             </Card>

@@ -71,11 +71,14 @@ curl https://www.mengxy.cc/health   # expect 200
 
 ### Frontend (omem-web)
 
+The panel is **embedded in each plugin's `web/` dir** (served locally by the plugin's web-server, port 5212) — nginx does NOT serve it (no root points at /var/www/omem-web; scp there is a dead end).
+
 ```bash
-cd /mnt/d/dev/github/project/omem-web && npm run build
-scp -r dist/* root@47.93.199.242:/var/www/omem-web/   # omem-web, NOT /var/www/omem/!
+cd omem-web && npm run build
+# then copy dist/* into each plugin's web/ dir and go through the plugin release trio
+cp -r dist/* ../plugins/claude-code/web/ && cp -r dist/* ../plugins/opencode/web/ && cp -r dist/* ../plugins/zcode/web/
 ```
-Nginx `expires 7d` cache — user needs Ctrl+Shift+R.
+(scripts/build-plugin-web.sh covers opencode only)
 
 ### Plugin release trio (mandatory after touching plugins/)
 
