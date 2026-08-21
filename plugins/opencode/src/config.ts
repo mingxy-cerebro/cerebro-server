@@ -24,6 +24,10 @@ export interface CerebroPluginConfig {
     recentTimeoutMs: number;
     searchTimeoutMs: number;
     profileTimeoutMs: number;
+    /** digestMode(spec 刀5):注入只给 id+l0+l1 摘要,详情按需 memory_get。默认关。 */
+    digestMode?: boolean;
+    /** digestMode 提示行,用户可覆写自家口味(不改代码不重发插件)。 */
+    digestPrompt?: string;
   };
   ingest: {
     autoCaptureThreshold: number;
@@ -68,6 +72,9 @@ const DEFAULTS: CerebroPluginConfig = {
     recentTimeoutMs: 3000,
     searchTimeoutMs: 5000,
     profileTimeoutMs: 2000,
+    digestMode: false,
+    digestPrompt:
+      "Digest mode: memory entries above are one-line summaries (id + title). When an entry matters to the task, call the memory_get tool with its id to load the full content.",
   },
   ingest: {
     autoCaptureThreshold: 5,

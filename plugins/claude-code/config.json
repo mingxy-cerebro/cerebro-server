@@ -15,6 +15,10 @@
     "profileEnabled": true,
     "recentActivityEnabled": true
   },
+  "injection": {
+    "digestMode": false,
+    "digestPrompt": "Digest mode: memory entries above are one-line summaries (id + title). When an entry matters to the task, call the memory_get tool with its id to load the full content."
+  },
   "stopFlush": {
     "enabled": true,
     "interval": 5

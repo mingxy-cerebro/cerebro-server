@@ -284,6 +284,22 @@ export async function buildMemoryInjection(
       : Promise.resolve([]),
   ]);
 
+  // digestMode(spec 刀5):注入只给 id+l0+l1 一行,详情按需 memory_get——
+  // 被动注入给摘要、主动 search 给全文的不对称是原则。
+  const digestMode = ic.digestMode === true;
+  const digestPrompt =
+    typeof ic.digestPrompt === "string" && ic.digestPrompt.trim()
+      ? ic.digestPrompt.trim()
+      : DEFAULTS.injection.digestPrompt!;
+  const renderLine = (age: string, m: { id: string; content: string; l0_abstract?: string; l1_overview?: string }, truncateChars = 0): string => {
+    const content = truncateChars > 0 ? truncate(m.content, truncateChars) : m.content;
+    if (!digestMode) return `- (${age}) ${content}`;
+    const l0 = (m.l0_abstract || "").trim();
+    const l1 = (m.l1_overview || "").trim();
+    const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
+    return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
+  };
+
   const sections: string[] = ["[CEREBRO-MEMORY]", ""];
 
   if (profile?.content) {
@@ -298,8 +314,7 @@ export async function buildMemoryInjection(
     sections.push("## Global Memories");
     for (const r of dedupedGlobal) {
       seenIds.add(r.memory.id);
-      const age = formatRelativeAge(r.memory.created_at) || "unknown";
-      sections.push(`- (${age}) ${r.memory.content}`);
+      sections.push(renderLine(formatRelativeAge(r.memory.created_at) || "unknown", r.memory));
     }
     sections.push("");
   }
@@ -308,9 +323,7 @@ export async function buildMemoryInjection(
     sections.push("## Recent Project Activity");
     for (const m of projectMemories) {
       seenIds.add(m.id);
-      const age = formatRelativeAge(m.updated_at || m.created_at) || "unknown";
-      const content = recentTruncate > 0 ? truncate(m.content, recentTruncate) : m.content;
-      sections.push(`- (${age}) ${content}`);
+      sections.push(renderLine(formatRelativeAge(m.updated_at || m.created_at) || "unknown", m, recentTruncate));
     }
     sections.push("");
   }
@@ -319,10 +332,13 @@ export async function buildMemoryInjection(
   if (dedupedResults.length > 0) {
     sections.push("## Relevant Memories");
     for (const r of dedupedResults) {
-      const age = formatRelativeAge(r.memory.created_at) || "unknown";
-      const content = searchTruncate > 0 ? truncate(r.memory.content, searchTruncate) : r.memory.content;
-      sections.push(`- (${age}) ${content}`);
+      sections.push(renderLine(formatRelativeAge(r.memory.created_at) || "unknown", r.memory, searchTruncate));
     }
+    sections.push("");
+  }
+
+  if (digestMode) {
+    sections.push(digestPrompt);
     sections.push("");
   }
 

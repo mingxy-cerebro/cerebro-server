@@ -74,6 +74,22 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   const profileEnabled = sc.profileEnabled !== false;
   const recentEnabled = sc.recentActivityEnabled !== false;
   const timeEnabled = sc.timeEnabled !== false;
+  // digestMode(spec 刀5):注入只给 id+l0+l1 摘要,详情按需 memory_get。
+  // 开关+提示行挂用户 cerebro.json 的 injection 段,可调优可覆写自家口味。
+  const di = injectionCfg?.injection ?? {};
+  const digestMode = di.digestMode === true;
+  const digestPrompt =
+    typeof di.digestPrompt === "string" && di.digestPrompt.trim()
+      ? di.digestPrompt.trim()
+      : "Digest mode: memory entries above are one-line summaries (id + title). When an entry matters to the task, call the memory_get tool with its id to load the full content.";
+  const renderLine = (age, m, truncateChars = 0) => {
+    const content = truncateChars > 0 ? truncateAtBoundary(m.content, truncateChars) : m.content;
+    if (!digestMode) return `- (${age}) ${content}`;
+    const l0 = (m.l0_abstract || "").trim();
+    const l1 = (m.l1_overview || "").trim();
+    const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
+    return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
+  };
   const recentCount = ic.recentCount || 5;
   const searchCount = ic.searchCount || 10;
   const globalCount = ic.globalCount || DEFAULTS.injection.globalCount;
@@ -129,8 +145,7 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
     sections.push("## Global Memories");
     for (const r of dedupedGlobal) {
       seenIds.add(r.memory.id);
-      const age = formatRelativeAge(r.memory?.created_at);
-      sections.push(`- (${age}) ${r.memory?.content}`);
+      sections.push(renderLine(formatRelativeAge(r.memory?.created_at), r.memory));
     }
     sections.push("");
   }
@@ -140,9 +155,7 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
     sections.push("## Recent Project Activity");
     for (const m of projectMemories) {
       seenIds.add(m.id);
-      const age = formatRelativeAge(m.updated_at || m.created_at);
-      const content = recentTruncate > 0 ? truncateAtBoundary(m.content, recentTruncate) : m.content;
-      sections.push(`- (${age}) ${content}`);
+      sections.push(renderLine(formatRelativeAge(m.updated_at || m.created_at), m, recentTruncate));
     }
     sections.push("");
   }
@@ -152,11 +165,13 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
   if (deduped.length > 0) {
     sections.push("## Relevant Memories");
     for (const r of deduped) {
-      const age = formatRelativeAge(r.memory?.created_at);
-      const content =
-        searchTruncate > 0 ? truncateAtBoundary(r.memory?.content, searchTruncate) : r.memory?.content;
-      sections.push(`- (${age}) ${content}`);
+      sections.push(renderLine(formatRelativeAge(r.memory?.created_at), r.memory, searchTruncate));
     }
+    sections.push("");
+  }
+
+  if (digestMode) {
+    sections.push(digestPrompt);
     sections.push("");
   }
 

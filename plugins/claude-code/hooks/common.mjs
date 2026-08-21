@@ -602,6 +602,12 @@ export function truncateQuery(text, len) {
 const BOUNDARY_SEARCH_RATIO = 0.6;
 const MAX_INJECTION_CHARS = 10000; // CC additionalContext 单字段上限
 
+// digestMode 默认提示行(spec docs/memory-dedup 刀5):被动注入给摘要+id,
+// 详情按需 memory_get——渐进式披露。用户可在 cerebro.json injection.digestPrompt
+// 覆写成自家口味(称呼=注意力钩子),不改代码不重发插件。
+const DEFAULT_DIGEST_PROMPT =
+  "Digest mode: memory entries above are one-line summaries (id + title). When an entry matters to the task, call the memory_get tool with its id to load the full content.";
+
 export function formatRelativeAge(isoDate) {
   if (!isoDate) return "unknown";
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -718,6 +724,21 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
   } catch {}
 
   // build [CEREBRO-MEMORY] block
+  const inj = injectionConfig.injection || {};
+  const digestMode = inj.digestMode === true;
+  const digestPrompt =
+    typeof inj.digestPrompt === "string" && inj.digestPrompt.trim()
+      ? inj.digestPrompt.trim()
+      : DEFAULT_DIGEST_PROMPT;
+  // digestMode 条目渲染:id+l0+l1 一行,主动 search 仍全文(不对称是原则)
+  const renderLine = (age, m) => {
+    if (!digestMode) return `- (${age}) ${m.content || ""}`;
+    const l0 = (m.l0_abstract || "").trim();
+    const l1 = (m.l1_overview || "").trim();
+    const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
+    return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
+  };
+
   const sections = ["[CEREBRO-MEMORY]", ""];
 
   if (profileContent) {
@@ -730,8 +751,7 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
     sections.push("## Global Memories");
     for (const m of globalMemories) {
       if (m.id) seenIds.add(m.id);
-      const age = formatRelativeAge(m.updated_at || m.created_at);
-      sections.push(`- (${age}) ${m.content || ""}`);
+      sections.push(renderLine(formatRelativeAge(m.updated_at || m.created_at), m));
     }
     sections.push("");
   }
@@ -740,8 +760,7 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
     sections.push("## Recent Project Activity");
     for (const m of projectMemories) {
       if (m.id) seenIds.add(m.id);
-      const age = formatRelativeAge(m.updated_at || m.created_at);
-      sections.push(`- (${age}) ${m.content || ""}`);
+      sections.push(renderLine(formatRelativeAge(m.updated_at || m.created_at), m));
     }
     sections.push("");
   }
@@ -750,9 +769,13 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
   if (dedupedResults.length > 0) {
     sections.push("## Relevant Memories");
     for (const r of dedupedResults) {
-      const age = formatRelativeAge(r.memory.created_at);
-      sections.push(`- (${age}) ${r.memory.content || ""}`);
+      sections.push(renderLine(formatRelativeAge(r.memory.created_at), r.memory));
     }
+    sections.push("");
+  }
+
+  if (digestMode) {
+    sections.push(digestPrompt);
     sections.push("");
   }
 

@@ -2,7 +2,6 @@ use crate::domain::error::OmemError;
 use crate::domain::memory::Memory;
 use crate::domain::relation::RelationType;
 use crate::embed::EmbedService;
-use crate::ingest::noise::cosine_similarity;
 use crate::ingest::refine_prompt::{build_refine_prompt, RefineInput, RefineOutput};
 use crate::llm::{complete_json, LlmService};
 use crate::store::lancedb::LanceStore;
@@ -116,61 +115,64 @@ pub async fn walk_to_chain_tail(
     }
 }
 
-/// 用topic的l0_abstract做embedding，搜索同session_id的WORK记忆
-/// cosine > 0.72 且 session_id匹配 → 返回最相似的
-#[deprecated(note = "session_ingest REFINE path removed; similar-work lookup no longer needed. Kept for reference.")]
-pub async fn find_similar_work_memory(
+/// 刀3(docs/memory-dedup SPEC):新建 WORK 记忆前的跨 session 向量防线。
+/// 调用方同 session 的段头匹配已全部 miss 时,用 topic 向量在同 project_path
+/// 的大事记记忆里做 cosine 检索,超阈值返回旧链链尾作为追加目标——段头匹配
+/// 是字面级,LLM 给旧话题起新名时 miss;向量是语义级,补这层。
+/// 仅 session_ingest 源、非 private;跨项目靠 project_path_filter 的双向
+/// 前缀匹配天然隔离(农服的积分进不了 omem 的候选池)。
+/// ponytail: limit=20 候选靠内存过滤缩到 WORK 大事记,池子大到漏召回再调。
+pub async fn find_cross_session_work_tail(
     store: &LanceStore,
-    embed: &Arc<dyn EmbedService>,
-    topic_l0: &str,
-    session_id: &str,
-    _tenant_id: &str,
-) -> Result<Option<Memory>, OmemError> {
-    let vectors = embed
-        .embed(&[topic_l0.to_string()])
-        .await
-        .map_err(|e| OmemError::Embedding(format!("embed failed: {e}")))?;
-    let query_vector = match vectors.into_iter().next() {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-
-    let session_memories = store.find_memories_by_session_id(session_id, 100).await?;
-
-    // MemoryType has no Work variant; session_ingest distinguishes via scope
-    let work_memories: Vec<Memory> = session_memories
-        .into_iter()
-        .filter(|m| m.scope != "private" && m.source.as_deref() == Some("session_ingest"))
-        .collect();
-
-    let mut best: Option<(Memory, f32)> = None;
-    for m in &work_memories {
-        let mem_vector = match store.get_vector_by_id(&m.id).await? {
-            Some(v) => v,
-            None => continue,
-        };
-        let score = cosine_similarity(&query_vector, &mem_vector);
-        if score > 0.72 {
-            if best.as_ref().map_or(true, |(_, prev)| score > *prev) {
-                best = Some((m.clone(), score));
-            }
+    query_vector: &[f32],
+    project_path: &str,
+    min_score: f32,
+) -> Result<Option<(Memory, f32)>, OmemError> {
+    // project_path_filter 自带 `OR visibility='private'` 旁路,内存侧必须重滤 private
+    let hits = store
+        .vector_search(
+            query_vector,
+            20,
+            min_score,
+            None,
+            None,
+            None,
+            None,
+            Some(project_path),
+            None,
+        )
+        .await?;
+    for (m, score) in hits {
+        if m.scope != "private" && m.source.as_deref() == Some("session_ingest") {
+            tracing::info!(
+                matched_id = %m.id,
+                score = score,
+                "cross_session_dedup: embedding hit, walking to chain tail"
+            );
+            return Ok(Some((walk_to_chain_tail(store, &m).await, score)));
         }
     }
+    Ok(None)
+}
 
-    let best_match = match best {
-        Some((m, score)) => {
-            tracing::info!(
-                best_id = %m.id,
-                score = score,
-                "find_similar_work_memory: best embedding match"
-            );
-            m
-        }
-        None => return Ok(None),
-    };
+/// 刀3 灰度开关:默认关,`OMEM_DEDUP_MERGE=1|true` 启用。先关后开,生产观察
+/// 误合并率满意后再考虑翻默认(可回滚铁律)。
+pub fn dedup_merge_enabled() -> bool {
+    std::env::var("OMEM_DEDUP_MERGE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
-    let tail = walk_to_chain_tail(store, &best_match).await;
-    Ok(Some(tail))
+/// 刀3 cosine 阈值:默认 0.72(SPEC 定),`OMEM_DEDUP_COSINE` 可调。
+pub fn dedup_cosine_threshold() -> f32 {
+    clamp_threshold(std::env::var("OMEM_DEDUP_COSINE").ok().as_deref())
+}
+
+/// 纯函数:阈值解析+夹取 [0.5, 0.99],防手滑写个 0.1 把整库缝成一条。
+fn clamp_threshold(raw: Option<&str>) -> f32 {
+    raw.and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.72)
+        .clamp(0.5, 0.99)
 }
 
 /// 调LLM精炼，原地update目标记忆（id不变，保留relations）
@@ -399,5 +401,100 @@ mod tests {
         assert!(tier_priority("core") > tier_priority("working"));
         assert!(tier_priority("working") > tier_priority("peripheral"));
         assert_eq!(tier_priority("peripheral"), tier_priority("unknown"));
+    }
+
+    #[test]
+    fn test_clamp_threshold() {
+        assert!((clamp_threshold(None) - 0.72).abs() < 1e-6, "缺省 0.72");
+        assert!((clamp_threshold(Some("0.8")) - 0.8).abs() < 1e-6, "合法值原样过");
+        assert!((clamp_threshold(Some("0.1")) - 0.5).abs() < 1e-6, "低于 0.5 夹到 0.5");
+        assert!((clamp_threshold(Some("1.5")) - 0.99).abs() < 1e-6, "高于 0.99 夹到 0.99");
+        assert!((clamp_threshold(Some("garbage")) - 0.72).abs() < 1e-6, "垃圾输入回默认");
+    }
+
+    mod cross_session {
+        use super::super::*;
+        use crate::domain::memory::Memory;
+        use crate::domain::relation::{MemoryRelation, RelationType};
+        use crate::domain::category::Category;
+        use crate::domain::types::MemoryType;
+        use tempfile::TempDir;
+
+        async fn setup() -> (LanceStore, TempDir) {
+            let dir = TempDir::new().expect("temp dir");
+            let store = LanceStore::new(dir.path().to_str().expect("path"))
+                .await
+                .expect("store");
+            store.init_table().await.expect("init");
+            (store, dir)
+        }
+
+        fn work_memory(content: &str, project_path: &str, session_id: &str) -> Memory {
+            let mut m = Memory::new(content, Category::new("events"), MemoryType::Pinned, "t");
+            m.source = Some("session_ingest".to_string());
+            m.session_id = Some(session_id.to_string());
+            m.project_path = Some(project_path.to_string());
+            m
+        }
+
+        /// e1=基准轴,query 同向 → cosine 1.0;正交记忆 → 0.0,过不了任何阈值
+        fn unit_vec(first: f32) -> Vec<f32> {
+            let mut v = vec![0.0f32; 1024];
+            v[0] = first;
+            v
+        }
+
+        #[tokio::test]
+        async fn hits_same_project_work_and_walks_to_tail() {
+            let (store, _dir) = setup().await;
+            // 旧链:head ← ContinuedBy ← tail(query 同向,语义同话题)
+            let head = work_memory("old head", "/proj", "session-old-1");
+            let mut tail = work_memory("old tail", "/proj", "session-old-2");
+            tail.relations = vec![MemoryRelation {
+                relation_type: RelationType::Continues,
+                target_id: head.id.clone(),
+                context_label: Some("auto-split on overflow".to_string()),
+            }];
+            store.create(&head, Some(&unit_vec(0.0))).await.expect("create head");
+            store.create(&tail, Some(&unit_vec(1.0))).await.expect("create tail");
+
+            let got = find_cross_session_work_tail(&store, &unit_vec(1.0), "/proj", 0.72)
+                .await
+                .expect("lookup");
+            let (m, score) = got.expect("should hit");
+            assert_eq!(m.id, tail.id, "应返回链尾而非链头");
+            assert!(score >= 0.72, "cosine 应过阈值: {score}");
+        }
+
+        #[tokio::test]
+        async fn misses_other_project() {
+            let (store, _dir) = setup().await;
+            let other = work_memory("other project memory", "/nf", "session-old-1");
+            store.create(&other, Some(&unit_vec(1.0))).await.expect("create");
+
+            let got = find_cross_session_work_tail(&store, &unit_vec(1.0), "/omem", 0.72)
+                .await
+                .expect("lookup");
+            assert!(got.is_none(), "跨项目不应命中");
+        }
+
+        #[tokio::test]
+        async fn skips_private_and_non_ingest_sources() {
+            let (store, _dir) = setup().await;
+            // private:visibility 旁路能进候选,内存过滤必须拦下
+            let mut private = work_memory("private memory", "/proj", "session-old-1");
+            private.scope = "private".to_string();
+            private.visibility = "private".to_string();
+            store.create(&private, Some(&unit_vec(1.0))).await.expect("create private");
+            // 非 session_ingest 源:手动建的记忆不参与大事记缝合
+            let mut manual = work_memory("manual memory", "/proj", "session-old-2");
+            manual.source = Some("web-create".to_string());
+            store.create(&manual, Some(&unit_vec(1.0))).await.expect("create manual");
+
+            let got = find_cross_session_work_tail(&store, &unit_vec(1.0), "/proj", 0.5)
+                .await
+                .expect("lookup");
+            assert!(got.is_none(), "private 与非 ingest 源都不该命中");
+        }
     }
 }

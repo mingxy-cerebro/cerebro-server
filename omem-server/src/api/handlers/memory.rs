@@ -2342,6 +2342,70 @@ pub async fn session_ingest(
                             }
                         }
                     }
+                    // ── 刀3(docs/memory-dedup SPEC):跨 session 向量防线──
+                    // 同 session 段头匹配全 miss 后、新建前的最后一道:同项目内
+                    // 语义级 cosine 检索,LLM 给旧话题起新名也认得出,追加进旧链尾。
+                    // 默认关,OMEM_DEDUP_MERGE=1 启用;阈值 OMEM_DEDUP_COSINE(默认0.72)。
+                    if !appended && crate::ingest::refine_service::dedup_merge_enabled() {
+                        if let (Some(query_vec), Some(pp)) = (vectors.get(i), project_path.as_deref()) {
+                            let hit = crate::ingest::refine_service::find_cross_session_work_tail(
+                                &store,
+                                query_vec,
+                                pp,
+                                crate::ingest::refine_service::dedup_cosine_threshold(),
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(error = %e, "session_ingest: cross-session dedup lookup failed, creating new");
+                                None
+                            });
+                            if let Some((tail, score)) = hit {
+                                if has_section_for_topic(&tail.content, &topic.topic) || tail.content.contains(&section_body) {
+                                    tracing::info!(
+                                        tail_id = %tail.id,
+                                        topic = %topic.topic,
+                                        "session_ingest: cross-session hit but section already exists, skipping"
+                                    );
+                                } else {
+                                    let new_content = format!("{}\n\n{}\n{}", tail.content, section_header, section_body);
+                                    if new_content.chars().count() <= 3000 {
+                                        let mut t = tail.clone();
+                                        apply_append(&mut t, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                                        match store.update(&t, None).await {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    tail_id = %t.id,
+                                                    score = score,
+                                                    topic = %topic.topic,
+                                                    "session_ingest: cross-session append merged into chain tail"
+                                                );
+                                                refined_texts.push(new_content.clone());
+                                                existing_work_memory = Some(t);
+                                                appended = true;
+                                            }
+                                            Err(e) => tracing::warn!(error = %e, "session_ingest: failed to append cross-session tail"),
+                                        }
+                                    } else {
+                                        let new_section = format!("{}\n{}", section_header, section_body);
+                                        if let Some((child_id, child)) = create_continuation(&tail, new_section.clone(), &state, &store).await {
+                                            add_continued_by_relation(&store, &tail.id, &child_id, "WORK").await;
+                                            tracing::info!(
+                                                tail_id = %tail.id,
+                                                child_id = %child_id,
+                                                score = score,
+                                                topic = %topic.topic,
+                                                "session_ingest: cross-session append overflowed, continuation created"
+                                            );
+                                            refined_texts.push(new_section);
+                                            existing_work_memory = Some(child);
+                                            appended = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if !appended {
                         if work_original_parent_id.is_none() {
                             work_original_parent_id = existing_work_memory.as_ref().map(|m| m.id.clone());
