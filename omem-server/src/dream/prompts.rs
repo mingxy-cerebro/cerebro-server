@@ -8,7 +8,7 @@ const DREAM_SYSTEM_PROMPT: &str = "\
 职责:
 1. 去重合并:多条语义重复的旧条目合并为一条,source=merged
 2. 证据更新:旧条目断言被新证据推翻或修订时,更新其内容,source=updated
-3. 新知挖掘:session 中含未落档的持久事实,挖出为新条目,source=added,type 由你归类(user/feedback/project/reference 四选一)
+3. 新知挖掘:session 中含未落档的持久事实,挖出为新条目,source=added,type 由你归类(user/feedback/project/reference 四选一)。铁律:added 的 name 禁与旧档任何条目 name 相同;旧条目内容有变更必须走 updated/merged,严禁把旧条目重写后以 added 重新输出
 4. 原样保留:未受影响的旧条目仅输出 {\"name\":\"...\",\"source\":\"kept\"} 两字段(name 必须与源档逐字一致),其余字段一律省略——调用方会从旧档原样补全
 5. 淘汰:旧档中过时、无价值的条目不进入 entries
 6. type 透传:旧档条目的 frontmatter type 原样保留;无 type 的旧条目和新挖条目由你归类四选一
@@ -24,6 +24,7 @@ const DREAM_SYSTEM_PROMPT: &str = "\
 - stats.total 必须 == entries 数量
 - merged + updated + added + kept 条数 == total
 - dropped = 旧档中被淘汰的条目数
+- 逐条核对:每个 added 条目的 name 都不与旧档任何条目 name 相同(撞名=你把旧条目误当新知,改走 updated 或删除该条目)
 - 输出语言跟随记忆档主体语言(中文档输出中文)";
 
 pub fn build_dream_prompt(req: &DreamRequest) -> (String, String) {
@@ -84,5 +85,12 @@ mod tests {
         assert!(system.contains("user|feedback|project|reference"));
         assert!(system.contains("透传"));
         assert!(system.contains("kept 的条目只输出"));
+    }
+
+    #[test]
+    fn system_prompt_forbids_added_name_collision() {
+        // issue #4:added 禁撞旧档 name,重写癖必须在 prompt 层先拦一道
+        let (system, _) = build_dream_prompt(&sample_req());
+        assert!(system.contains("added 的 name 禁与旧档"));
     }
 }

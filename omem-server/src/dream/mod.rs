@@ -147,6 +147,7 @@ pub async fn run_dream(llm: &dyn LlmService, req: &DreamRequest) -> Result<Dream
     let mut result: DreamResult = complete_json(llm, &system, &user)
         .await
         .map_err(|e| OmemError::Llm(format!("dream engine failed: {e}")))?;
+    demote_conflicting_added(&mut result, &req.memory);
     reconcile_stats(&mut result);
     Ok(result)
 }
@@ -172,6 +173,44 @@ fn reconcile_stats(result: &mut DreamResult) {
         dropped: result.stats.dropped,
         total: result.entries.len(),
     };
+}
+
+/// 从记忆档全文提取条目 name 集合(frontmatter `name:` 行)。
+/// ponytail: 宽松行匹配,不写完整 frontmatter 解析器——正文行首偶现 `name:` 误报
+/// 的后果只是多降级一条 added(kept 保旧档原文,无损);提取不到则空集,行为不变。
+fn extract_archive_names(memory: &str) -> std::collections::HashSet<String> {
+    memory
+        .lines()
+        .filter_map(|l| {
+            let v = l.trim().strip_prefix("name:")?.trim().trim_matches('"');
+            (!v.is_empty()).then(|| v.to_string())
+        })
+        .collect()
+}
+
+/// 兜底防线(issue #4):LLM 重写癖把旧条目全文重写后错标 added,apply 会拿缩写版
+/// 覆盖手写精炼版。added 的 name 撞旧档 name 时降级为 kept——丢弃 LLM 重写内容,
+/// 调用方从旧档原样补全,与 prompt 侧约束成对(cf. 631c893 salvage「防线成对」)。
+fn demote_conflicting_added(result: &mut DreamResult, memory: &str) {
+    let archive = extract_archive_names(memory);
+    if archive.is_empty() {
+        return;
+    }
+    let mut demoted = 0usize;
+    for e in &mut result.entries {
+        if e.source == EntrySource::Added && archive.contains(&e.name) {
+            tracing::warn!(name = %e.name, "dream_added_collides_with_archive_demoted_to_kept");
+            e.source = EntrySource::Kept;
+            e.description.clear();
+            e.entry_type = EntryType::default();
+            e.body.clear();
+            e.links.clear();
+            demoted += 1;
+        }
+    }
+    if demoted > 0 {
+        tracing::warn!(demoted, "dream_conflicting_added_demoted");
+    }
 }
 
 /// 内存 job 表:承载 DreamJob 生命周期,不持久化(ADR-1)。
@@ -369,6 +408,66 @@ mod tests {
         let entries: Vec<DreamEntry> =
             serde_json::from_str(r#"[{"name":"x","source":"dropped"}]"#).unwrap();
         assert_eq!(entries[0].source, EntrySource::Kept);
+    }
+
+    // ── demote_conflicting_added ─────────────────────────────────
+
+    #[test]
+    fn extract_archive_names_reads_frontmatter_names() {
+        let names = extract_archive_names(
+            "---\nname: cc-dream-truncation-fix\ntype: project\n---\nbody\n---\nname: \"quoted-name\"\n---\n",
+        );
+        assert!(names.contains("cc-dream-truncation-fix"));
+        assert!(names.contains("quoted-name"));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn demote_added_colliding_with_archive() {
+        // issue #4 现场:LLM 把旧条目错标 added 全文重写 → 降 kept,旧档 wins verbatim
+        let mut result: DreamResult = serde_json::from_str(
+            r#"{"entries":[
+                {"name":"old","description":"缩写重写","type":"user","body":"b","links":["x"],"source":"added"},
+                {"name":"fresh","description":"d","type":"user","body":"b","links":[],"source":"added"}
+            ],"stats":{"merged":0,"updated":0,"added":2,"dropped":0,"total":2}}"#,
+        )
+        .unwrap();
+        demote_conflicting_added(&mut result, "---\nname: old\n---\n旧档");
+        assert_eq!(result.entries[0].source, EntrySource::Kept);
+        assert_eq!(result.entries[0].body, "");
+        assert_eq!(result.entries[0].links, Vec::<String>::new());
+        assert_eq!(result.entries[1].source, EntrySource::Added);
+    }
+
+    #[test]
+    fn demote_skips_when_memory_has_no_frontmatter_names() {
+        let mut result: DreamResult = serde_json::from_str(
+            r#"{"entries":[{"name":"old","source":"added"}],"stats":{"merged":0,"updated":0,"added":1,"dropped":0,"total":1}}"#,
+        )
+        .unwrap();
+        demote_conflicting_added(&mut result, "# 无 frontmatter 记忆档");
+        assert_eq!(result.entries[0].source, EntrySource::Added);
+    }
+
+    #[tokio::test]
+    async fn run_dream_demotes_and_reconciles_stats() {
+        // 端到端:added 撞旧档名 → 降 kept,stats 按 entries 重算
+        let req = DreamRequest {
+            memory: "---\nname: a\n---\n旧档".to_string(),
+            sessions: vec!["session1".to_string()],
+            since: None,
+        };
+        let llm = FakeLlm {
+            response: r#"{"entries":[
+                {"name":"a","description":"缩写","type":"user","body":"b","links":[],"source":"added"}
+            ],"stats":{"merged":0,"updated":0,"added":1,"dropped":0,"total":1}}"#
+                .to_string(),
+            fail: false,
+        };
+        let r = run_dream(&llm, &req).await.unwrap();
+        assert_eq!(r.entries[0].source, EntrySource::Kept);
+        assert_eq!(r.stats.added, 0);
+        assert_eq!(r.stats.total, 1);
     }
 
     // ── validate_request ─────────────────────────────────────────
