@@ -1801,7 +1801,9 @@ pub async fn session_ingest(
                 memory.project_path = None;
             }
 
-            let apply_append = |mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String], topic_title: &str, topic_overview: Option<&str>, topic_detail: Option<&str>| {
+            /// Shared in-place append mutator (zero-capture: was a closure, now a fn so
+            /// append_cross_session_tail below can call it too).
+            fn apply_append(mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String], topic_title: &str, topic_overview: Option<&str>, topic_detail: Option<&str>) {
                 mem.content = new_content.to_string();
                 // Preserve the latest topic title (with project prefix) as l0_abstract
                 mem.l0_abstract = topic_title.to_string();
@@ -1833,7 +1835,7 @@ pub async fn session_ingest(
                 }
                 // cap monotonic tag growth across appends; tail = newest added
                 mem.tags.truncate(8);
-            };
+            }
 
             /// Find the best split point in content so that the first half ≤ max_chars.
             /// Prefers splitting at `## ` heading boundaries; falls back to char-based split.
@@ -2104,6 +2106,81 @@ pub async fn session_ingest(
                 Some((child_id, child))
             }
 
+            /// 刀3 追加到跨 session 链尾,带乐观锁重读(P1,玄机审 2026-08-21):tail 是
+            /// 别的 session 的共享资源,per-session lock 护不到,双写整行覆盖会永久
+            /// 丢段。写前重读,不一致用 fresh 版重走检查+构造;毫秒窗口内二次相撞
+            /// (概率≈0)以日志可追溯收场。返回 Some(链尾现持条目)=已处理(写入或
+            /// 确认已存在),None=写失败走新建兜底。
+            async fn append_cross_session_tail(
+                tail: &crate::domain::memory::Memory,
+                section_header: &str,
+                section_body: &str,
+                topic: &SessionTopicSummary,
+                score: f32,
+                state: &crate::api::server::AppState,
+                store: &crate::store::lancedb::LanceStore,
+            ) -> Option<crate::domain::memory::Memory> {
+                let mut base = tail.clone();
+                match store.get_by_id(&tail.id).await {
+                    Ok(Some(fresh)) if fresh.content != tail.content => {
+                        if has_section_for_topic(&fresh.content, &topic.topic) || fresh.content.contains(section_body) {
+                            tracing::info!(
+                                tail_id = %fresh.id,
+                                "session_ingest: cross-session tail got the section concurrently, treating as recorded"
+                            );
+                            return Some(fresh);
+                        }
+                        base = fresh;
+                    }
+                    _ => {}
+                }
+                // P2(玄机审):段/正文已在旧链——内容已记录,视为完成而非落到新建
+                if has_section_for_topic(&base.content, &topic.topic) || base.content.contains(section_body) {
+                    tracing::info!(
+                        tail_id = %base.id,
+                        topic = %topic.topic,
+                        "session_ingest: cross-session hit but section already exists, treating as recorded"
+                    );
+                    return Some(base);
+                }
+                let new_content = format!("{}\n\n{}\n{}", base.content, section_header, section_body);
+                if new_content.chars().count() <= 3000 {
+                    let mut t = base.clone();
+                    apply_append(&mut t, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                    match store.update(&t, None).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                tail_id = %t.id,
+                                score = score,
+                                topic = %topic.topic,
+                                "session_ingest: cross-session append merged into chain tail"
+                            );
+                            Some(t)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "session_ingest: failed to append cross-session tail");
+                            None
+                        }
+                    }
+                } else {
+                    let new_section = format!("{}\n{}", section_header, section_body);
+                    match create_continuation(&base, new_section, state, store).await {
+                        Some((child_id, child)) => {
+                            add_continued_by_relation(store, &base.id, &child_id, "WORK").await;
+                            tracing::info!(
+                                tail_id = %base.id,
+                                child_id = %child_id,
+                                score = score,
+                                topic = %topic.topic,
+                                "session_ingest: cross-session append overflowed, continuation created"
+                            );
+                            Some(child)
+                        }
+                        None => None,
+                    }
+                }
+            }
+
             if memory_type == "EMOTIONAL" {
                 let today = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap()).format("%Y-%m-%d %H:%M").to_string();
                 let append_section = format!("\n\n## {} {}\n{}", today, topic.topic, summary);
@@ -2346,6 +2423,8 @@ pub async fn session_ingest(
                     // 同 session 段头匹配全 miss 后、新建前的最后一道:同项目内
                     // 语义级 cosine 检索,LLM 给旧话题起新名也认得出,追加进旧链尾。
                     // 默认关,OMEM_DEDUP_MERGE=1 启用;阈值 OMEM_DEDUP_COSINE(默认0.72)。
+                    // 追加细节(乐观锁防并发丢段/段已存在视为完成)收在
+                    // append_cross_session_tail 里。
                     if !appended && crate::ingest::refine_service::dedup_merge_enabled() {
                         if let (Some(query_vec), Some(pp)) = (vectors.get(i), project_path.as_deref()) {
                             let hit = crate::ingest::refine_service::find_cross_session_work_tail(
@@ -2360,47 +2439,14 @@ pub async fn session_ingest(
                                 None
                             });
                             if let Some((tail, score)) = hit {
-                                if has_section_for_topic(&tail.content, &topic.topic) || tail.content.contains(&section_body) {
-                                    tracing::info!(
-                                        tail_id = %tail.id,
-                                        topic = %topic.topic,
-                                        "session_ingest: cross-session hit but section already exists, skipping"
-                                    );
-                                } else {
-                                    let new_content = format!("{}\n\n{}\n{}", tail.content, section_header, section_body);
-                                    if new_content.chars().count() <= 3000 {
-                                        let mut t = tail.clone();
-                                        apply_append(&mut t, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
-                                        match store.update(&t, None).await {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    tail_id = %t.id,
-                                                    score = score,
-                                                    topic = %topic.topic,
-                                                    "session_ingest: cross-session append merged into chain tail"
-                                                );
-                                                refined_texts.push(new_content.clone());
-                                                existing_work_memory = Some(t);
-                                                appended = true;
-                                            }
-                                            Err(e) => tracing::warn!(error = %e, "session_ingest: failed to append cross-session tail"),
-                                        }
-                                    } else {
-                                        let new_section = format!("{}\n{}", section_header, section_body);
-                                        if let Some((child_id, child)) = create_continuation(&tail, new_section.clone(), &state, &store).await {
-                                            add_continued_by_relation(&store, &tail.id, &child_id, "WORK").await;
-                                            tracing::info!(
-                                                tail_id = %tail.id,
-                                                child_id = %child_id,
-                                                score = score,
-                                                topic = %topic.topic,
-                                                "session_ingest: cross-session append overflowed, continuation created"
-                                            );
-                                            refined_texts.push(new_section);
-                                            existing_work_memory = Some(child);
-                                            appended = true;
-                                        }
-                                    }
+                                if let Some(result) = append_cross_session_tail(
+                                    &tail, &section_header, &section_body, topic, score, &state, &store,
+                                )
+                                .await
+                                {
+                                    refined_texts.push(result.content.clone());
+                                    existing_work_memory = Some(result);
+                                    appended = true;
                                 }
                             }
                         }

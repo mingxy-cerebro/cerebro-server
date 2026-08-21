@@ -83,10 +83,12 @@ async function buildInjection(client, projectPath, query, config, injectionCfg) 
       ? di.digestPrompt.trim()
       : "Digest mode: memory entries above are one-line summaries (id + title). When an entry matters to the task, call the memory_get tool with its id to load the full content.";
   const renderLine = (age, m, truncateChars = 0) => {
+    if (!m) return "";
     const content = truncateChars > 0 ? truncateAtBoundary(m.content, truncateChars) : m.content;
     if (!digestMode) return `- (${age}) ${content}`;
-    const l0 = (m.l0_abstract || "").trim();
-    const l1 = (m.l1_overview || "").trim();
+    // l0/l1 过 \s+→" ":l1 源自 content 截断带换行,断行可伪造注入条目行
+    const l0 = (m.l0_abstract || "").replace(/\s+/g, " ").trim();
+    const l1 = (m.l1_overview || "").replace(/\s+/g, " ").trim();
     const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
     return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
   };

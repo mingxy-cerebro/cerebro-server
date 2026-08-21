@@ -291,11 +291,13 @@ export async function buildMemoryInjection(
     typeof ic.digestPrompt === "string" && ic.digestPrompt.trim()
       ? ic.digestPrompt.trim()
       : DEFAULTS.injection.digestPrompt!;
-  const renderLine = (age: string, m: { id: string; content: string; l0_abstract?: string; l1_overview?: string }, truncateChars = 0): string => {
+  const renderLine = (age: string, m: { id: string; content: string; l0_abstract?: string; l1_overview?: string } | null | undefined, truncateChars = 0): string => {
+    if (!m) return "";
     const content = truncateChars > 0 ? truncate(m.content, truncateChars) : m.content;
     if (!digestMode) return `- (${age}) ${content}`;
-    const l0 = (m.l0_abstract || "").trim();
-    const l1 = (m.l1_overview || "").trim();
+    // l0/l1 过 \s+→" ":l1 源自 content 截断带换行,断行可伪造注入条目行
+    const l0 = (m.l0_abstract || "").replace(/\s+/g, " ").trim();
+    const l1 = (m.l1_overview || "").replace(/\s+/g, " ").trim();
     const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
     return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
   };

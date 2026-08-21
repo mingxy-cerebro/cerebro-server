@@ -732,9 +732,11 @@ export async function buildMemoryInjection(query, projectPath, options = {}) {
       : DEFAULT_DIGEST_PROMPT;
   // digestMode 条目渲染:id+l0+l1 一行,主动 search 仍全文(不对称是原则)
   const renderLine = (age, m) => {
+    if (!m) return "";
     if (!digestMode) return `- (${age}) ${m.content || ""}`;
-    const l0 = (m.l0_abstract || "").trim();
-    const l1 = (m.l1_overview || "").trim();
+    // l0/l1 过 \s+→" ":l1 源自 content 截断带换行,断行可伪造注入条目行
+    const l0 = (m.l0_abstract || "").replace(/\s+/g, " ").trim();
+    const l1 = (m.l1_overview || "").replace(/\s+/g, " ").trim();
     const title = l0 || (m.content || "").replace(/\s+/g, " ").slice(0, 60);
     return `- (${age}) id=${m.id} ${title}${l1 ? ` — ${l1}` : ""}`;
   };
