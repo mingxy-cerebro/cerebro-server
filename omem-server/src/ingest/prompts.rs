@@ -771,7 +771,7 @@ When in doubt about classification:
 - **TIMELINE**: For merged WORK entries, present sub-topics in chronological order. The system automatically prepends `## timestamp topic` headers when storing — you MUST NOT write `## ` level headings in any output field. Use `### Title` sub-headings inside `summary`/`detail` instead.
 - **L1 COVERAGE (MANDATORY)**: `overview` (L1) MUST cover ALL topics in this entry, not just the latest section. When merging or updating, extend the existing arrow timeline to include the new topic. Format: `old_topic→old_topic→new_topic→result`. NEVER overwrite L1 with only the newest section's timeline — the previous topics must remain in the arrow chain. Same rule applies to `l2_content`: must aggregate key facts from ALL sections.
 - **TAG**: Include project name + sub-topic as tags from the ALLOWED_TAGS list (e.g., "programming", "architecture").
-- **TOPIC REUSE (CRITICAL)**: "## Existing Memories" lists the topics already captured for this session as a plain list (heading syntax stripped). Before outputting any topic, scan that list. If your candidate covers the SAME subject as any listed topic — match by MEANING, wording may differ — you MUST copy that listed topic string VERBATIM as your `topic` field. NEVER paraphrase, reword, shorten, or invent a synonym: a reworded topic creates a duplicate section. Only create a new title when NO listed topic matches by meaning. The `topic` field MUST be a single-line plain title — never start it with "#" and never embed line breaks.
+- **TOPIC REUSE (CRITICAL)**: "## Existing Memories" lists the topics already captured for this session as a plain list (heading syntax stripped). Before outputting any topic, scan that list. If your candidate covers the SAME subject as any listed topic — match by MEANING, wording may differ — you MUST copy that listed topic string VERBATIM as your `topic` field. NEVER paraphrase, reword, shorten, or invent a synonym: a reworded topic creates a duplicate section. Facets of one campaign count as the SAME subject: the decisions, fixes, deployment, or verification of the same feature/issue all reuse that campaign's existing topic — put the facet in the section body, not the title. Only create a new title when NO listed topic matches by meaning. The `topic` field MUST be a single-line plain title — never start it with "#" and never embed line breaks.
 
 **WORK OUTPUT FORMAT (MANDATORY — all three layers must use this structure)**:
 For WORK memories, l0_abstract, l1_overview, and l2_content MUST all use this structured Markdown format:
@@ -939,6 +939,8 @@ mod session_extract_tests {
     fn test_system_prompt_has_topic_reuse_rule() {
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("TOPIC REUSE"));
         assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("VERBATIM"));
+        // 同一战役侧面（决策/修复/部署/验收）也算同主题，防 d5fa3735 式侧面裂段
+        assert!(SESSION_EXTRACT_SYSTEM_PROMPT.contains("Facets of one campaign"));
     }
 
     #[test]

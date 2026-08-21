@@ -1801,41 +1801,8 @@ pub async fn session_ingest(
                 memory.project_path = None;
             }
 
-            /// Shared in-place append mutator (zero-capture: was a closure, now a fn so
-            /// append_cross_session_tail below can call it too).
-            fn apply_append(mem: &mut crate::domain::memory::Memory, new_content: &str, tags: &[String], topic_title: &str, topic_overview: Option<&str>, topic_detail: Option<&str>) {
-                mem.content = new_content.to_string();
-                // Preserve the latest topic title (with project prefix) as l0_abstract
-                mem.l0_abstract = topic_title.to_string();
-                // Use overview/detail fields if provided, otherwise fallback to truncated content
-                mem.l1_overview = match topic_overview {
-                    Some(o) if !o.is_empty() => o.to_string(),
-                    _ => {
-                        if new_content.chars().count() <= 150 {
-                            new_content.to_string()
-                        } else {
-                            format!("{}...", new_content.chars().take(147).collect::<String>())
-                        }
-                    }
-                };
-                mem.l2_content = match topic_detail {
-                    Some(d) if !d.is_empty() => d.to_string(),
-                    _ => {
-                        if new_content.chars().count() <= 500 {
-                            new_content.to_string()
-                        } else {
-                            format!("{}...", new_content.chars().take(497).collect::<String>())
-                        }
-                    }
-                };
-                for tag in tags {
-                    if !mem.tags.contains(tag) {
-                        mem.tags.push(tag.clone());
-                    }
-                }
-                // cap monotonic tag growth across appends; tail = newest added
-                mem.tags.truncate(8);
-            }
+            // apply_append moved to module level (next to has_section_for_topic) so it
+            // is unit-testable — l0 preservation lives there.
 
             /// Find the best split point in content so that the first half ≤ max_chars.
             /// Prefers splitting at `## ` heading boundaries; falls back to char-based split.
@@ -2146,7 +2113,7 @@ pub async fn session_ingest(
                 let new_content = format!("{}\n\n{}\n{}", base.content, section_header, section_body);
                 if new_content.chars().count() <= 3000 {
                     let mut t = base.clone();
-                    apply_append(&mut t, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                    apply_append(&mut t, &new_content, &topic.tags, topic.overview.as_deref(), topic.detail.as_deref());
                     match store.update(&t, None).await {
                         Ok(()) => {
                             tracing::info!(
@@ -2216,7 +2183,7 @@ pub async fn session_ingest(
                     } else {
                         let new_content = format!("{}{}", existing.content, append_section);
                         if new_content.chars().count() <= 3000 {
-                            apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                            apply_append(&mut existing, &new_content, &topic.tags, topic.overview.as_deref(), topic.detail.as_deref());
                             if let Err(e) = store.update(&existing, None).await {
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing emotional memory");
                             } else {
@@ -2256,7 +2223,7 @@ pub async fn session_ingest(
                             }
                             let new_content = format!("{}{}", mem.content, append_section);
                             if new_content.chars().count() <= 3000 {
-                                apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                                apply_append(&mut mem, &new_content, &topic.tags, topic.overview.as_deref(), topic.detail.as_deref());
                                 if let Err(e) = store.update(&mem, None).await {
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback emotional memory");
                                     continue;
@@ -2337,7 +2304,7 @@ pub async fn session_ingest(
                             }
                         };
                         if new_content.chars().count() <= 3000 {
-                            apply_append(&mut existing, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                            apply_append(&mut existing, &new_content, &topic.tags, topic.overview.as_deref(), topic.detail.as_deref());
                             if let Err(e) = store.update(&existing, None).await {
                                 tracing::warn!(error = %e, "session_ingest: failed to append to existing WORK memory");
                             } else {
@@ -2391,7 +2358,7 @@ pub async fn session_ingest(
                             }
                             let new_content = format!("{}\n\n{}\n{}", mem.content, section_header, section_body);
                             if new_content.chars().count() <= 3000 {
-                                apply_append(&mut mem, &new_content, &topic.tags, &topic.topic, topic.overview.as_deref(), topic.detail.as_deref());
+                                apply_append(&mut mem, &new_content, &topic.tags, topic.overview.as_deref(), topic.detail.as_deref());
                                 if let Err(e) = store.update(&mem, None).await {
                                     tracing::warn!(error = %e, "session_ingest: failed to append to fallback WORK memory");
                                     continue;
@@ -2906,6 +2873,46 @@ fn build_merged_summary(memories: &[Memory]) -> String {
 /// Headers carry a date prefix ("## 2026-08-19 14:00 <topic>"), so suffix match
 /// compares the topic text itself. Exact match only — no fuzzy, 宁漏勿误杀.
 /// An empty topic never matches (it would match every header).
+/// Shared in-place append mutator for session_ingest (WORK/EMOTIONAL chains,
+/// cross-session tails). Was a closure, then a nested fn; module level since
+/// 2026-08-21 so the L0 contract is unit-testable.
+///
+/// Chain-head l0_abstract is PRESERVED on append: the head topic is the chain's
+/// identity (digest title, EMOTIONAL topic match at call sites), per-section
+/// titles live in the `## ` headers. Overwriting with the latest section title
+/// made long chains drift — digest showed the tail's subject, not the theme.
+/// l1/l2 DO take the latest overview/detail: recency beats staleness there.
+fn apply_append(mem: &mut Memory, new_content: &str, tags: &[String], topic_overview: Option<&str>, topic_detail: Option<&str>) {
+    mem.content = new_content.to_string();
+    mem.l1_overview = match topic_overview {
+        Some(o) if !o.is_empty() => o.to_string(),
+        _ => {
+            if new_content.chars().count() <= 150 {
+                new_content.to_string()
+            } else {
+                format!("{}...", new_content.chars().take(147).collect::<String>())
+            }
+        }
+    };
+    mem.l2_content = match topic_detail {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => {
+            if new_content.chars().count() <= 500 {
+                new_content.to_string()
+            } else {
+                format!("{}...", new_content.chars().take(497).collect::<String>())
+            }
+        }
+    };
+    for tag in tags {
+        if !mem.tags.contains(tag) {
+            mem.tags.push(tag.clone());
+        }
+    }
+    // cap monotonic tag growth across appends; tail = newest added
+    mem.tags.truncate(8);
+}
+
 fn has_section_for_topic(content: &str, topic: &str) -> bool {
     let topic = topic.trim();
     if topic.is_empty() {
@@ -3001,6 +3008,31 @@ mod dedup_tests {
     fn section_guard_only_matches_heading_lines() {
         let content = "plain mention of fix login bug in a body line";
         assert!(!has_section_for_topic(content, "fix login bug"));
+    }
+
+    // L0 保链头：追加段不再覆写 l0_abstract（修 digest 标题漂移——链长后被末段
+    // 标题顶掉，注入显示的不是链主题）；l1/l2 维持取最新段（时效性优先）
+    #[test]
+    fn apply_append_preserves_chain_head_l0() {
+        let mut m = mem("## 2026-08-18 10:00 head-topic\nold body", "head-topic", "old overview");
+        let new_content =
+            "## 2026-08-18 10:00 head-topic\nold body\n\n## 2026-08-21 13:00 tail-topic\nnew body";
+        apply_append(&mut m, new_content, &["t1".to_string()], Some("tail overview"), Some("tail detail"));
+        assert_eq!(m.l0_abstract, "head-topic", "chain-head L0 must survive appends");
+        assert_eq!(m.l1_overview, "tail overview");
+        assert_eq!(m.l2_content, "tail detail");
+        assert_eq!(m.content, new_content);
+        assert!(m.tags.contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn apply_append_l1_falls_back_to_truncated_content() {
+        let mut m = mem("old", "old-l0", "old-l1");
+        let long = "x".repeat(200);
+        apply_append(&mut m, &long, &[], None, None);
+        assert!(m.l1_overview.ends_with("..."));
+        assert_eq!(m.l1_overview.chars().count(), 150);
+        assert_eq!(m.l2_content, long, "≤500 chars: l2 = full content");
     }
 }
 
