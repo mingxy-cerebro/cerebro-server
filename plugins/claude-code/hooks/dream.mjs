@@ -133,6 +133,7 @@ export function judgeMaterial(state) {
 
 // ─── statusline badge: all state→label/color decisions live here, bash renders ─
 // off grey / run orange (zombie run >30min falls through) / fail red until TTL /
+// done·apply green (unconsumed result, stays until /apply-dream) /
 // rdy green (gates met) / accumulating `[n/2]·3h 41m` (needs n sessions + time).
 const RUN_ZOMBIE_MS = 30 * 60 * 1000; // > lock TTL 15min + poll 11min: live run can't outlive it
 function fmtRemain(ms) {
@@ -147,6 +148,8 @@ export function badgeLine() {
   const age = st?.updated_at ? Date.now() - Date.parse(st.updated_at) : Infinity;
   if (st?.phase === "run" && age < RUN_ZOMBIE_MS) return { text: "cerebro dream run", color: 208 };
   if (st?.phase === "fail" && age < conf.badge_ttl_secs * 1000) return { text: "cerebro dream fail", color: 196 };
+  // done + unconsumed stays green until /apply-dream consumes it — no TTL: the point is to nag.
+  if (st?.phase === "done" && st.consumed === false) return { text: "cerebro dream done·apply", color: 71 };
   const judge = judgeMaterial(st);
   if (judge.ok) return { text: "cerebro dream rdy", color: 71 };
   const rem = fmtRemain(judge.remaining_ms);
@@ -154,17 +157,17 @@ export function badgeLine() {
 }
 
 // ─── detached main: trigger + poll + persist ─────────────────────────────────
-export async function runDream() {
+export async function runDream({ force = false } = {}) {
   if (!config.apiKey) return;
   if (!readDreamConfig().enabled) { logDebug("dream: disabled by config"); return; }
   if (!acquireLock()) { logDebug("dream: lock held, another window is dreaming"); return; }
   try {
     const prev = readState();
     const judge = judgeMaterial(prev);
-    if (!judge.ok) { logDebug(`dream: not enough material (new=${judge.count})`); return; }
+    if (!judge.ok && !force) { logDebug(`dream: not enough material (new=${judge.count})`); return; }
 
     const memory = collectMemory();
-    const trans = listTranscripts().filter((t) => !judge.since || t.mtime > Date.parse(judge.since));
+    const trans = listTranscripts().filter((t) => force || !judge.since || t.mtime > Date.parse(judge.since));
     const sessions = [];
     let bytes = memory.length;
     for (const t of trans) { // newest first; drop oldest by simply stopping
@@ -184,7 +187,7 @@ export async function runDream() {
       resp = await fetch(`${config.apiUrl}/v1/dreams`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": config.apiKey },
-        body: JSON.stringify({ memory, sessions, since: judge.since }),
+        body: JSON.stringify({ memory, sessions, since: force ? null : judge.since }),
         signal: AbortSignal.timeout(30_000),
       });
     } catch (e) {
@@ -229,7 +232,10 @@ export async function runDream() {
         return;
       }
     }
-    writeState({ phase: "fail", job_id: id, error: "poll budget exhausted", updated_at: new Date().toISOString(), last_dream_at: st.started_at, consumed: true });
+    // Transient tiers (POST errors, poll exhausted) keep last_dream_at so the next
+    // timer retries on fresh material; only a server-side "failed" verdict advances
+    // it (retry-storm guard). Orphan recovery still picks up a late completion.
+    writeState({ phase: "fail", job_id: id, error: "poll budget exhausted", updated_at: new Date().toISOString(), last_dream_at: prev?.last_dream_at || null, consumed: true });
     logError("dream: poll budget exhausted");
   } finally {
     releaseLock();
@@ -266,6 +272,7 @@ export async function fetchOrphanResult(st) {
 // ─── direct CLI entry (detached worker) ──────────────────────────────────────
 if (process.argv[1] && basename(process.argv[1]) === "dream.mjs") {
   if (process.argv[2] === "--badge") { console.log(JSON.stringify(badgeLine())); process.exit(0); }
+  if (process.argv[2] === "--now") { await runDream({ force: true }); process.exit(0); } // manual: skip gates, still lock+switch guarded
   if (!existsSync(LOCK) && judgeMaterial(readState()).ok) {
     await runDream();
   }
