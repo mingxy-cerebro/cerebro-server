@@ -83,7 +83,12 @@ function serveFile(res, filePath) {
 }
 
 const indexPath = path.join(WEB_DIR, "index.html");
+// Traffic timestamp — any request refreshes it; the watchdog's idle escape
+// hatch (below) uses it to survive with zero CC sessions while the UI is in use.
+let lastActivity = Date.now();
 const server = http.createServer((req, res) => {
+  lastActivity = Date.now(); // traffic = the UI is in use; feeds the idle escape hatch
+
   if (req.url === "/health" || req.url === "/health/") {
     res.writeHead(200, { ...COMMON, "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", service: "cerebro", port: PORT }));
@@ -133,9 +138,14 @@ server.listen(PORT, "127.0.0.1", () => {
 // CC main pid. Sweep on an interval, kill(pid, 0) each, sweep stale ones.
 // Zero CC sessions alive → count down the grace window → self-exit. Survives
 // killed terminals (no SessionEnd needed) — refcount bookkeeping is gone.
+// Traffic escape hatch: zcode reuses this daemon and keeps it alive by pinging
+// /health at every turn-end; an open web panel polls too. Requests mean
+// someone is using the UI — survive with zero live CC sessions until traffic
+// stops for IDLE_MS (mirrors the zcode daemon's idle semantics).
 const SESSIONS_DIR = path.join(process.env.HOME || process.env.USERPROFILE || "", ".config/cerebro/sessions");
 const GRACE_MS = parseInt(process.env.OMEM_WEB_GRACE_MS || "", 10) || 60_000;
 const WATCH_MS = parseInt(process.env.OMEM_WEB_WATCH_MS || "", 10) || 60_000;
+const IDLE_MS = parseInt(process.env.OMEM_WEB_IDLE_MS || "", 10) || 300_000;
 let zeroSince = 0; // 0 = CC alive (or unknown)
 
 setInterval(() => {
@@ -153,10 +163,10 @@ setInterval(() => {
       }
     }
   } catch {} // dir missing = no CC session ever
-  if (alive > 0) { zeroSince = 0; return; }
+  if (alive > 0 || Date.now() - lastActivity < IDLE_MS) { zeroSince = 0; return; }
   if (!zeroSince) zeroSince = Date.now();
   if (Date.now() - zeroSince >= GRACE_MS) {
-    console.log(`[cerebro web-server] no CC sessions alive for ${GRACE_MS / 1000}s, self-exiting`);
+    console.log(`[cerebro web-server] no CC sessions or traffic for ${IDLE_MS / 1000}s, self-exiting`);
     try { fs.unlinkSync(PID_FILE); } catch {}
     process.exit(0);
   }

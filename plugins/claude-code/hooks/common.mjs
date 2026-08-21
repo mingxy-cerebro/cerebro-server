@@ -283,15 +283,26 @@ export function countLiveCC() {
 // Kill a stale web-server daemon so a fresh one can bind (rebirth on every
 // session start — no version sniffing). pid verified via /proc cmdline to
 // survive pid reuse; non-Linux (no /proc) degrades to no-op.
-export function killStaleWebServer() {
+export function killStaleWebServer(port = 5212) {
+  const pids = new Set();
+  // Path 1: port occupant via ss — catches zcode's web-server.js too (it never
+  // writes our PID_FILE; left alive it starves our spawn via EADDRINUSE and the
+  // port stays with a daemon that has no .live liveness model).
   try {
-    const pid = parseInt(readFileSync(WEB_PID_FILE, "utf-8").trim(), 10);
-    if (!pid || pid === process.pid) return;
-    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
-    if (!cmdline.includes("web-server.mjs")) return; // not ours — don't touch
-    process.kill(pid, "SIGTERM");
-    setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 500).unref();
+    const out = execSync(`ss -ltnpH 'sport = :${port}'`, { timeout: 2000 }).toString();
+    for (const m of out.matchAll(/pid=(\d+)/g)) pids.add(parseInt(m[1], 10));
   } catch {}
+  // Path 2: our own PID_FILE (the .mjs daemon writes it at listen-time).
+  try { pids.add(parseInt(readFileSync(WEB_PID_FILE, "utf-8").trim(), 10)); } catch {}
+  for (const pid of pids) {
+    if (!pid || pid === process.pid || Number.isNaN(pid)) continue;
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+      if (!/web-server\.m?js/.test(cmdline)) continue; // not a cerebro web-server — don't touch
+      process.kill(pid, "SIGTERM");
+      setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 500).unref();
+    } catch {}
+  }
 }
 
 // ─── Compact result handoff (PostCompact → SessionStart:compact) ─────────────
