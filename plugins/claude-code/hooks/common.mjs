@@ -231,11 +231,28 @@ function _log(level, msg) {
 const SESSIONS_DIR = join(HOME, ".config/cerebro/sessions");
 const WEB_PID_FILE = join(HOME, ".config/cerebro/web-server.pid");
 
+// CC runs hooks through a bash wrapper — process.ppid is the wrapper, which
+// dies the moment the hook exits. Climb past shells to the CC main process;
+// non-Linux (no /proc) or unclimbable chain falls back to the old behavior.
+function ccMainPid() {
+  let pid = process.ppid;
+  for (let i = 0; i < 4 && pid > 1; i++) {
+    try {
+      const comm = readFileSync(`/proc/${pid}/comm`, "utf-8").trim();
+      if (!/^(bash|sh|dash|zsh)$/.test(comm)) return pid;
+      const m = readFileSync(`/proc/${pid}/status`, "utf-8").match(/^PPid:\s+(\d+)/m);
+      if (!m) break;
+      pid = parseInt(m[1], 10);
+    } catch { break; }
+  }
+  return process.ppid;
+}
+
 export function writeLive(sid) {
   if (!sid) return;
   try {
     mkdirSync(SESSIONS_DIR, { recursive: true });
-    writeFileSync(join(SESSIONS_DIR, `${sid}.live`), String(process.ppid));
+    writeFileSync(join(SESSIONS_DIR, `${sid}.live`), String(ccMainPid()));
   } catch {}
 }
 
