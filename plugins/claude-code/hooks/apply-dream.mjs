@@ -13,7 +13,7 @@
 // Usage:
 //   node apply-dream.mjs            # review diff for the unconsumed output
 //   node apply-dream.mjs --apply    # write files + rebuild MEMORY.md index lines
-import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const HOME = process.env.HOME || "/home/dongx";
@@ -64,7 +64,13 @@ try {
   if (st.output && existsSync(st.output)) archivePath = st.output;
 } catch {}
 if (!archivePath && existsSync(OUT_DIR)) {
-  const files = readdirSync(OUT_DIR).filter((f) => f.endsWith(".json")).sort();
+  // mtime, not filename order: uuid names sort alphabetically, so any d/e/f-led
+  // old archive (e.g. dcbf1050) outranks the real newest forever (e.g. 788aa534)
+  const files = readdirSync(OUT_DIR)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => ({ f, m: statSync(join(OUT_DIR, f)).mtimeMs }))
+    .sort((a, b) => a.m - b.m)
+    .map((x) => x.f);
   if (files.length) archivePath = join(OUT_DIR, files[files.length - 1]);
 }
 if (!archivePath) { console.error("apply-dream: no dream output found"); process.exit(1); }
